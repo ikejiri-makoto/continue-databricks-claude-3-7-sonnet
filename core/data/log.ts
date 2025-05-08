@@ -88,7 +88,7 @@ export class DataLogger {
         event.data,
         event.name,
         LOCAL_DEV_DATA_VERSION,
-        localSchema,
+        localSchema as any,
       );
 
       const parsed = localSchema?.safeParse(eventDataWithBaseValues);
@@ -143,7 +143,7 @@ export class DataLogger {
               event.data,
               event.name,
               schema,
-              zodSchema,
+              zodSchema as any,
             );
 
             const parsed = zodSchema.safeParse(eventDataWithBaseValues);

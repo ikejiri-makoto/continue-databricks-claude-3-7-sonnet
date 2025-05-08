@@ -464,8 +464,9 @@ void (async () => {
     ),
   );
 
+  // 非推奨のfs.rmdirSyncから推奨のfs.rmSyncに変更
   // delete esbuild/bin because platform-specific @esbuild is downloaded
-  fs.rmdirSync(`out/node_modules/esbuild/bin`, { recursive: true });
+  fs.rmSync(`out/node_modules/esbuild/bin`, { recursive: true, force: true });
 
   console.log(`[info] Copied ${NODE_MODULES_TO_COPY.join(", ")}`);
 

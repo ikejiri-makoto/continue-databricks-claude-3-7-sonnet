@@ -6,23 +6,30 @@ import { streamSse } from "../stream.js";
 class Anthropic extends BaseLLM {
   static providerName = "anthropic";
   static defaultOptions: Partial<LLMOptions> = {
-    model: "claude-3-5-sonnet-latest",
+    model: "claude-3-7-sonnet-20250219",
     contextLength: 200_000,
     completionOptions: {
-      model: "claude-3-5-sonnet-latest",
-      maxTokens: 8192,
+      model: "claude-3-7-sonnet-20250219",
+      maxTokens: 64000,        // 固定値: 64000
+      temperature: 1,           // 固定値: 1 (思考モード有効時は必須)
+      reasoning: true           // 思考モードを有効化
     },
     apiBase: "https://api.anthropic.com/v1/",
   };
 
   public convertArgs(options: CompletionOptions) {
     // should be public for use within VertexAI
+    const modelName = options.model || "claude-3-7-sonnet-20250219";
+    
+    // Claude 3.7 Sonnetを含むモデル名かどうかを確認
+    const isClaude37 = modelName.includes("claude-3-7");
+    
     const finalOptions = {
       top_k: options.topK,
       top_p: options.topP,
-      temperature: options.temperature,
-      max_tokens: options.maxTokens ?? 2048,
-      model: options.model === "claude-2" ? "claude-2.1" : options.model,
+      temperature: 1, // 固定値: 1 (thinking 有効時は必ず 1 にする必要がある)
+      max_tokens: 64000, // 固定値: 64000
+      model: options.model === "claude-2" ? "claude-2.1" : modelName,
       stop_sequences: options.stop?.filter((x) => x.trim() !== ""),
       stream: options.stream ?? true,
       tools: options.tools?.map((tool) => ({
@@ -30,12 +37,13 @@ class Anthropic extends BaseLLM {
         description: tool.function.description,
         input_schema: tool.function.parameters,
       })),
-      thinking: options.reasoning
-        ? {
-            type: "enabled",
-            budget_tokens: options.reasoningBudgetTokens,
-          }
-        : undefined,
+      // 思考モードをClaude 3.7モデルの場合のみ追加
+      ...(isClaude37 ? {
+        thinking: {
+          type: "enabled",
+          budget_tokens: 60000,
+        }
+      } : {}),
       tool_choice: options.toolChoice
         ? {
             type: "tool",
@@ -178,9 +186,19 @@ class Anthropic extends BaseLLM {
       );
     }
 
-    const systemMessage = stripImages(
+    // ステップバイステップの思考を促す指示をシステムメッセージに追加する
+    let systemMessage = stripImages(
       messages.filter((m) => m.role === "system")[0]?.content ?? "",
     );
+    
+    // システムメッセージがない場合は新しく作成し、ある場合は既存のものに追加
+    const stepByStepInstruction = "\n\n水平思考で考えて！\nステップバイステップで考えて！";
+    if (systemMessage) {
+      systemMessage += stepByStepInstruction;
+    } else {
+      systemMessage = stepByStepInstruction.trim();
+    }
+    
     const shouldCacheSystemMessage = !!(
       this.cacheBehavior?.cacheSystemMessage && systemMessage
     );

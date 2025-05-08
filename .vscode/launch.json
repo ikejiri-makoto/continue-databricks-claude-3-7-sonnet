@@ -21,7 +21,9 @@
       "preLaunchTask": "vscode-extension:build",
       "env": {
         // "CONTROL_PLANE_ENV": "local",
-        "CONTINUE_GLOBAL_DIR": "${workspaceFolder}/extensions/.continue-debug"
+        "CONTINUE_GLOBAL_DIR": "${workspaceFolder}/extensions/.continue-debug",
+        "CONTINUE_MCP_SERVER_ENABLED": "true",
+        "DEBUG_MCP_SERVER": "true"
         // "staging" for the preview deployment	        "CONTINUE_GLOBAL_DIR": "${workspaceFolder}/extensions/.continue-debug"
         // "local" for entirely local development of control plane/proxy
       }

@@ -10,7 +10,8 @@ import { renderTemplatedString } from "../../promptFiles/v1/renderTemplatedStrin
 import { DEFAULT_CHAT_SYSTEM_MESSAGE } from "../constructMessages";
 import { BaseLLM } from "../index";
 
-import Anthropic from "./Anthropic";
+import Anthropic from "./Anthropic.js";
+import Databricks from "./Databricks";
 import Asksage from "./Asksage";
 import Azure from "./Azure";
 import Bedrock from "./Bedrock";
@@ -66,6 +67,7 @@ import xAI from "./xAI";
 
 export const LLMClasses = [
   Anthropic,
+  Databricks,
   Cohere,
   FreeTrial,
   FunctionNetwork,

@@ -1,4 +1,4 @@
-# This is used in a task in .vscode/tasks.json when on windows
+﻿# This is used in a task in .vscode/tasks.json when on windows
 # Start developing with:
 # - Run Task -> Install Dependencies
 # - Debug -> Extension
@@ -35,7 +35,7 @@ if (Test-Path ".nvmrc") {
     $currentVersion = $currentNodeVersion.TrimStart('v')
 
     if ($requiredVersion -ne $currentVersion) {
-        Write-Host "`n⚠️  Warning: Your Node.js version ($currentNodeVersion) does not match the required version ($requiredNodeVersion)" -ForegroundColor Yellow
+        Write-Host "`Warning: Your Node.js version ($currentNodeVersion) does not match the required version ($requiredNodeVersion)" -ForegroundColor Yellow
         Write-Host "Please consider switching to the correct version using: nvm use" -ForegroundColor Yellow
         
         # Check if running in interactive mode
