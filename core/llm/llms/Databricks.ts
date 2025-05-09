@@ -64,7 +64,7 @@ class Databricks extends BaseLLM {
 
     // デフォルト値
     console.warn("No Databricks apiBase found in config files, using default");
-    return "https://adb-1981899174914086.6.azuredatabricks.net/serving-endpoints/databricks-claude-3-7-sonnet/invocations";
+    return "dummy-url";
   }
 
   /**
@@ -139,15 +139,14 @@ class Databricks extends BaseLLM {
       };
     }
 
-    // Claude固有のパラメータを拡張として追加
-    // これらはOpenAI標準ではないが、Databricks上のClaudeで使える
-    finalOptions.thinking = {
-      type: "enabled",
-      budget_tokens: 16000
+    // Databricks上のClaudeで使用できるパラメータをextra_bodyに追加
+    // ドキュメントに従って、thinking機能を正しく設定
+    finalOptions.extra_body = {
+      thinking: {
+        type: "enabled",
+        budget_tokens: 16000
+      }
     };
-    
-    // ステップバイステップ思考をリクエスト時に追加
-    finalOptions.step_by_step_thinking = true;
 
     return finalOptions;
   }
@@ -307,6 +306,7 @@ class Databricks extends BaseLLM {
     
     // デバッグログ
     console.log(`Sending request to Databricks API: ${apiBaseUrl}`);
+    console.log('Request body:', JSON.stringify(requestBody, null, 2));
 
     // DatabricksのエンドポイントにOpenAI形式でリクエスト
     // new URL()コンストラクタを使わず、直接URLを使用
