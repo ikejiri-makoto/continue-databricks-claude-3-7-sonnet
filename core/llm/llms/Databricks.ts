@@ -116,6 +116,12 @@ class Databricks extends BaseLLM {
       top_p: options.topP,
       stop: options.stop?.filter(x => x.trim() !== ""),
       stream: options.stream ?? true,
+      // Claude 3.7 Sonnetの拡張思考モードを直接設定
+      // extra_bodyではなくトップレベルに配置
+      thinking: {
+        type: "enabled",
+        budget_tokens: 16000
+      }
     };
 
     // ツール関連のパラメータがある場合のみ追加
@@ -138,15 +144,6 @@ class Databricks extends BaseLLM {
         }
       };
     }
-
-    // Databricks上のClaudeで使用できるパラメータをextra_bodyに追加
-    // ドキュメントに従って、thinking機能を正しく設定
-    finalOptions.extra_body = {
-      thinking: {
-        type: "enabled",
-        budget_tokens: 16000
-      }
-    };
 
     return finalOptions;
   }
@@ -289,9 +286,13 @@ class Databricks extends BaseLLM {
       throw new Error("Request not sent. Could not find Databricks API endpoint URL in your config.");
     }
 
+    // リクエストボディに必要なパラメータを構築
+    // convertArgsの結果から不要なextra_bodyを削除
+    const args = this.convertArgs(options);
+    
     // OpenAI形式のリクエストボディを構築
     const requestBody = {
-      ...this.convertArgs(options),
+      ...args,
       messages: this.convertMessages(messages),
     };
 
@@ -340,97 +341,96 @@ class Databricks extends BaseLLM {
       return;
     }
 
-    // ストリーミングレスポンスの処理
-    const reader = response.body?.getReader();
-    if (!reader) {
-      throw new Error("Failed to get response reader");
+    // ストリーミングレスポンスの処理方法の修正
+    // response.body?.getReaderの代わりにtext()メソッドを使用する
+    const responseText = await response.text();
+    
+    // 応答が空の場合は早期リターン
+    if (!responseText || responseText.trim() === "") {
+      console.warn("Empty response from Databricks API");
+      return;
     }
 
-    const decoder = new TextDecoder();
-    let buffer = "";
+    // レスポンステキストを解析して行ごとに処理
+    const lines = responseText.split("\n");
     let currentToolCall: any = null;
-
-    try {
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-
-        buffer += decoder.decode(value, { stream: true });
-        let lineEndIndex;
+    
+    for (const line of lines) {
+      // 空行またはDONEマーカーをスキップ
+      if (!line || line === "data: [DONE]") continue;
+      
+      // 'data: '接頭辞をチェック
+      const jsonStr = line.startsWith("data: ") ? line.slice(5) : line;
+      
+      try {
+        const data = JSON.parse(jsonStr);
         
-        while ((lineEndIndex = buffer.indexOf("\n")) !== -1) {
-          const line = buffer.substring(0, lineEndIndex).trim();
-          buffer = buffer.substring(lineEndIndex + 1);
-          
-          if (!line || line === "data: [DONE]") continue;
-          
-          // 'data: '接頭辞をチェック
-          const jsonStr = line.startsWith("data: ") ? line.slice(5) : line;
-          
-          try {
-            const data = JSON.parse(jsonStr);
-            
-            // チャンクデータを処理
-            const delta = data.choices[0]?.delta;
-            
-            if (!delta) continue;
-            
-            // 通常のテキストデルタ
-            if (delta.content) {
-              yield { role: "assistant", content: delta.content };
-            }
-            
-            // ツール呼び出しデルタ
-            if (delta.tool_calls && delta.tool_calls.length > 0) {
-              for (const toolCall of delta.tool_calls) {
-                if (toolCall.index === 0 && toolCall.function?.name) {
-                  currentToolCall = {
-                    id: toolCall.id || `call_${Date.now()}`,
-                    type: "function",
-                    function: {
-                      name: toolCall.function.name,
-                      arguments: ""
-                    }
-                  };
+        // チャンクデータを処理
+        const delta = data.choices?.[0]?.delta;
+        
+        if (!delta) {
+          // 完全なメッセージの場合
+          if (data.choices?.[0]?.message) {
+            yield { 
+              role: "assistant", 
+              content: data.choices[0].message.content 
+            };
+          }
+          continue;
+        }
+        
+        // 通常のテキストデルタ
+        if (delta.content) {
+          yield { role: "assistant", content: delta.content };
+        }
+        
+        // ツール呼び出しデルタ
+        if (delta.tool_calls && delta.tool_calls.length > 0) {
+          for (const toolCall of delta.tool_calls) {
+            if (toolCall.index === 0 && toolCall.function?.name) {
+              currentToolCall = {
+                id: toolCall.id || `call_${Date.now()}`,
+                type: "function",
+                function: {
+                  name: toolCall.function.name,
+                  arguments: ""
                 }
-                
-                if (currentToolCall && toolCall.function?.arguments) {
-                  currentToolCall.function.arguments += toolCall.function.arguments;
-                  
-                  yield {
-                    role: "assistant",
-                    content: "",
-                    toolCalls: [
-                      {
-                        id: currentToolCall.id,
-                        type: "function",
-                        function: {
-                          name: currentToolCall.function.name,
-                          arguments: currentToolCall.function.arguments
-                        }
-                      }
-                    ]
-                  };
-                }
-              }
-            }
-            
-            // 思考（thinking）モードのデルタ処理
-            if (data.thinking) {
-              yield {
-                role: "thinking",
-                content: data.thinking.thinking || "",
-                signature: data.thinking.signature
               };
             }
             
-          } catch (e) {
-            console.error("Error parsing SSE:", e);
+            if (currentToolCall && toolCall.function?.arguments) {
+              currentToolCall.function.arguments += toolCall.function.arguments;
+              
+              yield {
+                role: "assistant",
+                content: "",
+                toolCalls: [
+                  {
+                    id: currentToolCall.id,
+                    type: "function",
+                    function: {
+                      name: currentToolCall.function.name,
+                      arguments: currentToolCall.function.arguments
+                    }
+                  }
+                ]
+              };
+            }
           }
         }
+        
+        // 思考（thinking）モードのデルタ処理
+        if (data.thinking) {
+          yield {
+            role: "thinking",
+            content: data.thinking.thinking || "",
+            signature: data.thinking.signature
+          };
+        }
+        
+      } catch (e) {
+        console.error("Error parsing response data:", e, "Line:", line);
       }
-    } finally {
-      reader.releaseLock();
     }
   }
 }
