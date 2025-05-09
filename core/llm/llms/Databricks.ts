@@ -108,21 +108,32 @@ class Databricks extends BaseLLM {
   public convertArgs(options: CompletionOptions) {
     const modelName = options.model || "databricks-claude-3-7-sonnet";
     
+    // max_tokensのデフォルト値または指定値を取得
+    // 最小値を設定して小さすぎる値を防止（少なくとも4096）
+    const maxTokens = Math.max(options.maxTokens || 32000, 4096);
+    
+    // 思考予算を計算 - max_tokensの半分または最大16000を上限とする
+    // 常にmax_tokensよりも小さくなるようにする
+    const thinkingBudget = Math.min(Math.floor(maxTokens * 0.5), 16000);
+    
     // OpenAI互換形式のリクエストパラメータ
     const finalOptions: any = {
       model: modelName,
-      max_tokens: options.maxTokens || 100000,
+      max_tokens: maxTokens,
       temperature: options.temperature ?? 1,
       top_p: options.topP,
       stop: options.stop?.filter(x => x.trim() !== ""),
       stream: options.stream ?? true,
-      // Claude 3.7 Sonnetの拡張思考モードを直接設定
-      // extra_bodyではなくトップレベルに配置
-      thinking: {
-        type: "enabled",
-        budget_tokens: 16000
-      }
     };
+
+    // 思考モードを有効にする（max_tokensとの整合性を確保）
+    finalOptions.thinking = {
+      type: "enabled",
+      budget_tokens: thinkingBudget
+    };
+
+    // デバッグログ
+    console.log(`Token settings - max_tokens: ${maxTokens}, thinking budget: ${thinkingBudget}`);
 
     // ツール関連のパラメータがある場合のみ追加
     if (options.tools) {
@@ -287,7 +298,6 @@ class Databricks extends BaseLLM {
     }
 
     // リクエストボディに必要なパラメータを構築
-    // convertArgsの結果から不要なextra_bodyを削除
     const args = this.convertArgs(options);
     
     // OpenAI形式のリクエストボディを構築
@@ -341,7 +351,7 @@ class Databricks extends BaseLLM {
       return;
     }
 
-    // ストリーミングレスポンスの処理方法の修正
+    // ストリーミングレスポンスの処理方法
     // response.body?.getReaderの代わりにtext()メソッドを使用する
     const responseText = await response.text();
     
