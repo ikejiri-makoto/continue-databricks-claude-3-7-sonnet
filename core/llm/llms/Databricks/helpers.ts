@@ -1,6 +1,6 @@
 import { ChatMessage, CompletionOptions } from "../../../index.js";
 import { DatabricksCompletionOptions, ToolCall } from "./types/types.js";
-import { safeStringify, safeJsonParse } from "../../utils/json.js";
+import { safeStringify, safeJsonParse, isValidJson, extractValidJson } from "../../utils/json.js";
 import { isSearchTool } from "../../utils/toolUtils.js";
 
 // 定数
@@ -175,16 +175,12 @@ export class DatabricksHelpers {
    * @returns 有効なJSONの場合はtrue
    */
   static isValidJsonMessage(message: string): boolean {
-    try {
-      if (!message.trim().startsWith('{') && !message.trim().startsWith('[')) {
-        return false;
-      }
-      
-      // 共通ユーティリティを使用してJSONの検証
-      return safeJsonParse(message, null) !== null;
-    } catch (e) {
+    // 共通ユーティリティを直接使用してJSONの検証
+    if (!message.trim().startsWith('{') && !message.trim().startsWith('[')) {
       return false;
     }
+      
+    return isValidJson(message);
   }
   
   /**

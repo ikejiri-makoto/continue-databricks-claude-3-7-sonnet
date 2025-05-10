@@ -9,7 +9,7 @@
 export * from "./types";
 
 // 最も重要な型は明示的にエクスポート（IDE補完のために）
-export { 
+export type { 
   DatabricksCompletionOptions, 
   ToolCall, 
   ToolResultMessage,

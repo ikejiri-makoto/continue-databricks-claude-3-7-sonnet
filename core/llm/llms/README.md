@@ -109,130 +109,62 @@ The directory contains implementations for various LLM providers:
 
 ## Common Patterns and Best Practices
 
-### Modular Implementation Pattern
+### The Orchestrator Pattern
 
-For more complex LLM providers, follow the modular pattern of implementation:
-
-1. Create a main provider class that extends `BaseLLM` and acts as an orchestrator:
-   ```typescript
-   class ComplexProvider extends BaseLLM {
-     static providerName = "complex-provider";
-     static defaultOptions = {
-       // Default options
-     };
-     
-     // Main methods that delegate to specialized modules
-     protected async _streamComplete(...) {
-       // Coordinate between specialized modules
-     }
-     
-     protected async *_streamChat(...) {
-       // Delegate responsibilities to specialized modules
-     }
-   }
-   ```
-
-2. Create a provider-specific directory with specialized modules:
-   ```
-   Provider/
-   ├── config.ts       (Configuration management)
-   ├── errors.ts       (Error handling and retry logic)
-   ├── helpers.ts      (Common utility functions)
-   ├── messages.ts     (Message formatting and transformation)
-   ├── streaming.ts    (Streaming response processing)
-   ├── toolcalls.ts    (Tool call handling)
-   └── types/          (Type definitions)
-   ```
-
-3. Follow single responsibility principle for each module:
-   - Each module should have a clear, focused responsibility
-   - Prefer small, specialized functions over large multi-purpose ones
-   - Use clear interfaces between modules
-
-4. Use dependency injection pattern for configuration and utilities:
-   ```typescript
-   // ConfigManager handles all configuration logic
-   class ConfigManager {
-     static loadConfig() { /* ... */ }
-     static validateConfig(config) { /* ... */ }
-   }
-   
-   // ErrorHandler manages all error processing
-   class ErrorHandler {
-     static parseErrorResponse(response) { /* ... */ }
-     static handleRetry(error, retryCount) { /* ... */ }
-   }
-   ```
-
-### The Orchestrator Pattern (Example: Databricks)
-
-The Databricks implementation provides an excellent example of the orchestrator pattern:
+For complex LLM providers, the framework recommends using the orchestrator pattern to achieve clear responsibility separation. This approach has been particularly well-implemented in the Databricks integration:
 
 ```typescript
-// Databricks.ts - Main orchestrator class
+// Main orchestrator class
 class Databricks extends BaseLLM {
-  // Configuration and initialization
+  // Initialization
   constructor(options: LLMOptions) {
     super(options);
-    
-    // Delegating configuration loading to the config module
-    if (!this.apiBase) {
-      this.apiBase = DatabricksConfig.getApiBaseFromConfig();
-    }
-    if (!this.apiKey) {
-      this.apiKey = DatabricksConfig.getApiKeyFromConfig();
-    }
-    
-    // Additional configuration
-    this.alwaysLogThinking = (options as any).thinkingProcess !== false;
+    // Delegate configuration loading to specialized modules
+    // Set up initial state and options
   }
 
-  // Main entry point for streaming chat - coordinates the entire process
+  // Main API method that coordinates the entire process
   protected async *_streamChat(
     messages: ChatMessage[],
     signal: AbortSignal,
     options: DatabricksCompletionOptions,
   ): AsyncGenerator<ChatMessage> {
-    // Delegating configuration validation
+    // 1. Delegate configuration validation
     DatabricksConfig.validateApiConfig(this.apiKey, this.apiBase);
     
-    // Delegating message preprocessing
+    // 2. Delegate message preprocessing
     const processedMessages = ToolCallProcessor.preprocessToolCallsAndResults(messages);
     
-    // Retry loop for handling transient errors
-    let retryCount = 0;
+    // 3. Retry loop for handling transient errors
     while (retryCount <= MAX_RETRIES) {
       try {
-        // Process the streaming request (core functionality)
+        // 4. Process streaming request
         const result = await this.processStreamingRequest(
           processedMessages, signal, options, retryCount
         );
         
-        // Handle successful result
+        // 5. Handle successful result
         if (result.success) {
           for (const message of result.messages) {
             yield message;
           }
           break;
         } else {
-          // Handle error result with retry
+          // 6. Handle error with retry
           retryCount++;
-          const errorToPass = result.error || new Error("Unknown error");
-          
-          // Delegating retry handling to error handler module
-          await DatabricksErrorHandler.handleRetry(retryCount, errorToPass, result.state);
+          // 7. Delegate retry handling to error handler module
+          await DatabricksErrorHandler.handleRetry(retryCount, result.error, result.state);
         }
       } catch (error) {
-        // Handle unexpected errors
+        // 8. Handle unexpected errors
         retryCount++;
-        
-        // Delegating retry handling to error handler module
+        // 9. Delegate retry handling to error handler module
         await DatabricksErrorHandler.handleRetry(retryCount, error);
       }
     }
   }
 
-  // Main processing method that coordinates all specialized modules
+  // Core processing method that coordinates specialized modules
   private async processStreamingRequest(
     messages: ChatMessage[], 
     signal: AbortSignal, 
@@ -245,58 +177,47 @@ class Databricks extends BaseLLM {
     state?: any;
   }> {
     try {
-      // Delegating request parameter construction to helper module
+      // 1. Delegate request parameter construction to helper module
       const args = DatabricksHelpers.convertArgs(options);
       
-      // Delegating message conversion to message module
+      // 2. Delegate message conversion to message module
       const formattedMessages = MessageProcessor.convertToOpenAIFormat(
         messages, MessageProcessor.sanitizeMessages(messages)
       );
       
-      // Building request body
-      const requestBody = {
-        ...args,
-        messages: formattedMessages,
-      };
-
-      // Delegating URL normalization to config module
+      // 3. Delegate URL normalization to config module
       const apiBaseUrl = this.apiBase ? DatabricksConfig.normalizeApiUrl(this.apiBase) : "";
       
-      // Delegating timeout controller setup to config module
+      // 4. Delegate timeout controller setup to config module
       const { timeoutController, timeoutId, combinedSignal } = 
         DatabricksConfig.setupTimeoutController(signal, options);
 
-      // Making API request
-      const response = await this.fetch(apiBaseUrl, {
-        // Request configuration
-      });
+      // 5. Make API request
+      const response = await this.fetch(apiBaseUrl, { /* configuration */ });
 
-      // Cleaning up timeout
+      // 6. Clean up resources
       clearTimeout(timeoutId);
 
-      // Handling error responses
+      // 7. Check for error responses
       if (!response.ok) {
-        // Delegating error response parsing to error handler module
+        // 8. Delegate error response parsing to error handler module
         const errorResponse = await DatabricksErrorHandler.parseErrorResponse(response);
         return { success: false, messages: [], error: errorResponse.error };
       }
 
-      // Handling non-streaming responses
+      // 9. Handle non-streaming responses
       if (options.stream === false) {
-        // Delegating non-streaming response processing to helper module
+        // 10. Delegate non-streaming response processing to helper module
         const message = await DatabricksHelpers.processNonStreamingResponse(response);
         return { success: true, messages: [message] };
       }
 
-      // Delegating streaming response processing to streaming module
-      const streamResult = await StreamingProcessor.processStreamingResponse(
+      // 11. Delegate streaming response processing to streaming module
+      return await StreamingProcessor.processStreamingResponse(
         response, messages, retryCount, this.alwaysLogThinking
       );
-      
-      // Returning streaming result
-      return streamResult;
     } catch (error) {
-      // Building standardized error result
+      // 12. Standardized error response
       return { 
         success: false, 
         messages: [], 
@@ -307,7 +228,40 @@ class Databricks extends BaseLLM {
 }
 ```
 
-This orchestrator pattern has several benefits:
+The orchestrator pattern has the following key components:
+
+1. **Main Provider Class as Orchestrator**:
+   - Acts as a coordinator between specialized modules
+   - Delegates detailed implementation to appropriate modules
+   - Maintains high-level flow control and error handling
+   - Implements BaseLLM interface methods
+
+2. **Specialized Modules with Clear Responsibilities**:
+   - Configuration Management (`config.ts`): Handles API settings, validation, timeouts
+   - Error Handling (`errors.ts`): Processes API errors, implements retry logic
+   - Message Formatting (`messages.ts`): Converts between standard and provider-specific formats
+   - Streaming (`streaming.ts`): Processes chunked responses and manages streaming state
+   - Tool Calls (`toolcalls.ts`): Handles tool invocation and result processing
+   - Helper Utilities (`helpers.ts`): Provides shared functionality for other modules
+   - Type Definitions (`types/`): Defines interfaces and types specific to the provider
+
+3. **Directory Structure for Orchestrator Pattern**:
+   ```
+   Provider/
+   ├── Provider.ts          # Main orchestrator class
+   ├── config.ts            # Configuration management
+   ├── errors.ts            # Error handling and retry logic
+   ├── helpers.ts           # Helper functions
+   ├── messages.ts          # Message formatting and transformation
+   ├── streaming.ts         # Streaming response processing
+   ├── toolcalls.ts         # Tool call handling
+   └── types/               # Provider-specific types
+       ├── index.ts         # Type definition entry point
+       ├── types.ts         # Main type definitions
+       └── extension.d.ts   # Type extensions
+   ```
+
+### Benefits of the Orchestrator Pattern
 
 1. **Clear responsibility separation**: Each module handles a specific aspect of the process
 2. **Improved maintainability**: Changes to one aspect (e.g., error handling) can be made in one place
@@ -315,22 +269,80 @@ This orchestrator pattern has several benefits:
 4. **Better code organization**: Code is organized by responsibility rather than being mixed together
 5. **Reduced complexity**: Each method has a clear, focused purpose
 6. **Easier onboarding**: New developers can understand the system more easily
+7. **Code reuse**: Shared functionality can be used across modules
+8. **Type safety**: Well-defined interfaces between modules ensure type safety
+9. **Error recovery**: State preservation during errors is more structured
+10. **Performance optimization**: Each module can be optimized independently
+
+### Implementation Guidelines for the Orchestrator Pattern
+
+1. **Start with a clear responsibility map**:
+   - Identify distinct responsibilities in your provider
+   - Group related responsibilities into modules
+   - Define clean interfaces between modules
+
+2. **Design the main orchestrator class**:
+   - Focus on coordinating between modules, not implementation details
+   - Keep methods at a consistent abstraction level
+   - Handle top-level error management and retries
+
+3. **Implement specialized modules**:
+   - Each module should have a single clear purpose
+   - Expose a well-defined interface with proper type definitions
+   - Minimize dependencies between modules
+   - Use common utilities when possible
+
+4. **Define clear interfaces**:
+   - Create explicit interface types for module APIs
+   - Use clear parameter and return types
+   - Document interface methods with JSDoc comments
+
+5. **Manage state carefully**:
+   - Define state objects with explicit interfaces
+   - Use immutable update patterns for state changes
+   - Preserve state during error recovery
+
+### Modular Implementation Pattern
+
+For simpler providers, a single file approach might be sufficient:
+
+```typescript
+class SimpleProvider extends BaseLLM {
+  static providerName = "simple-provider";
+  static defaultOptions = {
+    // Default options
+  };
+  
+  protected async _streamComplete(...) {
+    // Implement streaming completion
+  }
+  
+  protected async *_streamChat(...) {
+    // Implement streaming chat
+  }
+}
+```
+
+This approach is suitable when:
+- The provider has straightforward API requirements
+- There's minimal need for specialized processing
+- The implementation is relatively compact
 
 ### Common Utility Usage
 
-Utilize the common utility modules from `core/llm/utils/`:
+All providers should utilize the common utility modules from `core/llm/utils/`:
 
 1. Error handling utilities:
    ```typescript
-   import { getErrorMessage, isConnectionError } from "../../utils/errors.js";
+   import { getErrorMessage, isConnectionError, isTransientError } from "../../utils/errors.js";
    
    try {
      // API call
    } catch (error: unknown) {
      const errorMessage = getErrorMessage(error);
      
-     if (isConnectionError(error)) {
-       // Handle connection error with retry
+     if (isTransientError(error)) {
+       // Handle transient error with retry
      } else {
        // Handle other error types
      }
@@ -363,7 +375,9 @@ Utilize the common utility modules from `core/llm/utils/`:
    import { processContentDelta, JsonBufferHelpers } from "../../utils/streamProcessing.js";
    
    // Handle incremental content updates
-   updatedContent = processContentDelta(currentContent, delta);
+   const processResult = processContentDelta(contentDelta, currentMessage);
+   updatedMessage = processResult.updatedMessage;
+   shouldYield = processResult.shouldYield;
    
    // Buffer JSON fragments in streaming contexts
    let buffer = JsonBufferHelpers.resetBuffer();
@@ -437,16 +451,9 @@ Ensure robust type safety in implementation:
    const newArray = [...oldArray.slice(0, index), newItem, ...oldArray.slice(index + 1)];
    ```
 
-5. Distinguish clearly between `undefined` and `null`:
-   ```typescript
-   const value: string | null = maybeUndefined !== undefined 
-     ? maybeUndefined 
-     : null;
-   ```
+### Method Design for Streaming Processors
 
-### Method Design for Complex Processors
-
-When implementing complex processing logic, follow these guidelines:
+When implementing streaming processors, follow these guidelines:
 
 1. **Method Abstraction Levels**: Maintain consistent abstraction levels within a method
    ```typescript
@@ -495,35 +502,6 @@ When implementing complex processing logic, follow these guidelines:
      state.message = this.updateMessage(state.message, chunk);
      state.shouldYield = this.shouldYieldMessage(chunk);
      return state;
-   }
-   ```
-
-4. **Error Handling**: Handle errors at appropriate levels
-   ```typescript
-   // GOOD: Error handling at appropriate level
-   async processStream(response) {
-     try {
-       for await (const chunk of this.streamChunks(response)) {
-         yield this.processChunk(chunk);
-       }
-     } catch (error) {
-       this.handleStreamError(error);
-     }
-   }
-   
-   // BAD: Too many nested try/catch blocks
-   async processStream(response) {
-     try {
-       for await (const chunk of this.streamChunks(response)) {
-         try {
-           yield this.processChunk(chunk);
-         } catch (chunkError) {
-           this.handleChunkError(chunkError);
-         }
-       }
-     } catch (streamError) {
-       this.handleStreamError(streamError);
-     }
    }
    ```
 

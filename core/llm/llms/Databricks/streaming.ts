@@ -715,13 +715,26 @@ export class StreamingProcessor {
       return; // 空の引数は無視
     }
     
+    console.log(`ツール呼び出し引数処理: ${newArgs.substring(0, 50)}${newArgs.length > 50 ? '...' : ''}`);
+    
+    // 引数が重複または不正なJSONパターンを含む場合は事前修復
+    const repairedArgs = ToolCallProcessor.repairToolArguments(newArgs);
+    const isModified = repairedArgs !== newArgs;
+    
+    if (isModified) {
+      console.log(`引数不正検出と修復:
+      元: ${newArgs.substring(0, 50)}${newArgs.length > 50 ? '...' : ''}
+      後: ${repairedArgs.substring(0, 50)}${repairedArgs.length > 50 ? '...' : ''}`);
+    }
+    
     // 引数がJSONフラグメントかどうかを判断
-    if (result.updatedIsBufferingJson || newArgs.trim().startsWith('{') || newArgs.trim().startsWith('[')) {
+    if (result.updatedIsBufferingJson || repairedArgs.trim().startsWith('{') || repairedArgs.trim().startsWith('[')) {
       // 共通ユーティリティを使用してツール引数のデルタを処理
+      // 修復された引数を使用
       const toolArgsDelta = ToolCallProcessor.processToolArgumentsDelta(
         result.updatedCurrentToolCall.function.name,
         result.updatedJsonBuffer,
-        newArgs
+        repairedArgs // 修復された引数を使用
       );
       
       result.updatedJsonBuffer = toolArgsDelta.processedArgs;
@@ -729,8 +742,26 @@ export class StreamingProcessor {
       
       // JSONが完成したかチェック
       if (toolArgsDelta.isComplete) {
-        // ツール呼び出しの引数を設定
-        result.updatedCurrentToolCall.function.arguments = result.updatedJsonBuffer;
+        try {
+          // ツール呼び出しの引数を設定
+          // 最終確認として有効なJSONか確認
+          const finalArgs = result.updatedJsonBuffer;
+          const validJson = extractValidJson(finalArgs);
+          
+          // 有効なJSONが抽出できれば使用する
+          if (validJson) {
+            result.updatedCurrentToolCall.function.arguments = validJson;
+            console.log(`最終引数チェック後の有効JSON: ${validJson.substring(0, 50)}${validJson.length > 50 ? '...' : ''}`);
+          } else {
+            // 有効なJSONが抽出できない場合はそのまま使用
+            result.updatedCurrentToolCall.function.arguments = finalArgs;
+            console.log(`最終引数チェック失敗、そのまま使用: ${finalArgs.substring(0, 50)}${finalArgs.length > 50 ? '...' : ''}`);
+          }
+        } catch (e) {
+          // エラーが発生した場合はバッファをそのまま使用
+          result.updatedCurrentToolCall.function.arguments = result.updatedJsonBuffer;
+          console.warn(`最終引数処理エラー: ${getErrorMessage(e)}`);
+        }
         
         // バッファをリセット
         result.updatedJsonBuffer = JsonBufferHelpers.resetBuffer();
@@ -760,6 +791,7 @@ export class StreamingProcessor {
             }
           } catch (e) {
             // パースエラーの場合は通常の処理を続行
+            console.warn(`検索ツール引数のパースエラー: ${getErrorMessage(e)}`);
           }
         }
       }
@@ -768,7 +800,7 @@ export class StreamingProcessor {
       result.updatedCurrentToolCall.function.arguments = processSearchToolArguments(
         result.updatedCurrentToolCall.function.name,
         result.updatedCurrentToolCall.function.arguments || "",
-        newArgs,
+        repairedArgs, // 修復された引数を使用
         messages
       );
     }

@@ -5,6 +5,7 @@ import { hasToolResultBlocksAtBeginning } from "../../utils/messageUtils.js";
 import { isSearchTool, processSearchToolArguments, formatToolResultsContent } from "../../utils/toolUtils.js";
 import { doesModelSupportTools } from "../../utils/toolUtils.js";
 import { safeJsonParse, extractValidJson, repairDuplicatedJsonPattern, isValidJson, processToolArgumentsDelta } from "../../utils/json.js";
+import { getErrorMessage } from "../../utils/errors.js";
 
 /**
  * ツール呼び出し処理クラス
@@ -205,9 +206,13 @@ export class ToolCallProcessor {
       return '{}';
     }
     
+    // デバッグログ追加
+    console.log(`引数修復開始: ${args.substring(0, 50)}${args.length > 50 ? '...' : ''}`);
+    
     // 共通ユーティリティ関数を使用して二重化パターンを修復
     const repairedArgs = repairDuplicatedJsonPattern(args);
     if (repairedArgs !== args) {
+      console.log(`二重化パターン修復: ${repairedArgs.substring(0, 50)}${repairedArgs.length > 50 ? '...' : ''}`);
       return repairedArgs;
     }
     
@@ -217,6 +222,7 @@ export class ToolCallProcessor {
       // 共通ユーティリティを使用して有効なJSONを抽出
       const validJson = extractValidJson(args);
       if (validJson) {
+        console.log(`有効なJSON抽出: ${validJson.substring(0, 50)}${validJson.length > 50 ? '...' : ''}`);
         return validJson;
       }
       
@@ -224,23 +230,50 @@ export class ToolCallProcessor {
       const doubleFilepathPattern = /\{\s*"filepath"\s*:\s*"(.*?)"\s*\{\s*"filepath"\s*:/;
       const match = args.match(doubleFilepathPattern);
       if (match && match[1]) {
-        return `{"filepath": "${match[1]}"}`;  
+        const repaired = `{"filepath": "${match[1]}"}`;
+        console.log(`二重filepathパターン修復: ${repaired}`);
+        return repaired;
+      }
+      
+      // 別の二重filepathパターン: {"filepath": "app.py"{"dirPath": "/"
+      const mixedPatternFilepath = /\{\s*"filepath"\s*:\s*"(.*?)"\s*\{\s*"dirPath"\s*:/;
+      const mixedMatch = args.match(mixedPatternFilepath);
+      if (mixedMatch && mixedMatch[1]) {
+        const repaired = `{"filepath": "${mixedMatch[1]}"}`;  
+        console.log(`混合パターン(filepath+dirPath)修復: ${repaired}`);
+        return repaired;
       }
       
       // 特定のパターンの修復: {"query": "value"{"query": "value"
       const doubleQueryPattern = /\{\s*"query"\s*:\s*"(.*?)"\s*\{\s*"query"\s*:/;
       const queryMatch = args.match(doubleQueryPattern);
       if (queryMatch && queryMatch[1]) {
-        return `{"query": "${queryMatch[1]}"}`;  
+        const repaired = `{"query": "${queryMatch[1]}"}`;  
+        console.log(`二重queryパターン修復: ${repaired}`);
+        return repaired;
+      }
+      
+      // 二重パターンに対する一般的な修復 (任意のキー)
+      const doubleKeyPattern = /\{\s*"(\w+)"\s*:\s*"([^"]+)"\s*\{\s*"\w+"\s*:/;
+      const generalMatch = args.match(doubleKeyPattern);
+      if (generalMatch && generalMatch[1] && generalMatch[2]) {
+        const repaired = `{"${generalMatch[1]}": "${generalMatch[2]}"}`;  
+        console.log(`一般的な二重キーパターン修復: ${repaired}`);
+        return repaired;
       }
     }
     
     // 共通ユーティリティを使用してJSONパースと再生成を試みる
     try {
       // 型安全なパースを行い、正規化されたJSONを返す
-      return JSON.stringify(safeJsonParse(args, {}));
+      const parsed = safeJsonParse(args, {});
+      const stringified = JSON.stringify(parsed);
+      if (stringified !== '{}' && stringified !== args) {
+        console.log(`JSON正規化: ${stringified.substring(0, 50)}${stringified.length > 50 ? '...' : ''}`);
+      }
+      return stringified;
     } catch (e) {
-      console.warn(`引数の修復に失敗しました: ${e}`);
+      console.warn(`引数の修復に失敗しました: ${getErrorMessage(e)}`);
       return args;
     }
   }
@@ -263,8 +296,27 @@ export class ToolCallProcessor {
     processedArgs: string;
     isComplete: boolean;
   } {
+    // デバッグログ追加
+    console.log(`ツール引数デルタ処理: バッファ[${jsonBuffer.length}バイト], 新規フラグメント[${newJsonFragment.length}バイト]`);
+    
+    // 入力チェック
+    if (!newJsonFragment || newJsonFragment.trim() === '') {
+      return { 
+        processedArgs: jsonBuffer, 
+        isComplete: isValidJson(jsonBuffer) 
+      };
+    }
+    
+    // 重複JSONパターンの修復を先に試行
+    const repairedNewFragment = this.repairToolArguments(newJsonFragment);
+    
     // 共通ユーティリティの関数を使用してツール引数のデルタを処理
-    const result = processToolArgumentsDelta(jsonBuffer, newJsonFragment);
+    const result = processToolArgumentsDelta(jsonBuffer, repairedNewFragment);
+    
+    // デバッグログ追加
+    if (result.isComplete) {
+      console.log(`ツール引数の処理が完了しました: ${result.processedArgs.substring(0, 50)}${result.processedArgs.length > 50 ? '...' : ''}`);
+    }
     
     // 完全なJSONになった場合、必要に応じて検索ツール用の特殊処理を行う
     if (result.isComplete && toolName && isSearchTool(toolName)) {
@@ -291,6 +343,7 @@ export class ToolCallProcessor {
         };
       } catch (e) {
         // エラーが発生した場合は元の結果を返す
+        console.warn(`検索ツール引数処理エラー: ${getErrorMessage(e)}`);
         return result;
       }
     }
