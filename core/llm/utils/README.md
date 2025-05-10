@@ -118,7 +118,12 @@ Tool-related utilities that:
 - `formatToolResultsContent(results: any): string` - Formats tool results in standardized format
 - `doesModelSupportTools(provider: string, model: string): boolean` - Checks if a model supports tool functionality
 - `isToolOfType(toolName: string, typePatterns: string[]): boolean` - Checks if a tool belongs to a specific category
-- `repairToolArguments(args: string): string` - Repairs malformed JSON in tool arguments
+- `repairToolArguments(args: string): string` - Repairs malformed JSON in tool arguments through multiple strategies
+  - Checks if the JSON is already valid
+  - Attempts to extract valid JSON from mixed content
+  - Repairs duplicated JSON patterns
+  - Fixes mismatched braces
+  - Handles other common error patterns
 - `processToolArgumentsDelta(args: string, delta: string): {processed: string, complete: boolean}` - Processes tool arguments using delta-based approach
 
 ### `typeUtils.ts`
@@ -281,55 +286,11 @@ async function withRetry<T>(
 }
 ```
 
-### Type-Safe Message Processing
-
-```typescript
-import { extractContentAsString, extractQueryContext } from "./messageUtils";
-import { ensureValidIndex } from "./typeUtils";
-
-function processMessages(messages: ChatMessage[]): { 
-  lastUserMessage: string;
-  lastAssistantMessage: string | null;
-  queryContext: string;
-} {
-  // Find indices of last user and assistant messages
-  let lastUserIndex: number | null = null;
-  let lastAssistantIndex: number | null = null;
-  
-  for (let i = messages.length - 1; i >= 0; i--) {
-    if (messages[i].role === "user" && lastUserIndex === null) {
-      lastUserIndex = i;
-    } else if (messages[i].role === "assistant" && lastAssistantIndex === null) {
-      lastAssistantIndex = i;
-    }
-    
-    if (lastUserIndex !== null && lastAssistantIndex !== null) {
-      break;
-    }
-  }
-  
-  // Extract query context from all messages
-  const queryContext = extractQueryContext(messages);
-  
-  // Safely access last user message
-  const lastUserMessage = lastUserIndex !== null 
-    ? extractContentAsString(messages[lastUserIndex].content)
-    : "";
-  
-  // Safely access last assistant message if it exists
-  const lastAssistantMessage = lastAssistantIndex !== null
-    ? extractContentAsString(messages[lastAssistantIndex].content)
-    : null;
-  
-  return { lastUserMessage, lastAssistantMessage, queryContext };
-}
-```
-
 ### Tool Call Processing and Repair
 
 ```typescript
-import { safeJsonParse, extractValidJson, repairDuplicatedJsonPattern, processToolArgumentsDelta } from "./json";
-import { isSearchTool, processSearchToolArguments, formatToolResultsContent } from "./toolUtils";
+import { safeJsonParse, extractValidJson, repairDuplicatedJsonPattern } from "./json";
+import { isSearchTool, processSearchToolArguments, formatToolResultsContent, repairToolArguments } from "./toolUtils";
 
 // Process and repair tool arguments
 function processToolArguments(args: string, toolName: string, messages: ChatMessage[]): string {
@@ -338,27 +299,8 @@ function processToolArguments(args: string, toolName: string, messages: ChatMess
     return '{}';
   }
   
-  // Try to repair broken JSON arguments
-  let repairedArgs = args;
-  
-  // First, check for duplicated JSON patterns and repair them
-  const repairResult = repairDuplicatedJsonPattern(args);
-  if (repairResult !== args) {
-    repairedArgs = repairResult;
-  }
-  
-  // Extract valid JSON from potentially broken structure
-  const validJson = extractValidJson(repairedArgs);
-  if (validJson) {
-    repairedArgs = validJson;
-  } else {
-    // Try other repair approaches for specific patterns
-    const doublePropertyPattern = /\{\s*"(\w+)"\s*:\s*"(.*?)"\s*\{\s*"\1"\s*:/;
-    const match = args.match(doublePropertyPattern);
-    if (match && match[1] && match[2]) {
-      repairedArgs = `{"${match[1]}": "${match[2]}"}`;
-    }
-  }
+  // Try to repair broken JSON arguments using the common utility
+  const repairedArgs = repairToolArguments(args);
   
   // If it's a search tool, use specialized processing
   if (isSearchTool(toolName)) {
@@ -490,6 +432,30 @@ The utility modules are designed to work well with the orchestrator pattern used
    - Stream processing follows established conventions
 
 This approach allows provider implementations to focus on their unique requirements while leveraging shared functionality for common tasks.
+
+## Recent Improvements
+
+### Centralized Tool Arguments Repair (May 2025)
+
+The `repairToolArguments` function has been added to the common utilities in `toolUtils.ts` to provide a centralized, robust solution for repairing malformed JSON in tool arguments. This function:
+
+- Checks if the JSON is already valid
+- Attempts to extract valid JSON from mixed content
+- Repairs duplicated JSON patterns
+- Fixes mismatched braces (opening and closing brackets)
+- Handles other common error patterns
+
+This enables provider modules to leverage a standardized approach for JSON repair, reducing code duplication and improving maintainability.
+
+```typescript
+// Example usage in provider modules
+import { repairToolArguments } from "../../utils/toolUtils.js";
+
+function processToolArguments(args: string): string {
+  // Use the common utility for repairing tool arguments
+  return repairToolArguments(args);
+}
+```
 
 ## Best Practices for Utility Usage
 

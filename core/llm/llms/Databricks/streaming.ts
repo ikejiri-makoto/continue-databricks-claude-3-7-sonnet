@@ -4,7 +4,14 @@ import "./types/extension.d.ts";
 
 // 共通ユーティリティのインポート
 import { getErrorMessage, isConnectionError } from "../../utils/errors.js";
-import { safeStringify, isValidJson, safeJsonParse, extractValidJson, processJsonDelta } from "../../utils/json.js";
+import { 
+  safeStringify, 
+  isValidJson, 
+  safeJsonParse, 
+  extractValidJson, 
+  processJsonDelta,
+  repairDuplicatedJsonPattern 
+} from "../../utils/json.js";
 import { extractQueryContext } from "../../utils/messageUtils.js";
 import { processContentDelta, JsonBufferHelpers } from "../../utils/streamProcessing.js";
 import { processSSEStream } from "../../utils/sseProcessing.js";
@@ -344,62 +351,67 @@ export class StreamingProcessor {
       shouldYieldMessage: false
     };
 
-    // thinking（思考）モードの処理
-    if (chunk.thinking) {
-      const thinkingChunk = this.processThinkingChunk(chunk.thinking);
-      result.thinkingMessage = thinkingChunk;
-      return result;
-    }
+    try {
+      // thinking（思考）モードの処理
+      if (chunk.thinking) {
+        const thinkingChunk = this.processThinkingChunk(chunk.thinking);
+        result.thinkingMessage = thinkingChunk;
+        return result;
+      }
 
-    // メッセージコンテンツの処理
-    if (chunk.choices?.[0]?.delta?.content) {
-      // 共通ユーティリティを使用してコンテンツデルタを処理
-      const newContent = chunk.choices[0].delta.content;
-      const processResult = this.processBufferedContent(
-        newContent,
-        currentMessage,
-        this.persistentState.contentBuffer
-      );
-      
-      result.updatedMessage = processResult.updatedMessage;
-      result.shouldYieldMessage = processResult.shouldYield;
-      
-      // 状態を更新
-      this.updatePersistentState({
-        contentBuffer: processResult.shouldYield ? "" : this.persistentState.contentBuffer + newContent
-      });
-      
-      return result;
-    }
+      // メッセージコンテンツの処理
+      if (chunk.choices?.[0]?.delta?.content) {
+        // 共通ユーティリティを使用してコンテンツデルタを処理
+        const newContent = chunk.choices[0].delta.content;
+        const processResult = this.processBufferedContent(
+          newContent,
+          currentMessage,
+          this.persistentState.contentBuffer
+        );
+        
+        result.updatedMessage = processResult.updatedMessage;
+        result.shouldYieldMessage = processResult.shouldYield;
+        
+        // 状態を更新
+        this.updatePersistentState({
+          contentBuffer: processResult.shouldYield ? "" : this.persistentState.contentBuffer + newContent
+        });
+        
+        return result;
+      }
 
-    // ツールコールの処理
-    if (chunk.choices?.[0]?.delta?.tool_calls && chunk.choices[0].delta.tool_calls.length > 0) {
-      const processResult = this.processToolCallDelta(
-        chunk.choices[0].delta,
-        toolCalls,
-        currentToolCall,
-        currentToolCallIndex,
-        jsonBuffer,
-        isBufferingJson,
-        messages
-      );
+      // ツールコールの処理
+      if (chunk.choices?.[0]?.delta?.tool_calls && chunk.choices[0].delta.tool_calls.length > 0) {
+        const processResult = this.processToolCallDelta(
+          chunk.choices[0].delta,
+          toolCalls,
+          currentToolCall,
+          currentToolCallIndex,
+          jsonBuffer,
+          isBufferingJson,
+          messages
+        );
 
-      result.updatedToolCalls = processResult.updatedToolCalls;
-      result.updatedCurrentToolCall = processResult.updatedCurrentToolCall;
-      result.updatedCurrentToolCallIndex = processResult.updatedCurrentToolCallIndex;
-      result.updatedJsonBuffer = processResult.updatedJsonBuffer;
-      result.updatedIsBufferingJson = processResult.updatedIsBufferingJson;
-      result.shouldYieldMessage = processResult.shouldYieldMessage;
-      
-      // 永続的な状態を更新
-      this.updatePersistentState({
-        jsonBuffer: processResult.updatedJsonBuffer,
-        isBufferingJson: processResult.updatedIsBufferingJson,
-        toolCallsInProgress: processResult.updatedToolCalls,
-        currentToolCallIndex: processResult.updatedCurrentToolCallIndex
-      });
-      
-      return result;
+        result.updatedToolCalls = processResult.updatedToolCalls;
+        result.updatedCurrentToolCall = processResult.updatedCurrentToolCall;
+        result.updatedCurrentToolCallIndex = processResult.updatedCurrentToolCallIndex;
+        result.updatedJsonBuffer = processResult.updatedJsonBuffer;
+        result.updatedIsBufferingJson = processResult.updatedIsBufferingJson;
+        result.shouldYieldMessage = processResult.shouldYieldMessage;
+        
+        // 永続的な状態を更新
+        this.updatePersistentState({
+          jsonBuffer: processResult.updatedJsonBuffer,
+          isBufferingJson: processResult.updatedIsBufferingJson,
+          toolCallsInProgress: processResult.updatedToolCalls,
+          currentToolCallIndex: processResult.updatedCurrentToolCallIndex
+        });
+        
+        return result;
+      }
+    } catch (error) {
+      // チャンク処理中のエラーをログに記録し、現在の状態をそのまま返す
+      console.error(`チャンク処理中のエラー: ${getErrorMessage(error)}`);
     }
 
     return result;
@@ -521,48 +533,53 @@ export class StreamingProcessor {
       shouldYieldMessage: false
     };
 
-    // ツールコールデルタが存在しない場合は早期リターン
-    if (!delta.tool_calls || delta.tool_calls.length === 0) {
-      return result;
-    }
-    
-    const toolCallDelta = delta.tool_calls[0];
-    
-    // インデックスが存在しない場合は早期リターン
-    if (toolCallDelta.index === undefined) {
-      return result;
-    }
-    
-    // 現在のインデックスを更新
-    const index = toolCallDelta.index;
-    
-    // 新しいツール呼び出しの開始または別のインデックスへの切り替え
-    if (result.updatedCurrentToolCallIndex !== index) {
-      // 現在のバッファリング中のJSONを処理
-      this.finalizeCurrentJsonBuffer(result, messages);
-      
-      // インデックスを更新して新しいツール呼び出しを設定
-      this.setupNewToolCall(result, index);
-    }
-    
-    // 関数名の更新
-    if (toolCallDelta.function?.name && result.updatedCurrentToolCall) {
-      this.updateToolCallFunctionName(result, toolCallDelta.function.name, messages);
-    }
-    
-    // 関数引数の更新
-    if (toolCallDelta.function?.arguments && result.updatedCurrentToolCall) {
-      try {
-        this.processToolCallArguments(result, toolCallDelta.function.arguments, messages);
-      } catch (e) {
-        // エラーが発生した場合はログに記録
-        console.warn(`ツール引数の処理中にエラーが発生しました: ${getErrorMessage(e)}`);
+    try {
+      // ツールコールデルタが存在しない場合は早期リターン
+      if (!delta.tool_calls || delta.tool_calls.length === 0) {
+        return result;
       }
+      
+      const toolCallDelta = delta.tool_calls[0];
+      
+      // インデックスが存在しない場合は早期リターン
+      if (toolCallDelta.index === undefined) {
+        return result;
+      }
+      
+      // 現在のインデックスを更新
+      const index = toolCallDelta.index;
+      
+      // 新しいツール呼び出しの開始または別のインデックスへの切り替え
+      if (result.updatedCurrentToolCallIndex !== index) {
+        // 現在のバッファリング中のJSONを処理
+        this.finalizeCurrentJsonBuffer(result, messages);
+        
+        // インデックスを更新して新しいツール呼び出しを設定
+        this.setupNewToolCall(result, index);
+      }
+      
+      // 関数名の更新
+      if (toolCallDelta.function?.name && result.updatedCurrentToolCall) {
+        this.updateToolCallFunctionName(result, toolCallDelta.function.name, messages);
+      }
+      
+      // 関数引数の更新
+      if (toolCallDelta.function?.arguments && result.updatedCurrentToolCall) {
+        try {
+          this.processToolCallArguments(result, toolCallDelta.function.arguments, messages);
+        } catch (e) {
+          // エラーが発生した場合はログに記録
+          console.warn(`ツール引数の処理中にエラーが発生しました: ${getErrorMessage(e)}`);
+        }
+      }
+      
+      // ツール呼び出しが有効なものだけフィルタリング
+      const validToolCalls = result.updatedToolCalls.filter(Boolean);
+      result.shouldYieldMessage = validToolCalls.length > 0;
+    } catch (error) {
+      // エラー処理
+      console.error(`ツールコールデルタ処理中のエラー: ${getErrorMessage(error)}`);
     }
-    
-    // ツール呼び出しが有効なものだけフィルタリング
-    const validToolCalls = result.updatedToolCalls.filter(Boolean);
-    result.shouldYieldMessage = validToolCalls.length > 0;
     
     return result;
   }
@@ -585,8 +602,11 @@ export class StreamingProcessor {
     // バッファリング中のJSONがあれば処理
     if (result.updatedIsBufferingJson && result.updatedJsonBuffer && result.updatedCurrentToolCall) {
       try {
+        // 引数の修復を試みる（共通ユーティリティを使用）
+        const repairedBuffer = repairDuplicatedJsonPattern(result.updatedJsonBuffer);
+        
         // 共通ユーティリティを使用して有効なJSONを抽出
-        const validJson = extractValidJson(result.updatedJsonBuffer);
+        const validJson = extractValidJson(repairedBuffer);
         if (validJson) {
           result.updatedCurrentToolCall.function.arguments = processSearchToolArguments(
             result.updatedCurrentToolCall.function.name,
@@ -599,7 +619,7 @@ export class StreamingProcessor {
           result.updatedCurrentToolCall.function.arguments = processSearchToolArguments(
             result.updatedCurrentToolCall.function.name,
             result.updatedCurrentToolCall.function.arguments || "",
-            result.updatedJsonBuffer,
+            repairedBuffer,
             messages
           );
         }
@@ -676,7 +696,7 @@ export class StreamingProcessor {
     
     result.updatedCurrentToolCall.function.name = functionName;
     
-    // 検索ツールの場合、デフォルトの引数を事前設定
+    // 検索ツールの場合、デフォルトの引数を事前設定（共通ユーティリティを活用）
     if (isSearchTool(result.updatedCurrentToolCall.function.name) && 
         !result.updatedCurrentToolCall.function.arguments) {
       const queryContext = extractQueryContext(messages);
@@ -717,92 +737,97 @@ export class StreamingProcessor {
     
     console.log(`ツール呼び出し引数処理: ${newArgs.substring(0, 50)}${newArgs.length > 50 ? '...' : ''}`);
     
-    // 引数が重複または不正なJSONパターンを含む場合は事前修復
-    const repairedArgs = ToolCallProcessor.repairToolArguments(newArgs);
-    const isModified = repairedArgs !== newArgs;
-    
-    if (isModified) {
-      console.log(`引数不正検出と修復:
-      元: ${newArgs.substring(0, 50)}${newArgs.length > 50 ? '...' : ''}
-      後: ${repairedArgs.substring(0, 50)}${repairedArgs.length > 50 ? '...' : ''}`);
-    }
-    
-    // 引数がJSONフラグメントかどうかを判断
-    if (result.updatedIsBufferingJson || repairedArgs.trim().startsWith('{') || repairedArgs.trim().startsWith('[')) {
-      // 共通ユーティリティを使用してツール引数のデルタを処理
-      // 修復された引数を使用
-      const toolArgsDelta = ToolCallProcessor.processToolArgumentsDelta(
-        result.updatedCurrentToolCall.function.name,
-        result.updatedJsonBuffer,
-        repairedArgs // 修復された引数を使用
-      );
+    try {
+      // 引数が重複または不正なJSONパターンを含む場合は事前修復
+      // 共通ユーティリティの強化された関数を使用
+      const repairedArgs = ToolCallProcessor.repairToolArguments(newArgs);
+      const isModified = repairedArgs !== newArgs;
       
-      result.updatedJsonBuffer = toolArgsDelta.processedArgs;
-      result.updatedIsBufferingJson = !toolArgsDelta.isComplete;
-      
-      // JSONが完成したかチェック
-      if (toolArgsDelta.isComplete) {
-        try {
-          // ツール呼び出しの引数を設定
-          // 最終確認として有効なJSONか確認
-          const finalArgs = result.updatedJsonBuffer;
-          const validJson = extractValidJson(finalArgs);
-          
-          // 有効なJSONが抽出できれば使用する
-          if (validJson) {
-            result.updatedCurrentToolCall.function.arguments = validJson;
-            console.log(`最終引数チェック後の有効JSON: ${validJson.substring(0, 50)}${validJson.length > 50 ? '...' : ''}`);
-          } else {
-            // 有効なJSONが抽出できない場合はそのまま使用
-            result.updatedCurrentToolCall.function.arguments = finalArgs;
-            console.log(`最終引数チェック失敗、そのまま使用: ${finalArgs.substring(0, 50)}${finalArgs.length > 50 ? '...' : ''}`);
-          }
-        } catch (e) {
-          // エラーが発生した場合はバッファをそのまま使用
-          result.updatedCurrentToolCall.function.arguments = result.updatedJsonBuffer;
-          console.warn(`最終引数処理エラー: ${getErrorMessage(e)}`);
-        }
-        
-        // バッファをリセット
-        result.updatedJsonBuffer = JsonBufferHelpers.resetBuffer();
-        result.updatedIsBufferingJson = false;
-        
-        // ツール呼び出しを持つメッセージをyield
-        result.shouldYieldMessage = true;
-        return;
+      if (isModified) {
+        console.log(`引数不正検出と修復:
+        元: ${newArgs.substring(0, 50)}${newArgs.length > 50 ? '...' : ''}
+        後: ${repairedArgs.substring(0, 50)}${repairedArgs.length > 50 ? '...' : ''}`);
       }
-    } else {
-      // 検索ツールの場合の特別処理
-      if (isSearchTool(result.updatedCurrentToolCall.function.name)) {
-        // 既に有効な引数がある場合は更新しない（冗長な更新を防止）
-        if (result.updatedCurrentToolCall.function.arguments &&
-            result.updatedCurrentToolCall.function.arguments !== "{}" &&
-            result.updatedCurrentToolCall.function.arguments !== "") {
-          
+      
+      // 引数がJSONフラグメントかどうかを判断
+      if (result.updatedIsBufferingJson || repairedArgs.trim().startsWith('{') || repairedArgs.trim().startsWith('[')) {
+        // ToolCallProcessorの改善されたprocessToolArgumentsDeltaを使用
+        const toolArgsDelta = ToolCallProcessor.processToolArgumentsDelta(
+          result.updatedCurrentToolCall.function.name,
+          result.updatedJsonBuffer,
+          repairedArgs // 修復された引数を使用
+        );
+        
+        result.updatedJsonBuffer = toolArgsDelta.processedArgs;
+        result.updatedIsBufferingJson = !toolArgsDelta.isComplete;
+        
+        // JSONが完成したかチェック
+        if (toolArgsDelta.isComplete) {
           try {
-            // 共通ユーティリティで型付きで引数をパース
-            const existingArgs = safeJsonParse<QueryArgs>(result.updatedCurrentToolCall.function.arguments, {});
+            // ツール呼び出しの引数を設定
+            // 最終確認として有効なJSONか確認
+            const finalArgs = result.updatedJsonBuffer;
+            const validJson = extractValidJson(finalArgs);
             
-            // 既に有効なqueryプロパティがある場合は更新をスキップ
-            if (existingArgs && existingArgs.query && typeof existingArgs.query === "string" && 
-                existingArgs.query.trim() !== "") {
-              console.log(`検索ツールの引数が既に存在するため、更新をスキップ: ${JSON.stringify(existingArgs)}`);
-              return;
+            // 有効なJSONが抽出できれば使用する
+            if (validJson) {
+              result.updatedCurrentToolCall.function.arguments = validJson;
+              console.log(`最終引数チェック後の有効JSON: ${validJson.substring(0, 50)}${validJson.length > 50 ? '...' : ''}`);
+            } else {
+              // 有効なJSONが抽出できない場合はそのまま使用
+              result.updatedCurrentToolCall.function.arguments = finalArgs;
+              console.log(`最終引数チェック失敗、そのまま使用: ${finalArgs.substring(0, 50)}${finalArgs.length > 50 ? '...' : ''}`);
             }
           } catch (e) {
-            // パースエラーの場合は通常の処理を続行
-            console.warn(`検索ツール引数のパースエラー: ${getErrorMessage(e)}`);
+            // エラーが発生した場合はバッファをそのまま使用
+            result.updatedCurrentToolCall.function.arguments = result.updatedJsonBuffer;
+            console.warn(`最終引数処理エラー: ${getErrorMessage(e)}`);
+          }
+          
+          // バッファをリセット
+          result.updatedJsonBuffer = JsonBufferHelpers.resetBuffer();
+          result.updatedIsBufferingJson = false;
+          
+          // ツール呼び出しを持つメッセージをyield
+          result.shouldYieldMessage = true;
+          return;
+        }
+      } else {
+        // 検索ツールの場合の特別処理
+        if (isSearchTool(result.updatedCurrentToolCall.function.name)) {
+          // 既に有効な引数がある場合は更新しない（冗長な更新を防止）
+          if (result.updatedCurrentToolCall.function.arguments &&
+              result.updatedCurrentToolCall.function.arguments !== "{}" &&
+              result.updatedCurrentToolCall.function.arguments !== "") {
+            
+            try {
+              // 共通ユーティリティで型付きで引数をパース
+              const existingArgs = safeJsonParse<QueryArgs>(result.updatedCurrentToolCall.function.arguments, {});
+              
+              // 既に有効なqueryプロパティがある場合は更新をスキップ
+              if (existingArgs && existingArgs.query && typeof existingArgs.query === "string" && 
+                  existingArgs.query.trim() !== "") {
+                console.log(`検索ツールの引数が既に存在するため、更新をスキップ: ${JSON.stringify(existingArgs)}`);
+                return;
+              }
+            } catch (e) {
+              // パースエラーの場合は通常の処理を続行
+              console.warn(`検索ツール引数のパースエラー: ${getErrorMessage(e)}`);
+            }
           }
         }
+        
+        // 非JSON引数の処理: 共通ユーティリティを使用してSearch引数を処理
+        result.updatedCurrentToolCall.function.arguments = processSearchToolArguments(
+          result.updatedCurrentToolCall.function.name,
+          result.updatedCurrentToolCall.function.arguments || "",
+          repairedArgs, // 修復された引数を使用
+          messages
+        );
       }
-      
-      // 非JSON引数の処理: 共通ユーティリティを使用してSearch引数を処理
-      result.updatedCurrentToolCall.function.arguments = processSearchToolArguments(
-        result.updatedCurrentToolCall.function.name,
-        result.updatedCurrentToolCall.function.arguments || "",
-        repairedArgs, // 修復された引数を使用
-        messages
-      );
+    } catch (error) {
+      // エラー処理
+      console.error(`ツール引数処理中の例外: ${getErrorMessage(error)}`);
     }
   }
 
@@ -826,10 +851,13 @@ export class StreamingProcessor {
 
     console.log(`最終JSONバッファの処理: ${jsonBuffer}`);
     
-    // 共通ユーティリティを使用して有効なJSONの抽出を試みる
-    const validJson = extractValidJson(jsonBuffer);
-    
     try {
+      // 重複パターンの修復を先に適用
+      const repairedBuffer = repairDuplicatedJsonPattern(jsonBuffer);
+      
+      // 共通ユーティリティを使用して有効なJSONの抽出を試みる
+      const validJson = extractValidJson(repairedBuffer);
+      
       // 有効なJSONが抽出できた場合
       if (validJson) {
         const parsedJson = safeJsonParse(validJson, {});
@@ -857,20 +885,20 @@ export class StreamingProcessor {
           }
         }
       } else {
-        // 抽出できなかった場合は、そのままの値を使用
+        // 抽出できなかった場合は、修復された値を使用
         if (isSearchTool(currentToolCall.function.name)) {
           currentToolCall.function.arguments = processSearchToolArguments(
             currentToolCall.function.name,
             currentToolCall.function.arguments || "",
-            jsonBuffer,
+            repairedBuffer,
             messages
           );
         } else {
           // その他のツールは既存の引数に追加
           if (currentToolCall.function.arguments) {
-            currentToolCall.function.arguments += jsonBuffer;
+            currentToolCall.function.arguments += repairedBuffer;
           } else {
-            currentToolCall.function.arguments = jsonBuffer;
+            currentToolCall.function.arguments = repairedBuffer;
           }
         }
       }
@@ -980,25 +1008,30 @@ export class StreamingProcessor {
     toolCalls: ToolCall[],
     messages: ChatMessage[]
   ): void {
-    // 未処理のJSONバッファがあれば最終処理
-    if (isBufferingJson && jsonBuffer) {
-      currentToolCall = this.finalizeJsonBuffer(jsonBuffer, isBufferingJson, currentToolCall, messages);
-      
-      // currentToolCallが更新された場合、対応するtoolCallsも更新
-      if (currentToolCall !== null && currentToolCallIndex !== null) {
-        // 明示的な型アノテーションとキャストで型を確定させる
-        const index: number = Number(currentToolCallIndex);
+    try {
+      // 未処理のJSONバッファがあれば最終処理
+      if (isBufferingJson && jsonBuffer) {
+        currentToolCall = this.finalizeJsonBuffer(jsonBuffer, isBufferingJson, currentToolCall, messages);
         
-        // nullでないこと、有効な整数なこと、配列の範囲内であることを確認
-        if (!Number.isNaN(index) && index >= 0 && index < toolCalls.length) {
-          toolCalls[index] = currentToolCall;
-        } else {
-          console.warn(`無効なツール呼び出しインデックス: ${currentToolCallIndex}`);
+        // currentToolCallが更新された場合、対応するtoolCallsも更新
+        if (currentToolCall !== null && currentToolCallIndex !== null) {
+          // 明示的な型アノテーションとキャストで型を確定させる
+          const index: number = Number(currentToolCallIndex);
+          
+          // nullでないこと、有効な整数なこと、配列の範囲内であることを確認
+          if (!Number.isNaN(index) && index >= 0 && index < toolCalls.length) {
+            toolCalls[index] = currentToolCall;
+          } else {
+            console.warn(`無効なツール呼び出しインデックス: ${currentToolCallIndex}`);
+          }
         }
       }
-    }
 
-    // 検索ツールで引数がない場合、デフォルトのクエリを設定
-    this.ensureSearchToolArguments(toolCalls, messages);
+      // 検索ツールで引数がない場合、デフォルトのクエリを設定
+      this.ensureSearchToolArguments(toolCalls, messages);
+    } catch (error) {
+      // エラーが発生した場合でも処理を続行
+      console.error(`最終処理中のエラー: ${getErrorMessage(error)}`);
+    }
   }
 }

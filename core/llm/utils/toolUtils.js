@@ -152,3 +152,66 @@ export function doesModelSupportTools(provider, model) {
       return false;
   }
 }
+
+/**
+ * ツール呼び出し引数の修復を試みる関数
+ * 特に入れ子構造や重複する引数の問題を修正
+ * 
+ * @param {string} args 修復する引数文字列
+ * @returns {string} 修復された引数文字列
+ */
+export function repairToolArguments(args) {
+  if (!args || args.trim() === '') {
+    return '{}';
+  }
+  
+  try {
+    // まず直接JSONとしてパースしてみる
+    JSON.parse(args);
+    return args; // パースに成功したら元の文字列を返す
+  } catch (e) {
+    // パースに失敗した場合は修復を試みる
+    
+    // 有効なJSONを抽出
+    try {
+      const { extractValidJson, repairDuplicatedJsonPattern } = require('./json.js');
+      
+      // 重複パターンの修復を試みる
+      const repairedArgs = repairDuplicatedJsonPattern(args);
+      if (repairedArgs !== args) {
+        try {
+          JSON.parse(repairedArgs);
+          return repairedArgs; // 修復後のJSONが有効ならそれを返す
+        } catch (e2) {
+          // 修復したがまだ無効な場合は次の方法を試す
+        }
+      }
+      
+      // 有効なJSON部分の抽出を試みる
+      const validJson = extractValidJson(args);
+      if (validJson) {
+        return validJson; // 有効なJSON部分があればそれを返す
+      }
+      
+      // 特定のパターンに対する修正
+      // パターン1: {"key": "value"{"key": ...
+      const doublePropertyPattern = /\{\s*"(\w+)"\s*:\s*"(.*?)"\s*\{\s*"\1"\s*:/;
+      const match = args.match(doublePropertyPattern);
+      if (match && match[1] && match[2]) {
+        return `{"${match[1]}": "${match[2]}"}`;
+      }
+      
+      // パターン2: 不完全なJSONの閉じ括弧を追加
+      if (args.includes('{') && !args.includes('}')) {
+        return args + '}';
+      }
+      
+      // 他の修復方法が失敗した場合は元の文字列を返す
+      return args;
+    } catch (innerError) {
+      // エラーが発生した場合は元の文字列を返す
+      console.warn(`引数の修復に失敗しました: ${innerError}`);
+      return args;
+    }
+  }
+}

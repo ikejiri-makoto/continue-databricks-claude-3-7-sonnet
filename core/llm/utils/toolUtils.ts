@@ -1,6 +1,8 @@
 import { ChatMessage } from "../../index.js";
 import { extractQueryContext } from "./messageUtils.js";
 import { PROVIDER_TOOL_SUPPORT } from "../toolSupport.js";
+import { safeJsonParse, extractValidJson, repairDuplicatedJsonPattern, isValidJson } from "./json.js";
+import { getErrorMessage } from "./errors.js";
 
 /**
  * ツール関連の共通ユーティリティ関数
@@ -159,4 +161,78 @@ export function formatToolResultsContent(toolResults: any[]): string {
   }
   
   return result;
+}
+
+/**
+ * ツール呼び出し引数の修復を試みる共通ユーティリティ関数
+ * 特に入れ子構造や重複する引数の問題を修正
+ * 
+ * @param args 修復する引数文字列
+ * @returns 修復された引数文字列
+ */
+export function repairToolArguments(args: string): string {
+  if (!args || args.trim() === '') {
+    return '{}';
+  }
+  
+  try {
+    // まず有効なJSONかどうかチェック
+    if (isValidJson(args)) {
+      return args;
+    }
+    
+    // JSON抽出を試みる
+    const validJson = extractValidJson(args);
+    if (validJson && validJson !== args) {
+      return validJson;
+    }
+    
+    // 二重化パターンを修復
+    const repairedArgs = repairDuplicatedJsonPattern(args);
+    if (repairedArgs !== args) {
+      return repairedArgs;
+    }
+    
+    // 括弧の不一致修復を試みる
+    const mismatchFix = fixMismatchedBraces(args);
+    if (mismatchFix !== args) {
+      return mismatchFix;
+    }
+    
+    // その他の修復を試みる
+    // 一般的なパターン: 引数が二重になっているケース
+    if (args.includes('":\{') && !args.includes('":{')) {
+      return args.replace(/":\{/g, '":{')
+    }
+    
+    // 最後の手段として元の引数を返す
+    return args;
+  } catch (e) {
+    // エラーが発生した場合は元の引数を返す
+    console.warn(`引数の修復に失敗しました: ${getErrorMessage(e)}`);
+    return args;
+  }
+}
+
+/**
+ * 不一致の括弧を修復する内部ヘルパー関数
+ * 
+ * @param args 修復する引数文字列
+ * @returns 修復された引数文字列
+ */
+function fixMismatchedBraces(args: string): string {
+  // 開き括弧と閉じ括弧のカウント
+  const openBraces = (args.match(/\{/g) || []).length;
+  const closeBraces = (args.match(/\}/g) || []).length;
+  
+  // 括弧が不一致の場合は修復を試みる
+  if (openBraces > closeBraces) {
+    // 閉じ括弧が足りない場合は追加
+    return args + '}'.repeat(openBraces - closeBraces);
+  } else if (closeBraces > openBraces) {
+    // 開き括弧が足りない場合は先頭に追加
+    return '{'.repeat(closeBraces - openBraces) + args;
+  }
+  
+  return args;
 }

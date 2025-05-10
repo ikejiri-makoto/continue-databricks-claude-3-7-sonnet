@@ -36,7 +36,7 @@ core/
         ├── messageUtils.ts    (メッセージ処理 - コンテンツ抽出やクエリコンテキスト取得関数)
         ├── sseProcessing.ts   (SSE処理 - processSSEStream関数を提供)
         ├── streamProcessing.ts (ストリーム処理 - processContentDelta, JsonBufferHelpers関数を提供)
-        └── toolUtils.ts       (ツール処理 - isSearchTool, processSearchToolArgumentsを提供)
+        └── toolUtils.ts       (ツール処理 - isSearchTool, processSearchToolArguments, repairToolArgumentsを提供)
 ```
 
 ### 各モジュールの明確な責任
@@ -128,6 +128,7 @@ core/
 - ダミーのツール結果生成
 - モデルのツールサポート検証
 - ツール呼び出し引数の修復と正規化
+- インターフェースを実装して責任境界を明確化
 
 **8. `types/` - 型定義**
 - 厳密な型インターフェースの定義
@@ -232,14 +233,14 @@ private async processStreamingRequest(
 
 ## 最近の改善点
 
-最近のリファクタリングで、以下の改善を実施しました：
-
-### 1. 共通ユーティリティの活用強化
+### 1. 共通ユーティリティの活用強化 (2025年5月)
 
 - **JSON処理機能の統合**: 重複していたJSON処理ロジックを共通ユーティリティに統合
 - **JSONデルタ処理の一元化**: `processJsonDelta`関数と`processToolArgumentsDelta`関数を共通ユーティリティに移動し、全モジュールで活用
 - **重複実装の解消**: 特にJSONフラグメント処理の重複実装を解消し、バグ発生リスクを低減
 - **標準化されたエラー処理**: 共通のエラー処理パターンを活用
+- **型不一致の修正**: ツール呼び出し処理における`tool_call_id`と`toolCallId`の不一致を修正し、型安全性を向上
+- **共通ツール修復ユーティリティの活用**: `repairToolArguments`共通関数を積極的に使用し、コードの重複を削減
 
 ### 2. ストリーム処理の改善
 
@@ -261,8 +262,18 @@ private async processStreamingRequest(
 - **状態の共有と更新の明確化**: モジュール間での状態の共有と更新の方法を標準化
 - **エラー処理の一元化**: エラー処理の責任を`DatabricksErrorHandler`クラスに集中
 - **設定管理の一元化**: 設定管理の責任を`DatabricksConfig`クラスに集中
+- **インターフェース実装による責任明確化**: `ToolCallProcessorInterface`など各モジュールにインターフェースを実装し、責任境界を明示
 
-### 4. 型定義の整理
+### 4. `ToolCallProcessor`クラスの改善 (2025年5月)
+
+- **インターフェース実装の強化**: `ToolCallProcessorInterface`インターフェースを完全に実装
+- **インスタンスメソッドの追加**: 静的メソッドを保持しつつ、インスタンスメソッドもサポート
+- **責任の明確化**: インターフェースの定義に従った明確なメソッド構造
+- **共通ユーティリティの活用**: `toolUtils.js`の`repairToolArguments`関数を活用したコード重複の削減
+- **デリゲーションパターンの適用**: インスタンスメソッドから静的メソッドへの委譲でコード再利用を最大化
+- **型安全性の向上**: インターフェース実装による型安全なコード構造の実現
+
+### 5. 型定義の整理
 
 - **型定義階層の明確化**: `databricks-extensions.d.ts`を中心とした型定義階層を確立
 - **インターフェースの一貫性**: `ToolCall`や`ToolResultMessage`などの主要インターフェースを整理
@@ -273,13 +284,13 @@ private async processStreamingRequest(
 - **JSDocコメントの充実**: すべての型定義に詳細な説明を追加
 - **型の相互運用性向上**: モジュール間で一貫した型定義を使用
 
-### 5. 並列ツール呼び出し制御の強化
+### 6. 並列ツール呼び出し制御の強化
 
 - **OpenAIスタイルの制御オプション**: `parallel_tool_calls`オプションによる並列ツール呼び出し制御
 - **型定義拡張**: LLMOptionsとCompletionOptionsに新しいパラメータを追加
 - **Databricksリクエストへの反映**: リクエストパラメータに適切に設定を反映
 
-### 6. エラー処理の改善
+### 7. エラー処理の改善
 
 - **一貫したエラーハンドリング**: 統一されたエラー処理パターンを適用
 - **型安全なエラー状態**: エラー発生時の状態管理を型安全に実装
@@ -288,17 +299,6 @@ private async processStreamingRequest(
 - **一時的エラー検出**: 一時的なエラーを自動的に検出してリトライする機能を追加
 - **統一されたリトライロジック**: ジェネリックな`withRetry<T>`メソッドによる標準化されたリトライ処理
 - **エラーインターフェースの強化**: `ErrorHandlingResult`や`StreamingState`などの型定義を導入
-
-### 7. JSON処理の堅牢性強化（2025年5月改修）
-
-- **JSONパターン検出の拡張**: 二重化JSONパターンの検出機能を拡張し、より多くのケースに対応
-- **ログ機能の強化**: デバッグを容易にするための詳細なログ機能の追加
-- **引数修復の強化**: ツール引数のパターン検出と修復ロジックの大幅改善
-- **デルタ処理の前処理**: JSON処理前に引数のパターン検出と修復を実施する前処理ステップの追加
-- **最終検証の追加**: 完成したJSONに対する追加の検証ステップの実装
-- **混合パターン対応**: `{"filepath": "app.py"{"dirPath": "/"`のような混合パターンに対応するロジックの追加
-- **一般的なパターン検出**: 任意のキーに対応する二重パターン検出機能の実装
-- **エラー処理強化**: JSONデルタ処理でのエラー内容をより詳細に記録する仕組みの実装
 
 ## 共通ユーティリティの活用
 
@@ -338,100 +338,116 @@ if (toolArgsDelta.isComplete) {
 }
 ```
 
-### 2. エラー処理ユーティリティ
+### 2. ツール引数修復ユーティリティ
 
-`errors.ts`の標準化されたエラー処理パターンを活用：
+`toolUtils.ts`の`repairToolArguments`関数を活用してツール引数の修復を標準化：
 
 ```typescript
-try {
-  // API呼び出しやその他の操作
-} catch (error: unknown) {
-  // エラータイプに関係なく一貫したエラーメッセージを取得
-  const errorMessage = getErrorMessage(error);
-  
-  // リトライが適切かどうかを判断
-  if (isTransientError(error)) {
-    // 一時的なエラーを処理 - リトライを実施
-  } else {
-    // その他のエラー処理
-  }
-}
+// 共通ユーティリティのrepairToolArgumentsを使用
+import { repairToolArguments } from "../../utils/toolUtils.js";
 
-// 汎用的なリトライラッパー
-async function operation() {
-  return await DatabricksErrorHandler.withRetry(
-    async () => {
-      // リトライ可能な操作
-      const response = await fetch(url, options);
-      return processResponse(response);
-    },
-    state // 現在の状態（オプション）
-  );
+// ツール引数の修復
+const repairedArgs = repairToolArguments(args);
+
+// モジュール内のrepairToolArguments実装
+static repairToolArguments(args: string): string {
+  if (!args || args.trim() === '') {
+    return '{}';
+  }
+  
+  try {
+    // 共通ユーティリティのrepairToolArgumentsを使用
+    // 重複コードを省き、共通ユーティリティの活用を強化
+    const repaired = repairToolArguments(args);
+    
+    // 修復に成功した場合は結果を返す
+    if (repaired && repaired !== args) {
+      return repaired;
+    }
+    
+    // Databricks固有の追加的な修復処理
+    // 共通ユーティリティで処理されなかった場合の特殊処理
+    const repairedArgs = repairDuplicatedJsonPattern(args);
+    if (repairedArgs !== args) {
+      return repairedArgs;
+    }
+    
+    // 最終的に、上記の処理で修復されなかった場合は元の引数を返す
+    return args;
+  } catch (e) {
+    // エラーが発生した場合は元の引数を返す
+    console.warn(`引数の修復に失敗しました: ${getErrorMessage(e)}`);
+    return args;
+  }
 }
 ```
 
-### 3. ストリーム処理ユーティリティ
+## インターフェース実装による責任境界の明確化
 
-`streamProcessing.ts`のストリーム処理ユーティリティを活用：
-
-```typescript
-// ストリーミングJSONフラグメントの処理:
-let buffer = JsonBufferHelpers.resetBuffer();
-
-// フラグメントを受信したとき:
-buffer = JsonBufferHelpers.addToBuffer(fragment, buffer, maxBufferSize);
-
-// バッファが完全なJSONかどうかをチェック:
-if (JsonBufferHelpers.isBufferComplete(buffer)) {
-  const data = safeJsonParse(buffer, defaultValue);
-  // データ処理
-  buffer = JsonBufferHelpers.resetBuffer();
-}
-
-// コンテンツデルタの処理:
-const processResult = processContentDelta(newContent, currentMessage);
-updatedMessage = processResult.updatedMessage;
-shouldYield = processResult.shouldYield;
-```
-
-## モジュール間のインターフェースと連携の強化
-
-各モジュールは型安全なインターフェースを通じて連携します：
+`ToolCallProcessor`クラスは`ToolCallProcessorInterface`インターフェースを実装し、責任境界を明確にしています：
 
 ```typescript
-// 型定義ファイルでのインターフェース定義
-export interface ConfigManagerInterface {
-  getConfig(options?: DatabricksCompletionOptions): DatabricksConfig;
-  normalizeApiUrl(url: string): string;
-  validateApiConfig(apiKey: string | undefined, apiBase: string | undefined): void;
-  setupTimeoutController(signal: AbortSignal, options: DatabricksCompletionOptions): {
-    timeoutController: AbortController;
-    timeoutId: NodeJS.Timeout;
-    combinedSignal: AbortSignal;
-  };
-}
-
-export interface ErrorHandlerInterface {
-  parseErrorResponse(response: Response): Promise<{ error: Error }>;
-  handleRetry(retryCount: number, error: unknown, state?: any): Promise<boolean>;
-  withRetry<T>(operation: () => Promise<T>, state?: any): Promise<T>;
-  handleStreamingError(error: unknown, state: StreamingState): ErrorHandlingResult;
-  isTransientError(error: unknown): boolean;
-}
-
-// インターフェースを実装するモジュール
-export class DatabricksConfig implements ConfigManagerInterface {
-  static getConfig(options?: DatabricksCompletionOptions): DatabricksConfig {
-    // 実装
+/**
+ * ツール呼び出し処理クラス
+ * Databricks上のClaude 3.7 Sonnetからのツール呼び出しを処理するメソッドを提供
+ * ToolCallProcessorInterfaceを実装して責任を明確化
+ */
+export class ToolCallProcessor implements ToolCallProcessorInterface {
+  // インスタンスメソッドとしてインターフェースメソッドを実装
+  preprocessToolCallsAndResults(messages: ChatMessage[]): ChatMessage[] {
+    return ToolCallProcessor.preprocessToolCallsAndResults(messages);
   }
   
-  static normalizeApiUrl(url: string): string {
-    // 実装
+  processToolArguments(args: string, toolName: string, messages: ChatMessage[]): string {
+    return ToolCallProcessor.processToolArguments(args, toolName, messages);
   }
   
-  // 他のメソッド...
+  processToolCall(
+    toolCall: ToolCall | null,
+    currentToolCallIndex: number | null,
+    jsonBuffer: string,
+    isBufferingJson: boolean,
+    toolCallDelta: any,
+    toolCalls: ToolCall[]
+  ): ToolCallResult {
+    return ToolCallProcessor.processToolCall(
+      toolCall,
+      currentToolCallIndex,
+      jsonBuffer,
+      isBufferingJson,
+      toolCallDelta,
+      toolCalls
+    );
+  }
+
+  // 静的メソッドはそのまま残す - 共通の実装として使用
+  static preprocessToolCallsAndResults(messages: ChatMessage[]): ChatMessage[] {
+    // 実装...
+  }
+  
+  static processToolArguments(args: string, toolName: string, messages: ChatMessage[]): string {
+    // 実装...
+  }
+  
+  static processToolCall(
+    toolCall: ToolCall | null,
+    currentToolCallIndex: number | null,
+    jsonBuffer: string,
+    isBufferingJson: boolean,
+    toolCallDelta: any,
+    toolCalls: ToolCall[]
+  ): ToolCallResult {
+    // 実装...
+  }
 }
 ```
+
+このアプローチでは：
+1. インターフェースが要求するメソッドをインスタンスメソッドとして実装
+2. 実際の処理ロジックは静的メソッドとして維持
+3. インスタンスメソッドは単に静的メソッドに委譲
+4. 静的メソッドは共通実装として他のモジュールからも利用可能
+5. コードの再利用性と型安全性を両立
 
 ## 今後の展望
 

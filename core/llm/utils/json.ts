@@ -293,28 +293,68 @@ export function processJsonDelta(
   currentJson: string,
   deltaJson: string
 ): { combined: string; complete: boolean; valid: boolean } {
-  // 現在のJSONとデルタを結合
-  const combined = currentJson + deltaJson;
-  
-  // 有効なJSONかチェック
-  const validJson = extractValidJson(combined);
-  const isValid = !!validJson;
-  
-  // 完全なJSONかチェック（JSONオブジェクトの場合は最後の文字が}）
-  const isComplete = isValid && 
-    ((validJson?.trim().startsWith("{") && validJson?.trim().endsWith("}")) ||
-     (validJson?.trim().startsWith("[") && validJson?.trim().endsWith("]")));
-  
-  return {
-    combined,
-    complete: isComplete,
-    valid: isValid
-  };
+  try {
+    // デルタが空の場合は現在のJSONを返す
+    if (!deltaJson || deltaJson.trim() === '') {
+      return {
+        combined: currentJson,
+        complete: false,
+        valid: isValidJson(currentJson)
+      };
+    }
+    
+    // デルタ前に重複パターン検出と修復を適用
+    const repairedDelta = repairDuplicatedJsonPattern(deltaJson);
+    
+    // 現在のJSONが空でデルタが有効なJSONの場合
+    if (!currentJson && isValidJson(repairedDelta)) {
+      return {
+        combined: repairedDelta,
+        complete: true,
+        valid: true
+      };
+    }
+    
+    // 結合して有効なJSONかチェック
+    let combined = currentJson + repairedDelta;
+    const validJson = extractValidJson(combined);
+    const isValid = !!validJson;
+    
+    // 結合したものが有効でない場合、抽出を試みる
+    if (!isValid) {
+      if (validJson) {
+        return {
+          combined: validJson,
+          complete: true,
+          valid: true
+        };
+      }
+    }
+    
+    // 完全なJSONかチェック
+    const isComplete = isValid && 
+      ((validJson?.trim().startsWith("{") && validJson?.trim().endsWith("}")) ||
+       (validJson?.trim().startsWith("[") && validJson?.trim().endsWith("]")));
+    
+    return {
+      combined: isValid ? validJson : combined,
+      complete: isComplete,
+      valid: isValid
+    };
+  } catch (error) {
+    // エラー詳細をログに記録
+    console.error(`JSON delta processing error: ${error instanceof Error ? error.message : String(error)}`);
+    return {
+      combined: currentJson,
+      complete: false,
+      valid: false
+    };
+  }
 }
 
 /**
  * JSONオブジェクトの二重化パターンを検出して修復
- * {"filepath": "app.py"}{"filepath": "app.py"} のようなパターンに対応
+ * 様々なパターンに対応（混合パターンを含む）
  * 
  * @param jsonStr 処理するJSON文字列
  * @returns 修復されたJSON文字列
@@ -324,19 +364,94 @@ export function repairDuplicatedJsonPattern(jsonStr: string): string {
     return jsonStr;
   }
   
-  // 二重化パターンを検出する正規表現
-  const duplicatePattern = /\{\s*"(\w+)"\s*:\s*"([^"]+)"\s*\}\s*\{\s*"\1"\s*:/g;
+  // デバッグログ追加
+  const logInput = jsonStr.length > 50 ? 
+    jsonStr.substring(0, 50) + "..." : jsonStr;
+  console.log(`JSONパターン修復入力: ${logInput}`);
   
-  if (duplicatePattern.test(jsonStr)) {
+  // パターン1: {"key": "value"{"key": "value"...
+  // 複数のパターンタイプを対応
+  const duplicatedPattern = /\{\s*"\w+"\s*:\s*("[^"]*"|\d+|true|false|null)\s*\{/;
+  if (duplicatedPattern.test(jsonStr)) {
     // 有効なJSONを抽出
     const validJson = extractValidJson(jsonStr);
     if (validJson) {
+      console.log(`有効なJSON抽出: ${validJson.length > 50 ? validJson.substring(0, 50) + "..." : validJson}`);
       return validJson;
     }
     
-    // 特定のパターンに対する修復
-    // {"name": "value"}{"name": ... -> {"name": "value"}
-    return jsonStr.replace(duplicatePattern, '{$1": "$2"}');
+    // 既存の一致パターン
+    const duplicateExactPattern = /\{\s*"(\w+)"\s*:\s*"([^"]+)"\s*\}\s*\{\s*"\1"\s*:/;
+    if (duplicateExactPattern.test(jsonStr)) {
+      // 特定のパターンに対する修復
+      // {"name": "value"}{"name": ... -> {"name": "value"}
+      const result = jsonStr.replace(duplicateExactPattern, '{$1": "$2"}');
+      console.log(`一致キーパターン修復: ${result.length > 50 ? result.substring(0, 50) + "..." : result}`);
+      return result;
+    }
+    
+    // メインキー検出
+    const mainKey = jsonStr.match(/{"(\w+)"/)?.[1];
+    if (mainKey) {
+      // 単純な値パターン
+      const simpleValuePattern = new RegExp(`{"${mainKey}"\\s*:\\s*("[^"]*"|\\d+|true|false|null)\\s*}`);
+      const simpleMatch = jsonStr.match(simpleValuePattern);
+      if (simpleMatch && simpleMatch[0]) {
+        console.log(`単純値パターン検出: ${simpleMatch[0]}`);
+        return simpleMatch[0];
+      }
+      
+      // 混合パターン: {"filepath": "app.py"{"dirPath": "/", ...
+      const mixedPattern = new RegExp(`{"${mainKey}"\\s*:\\s*("[^"]*"|\\d+|true|false|null)\\s*{`);
+      if (mixedPattern.test(jsonStr)) {
+        const firstPart = jsonStr.match(new RegExp(`{"${mainKey}"\\s*:\\s*("[^"]*"|\\d+|true|false|null)`))?.[0];
+        if (firstPart) {
+          const result = `${firstPart}}`;
+          console.log(`混合パターン修復: ${result}`);
+          return result;
+        }
+      }
+      
+      // 一般的な二重キーパターン (任意のキー)
+      const doubleKeyPattern = /\{\s*"(\w+)"\s*:\s*"([^"]+)"\s*\{\s*"\w+"\s*:/;
+      const generalMatch = jsonStr.match(doubleKeyPattern);
+      if (generalMatch && generalMatch[1] && generalMatch[2]) {
+        const result = `{"${generalMatch[1]}": "${generalMatch[2]}"}`;
+        console.log(`一般二重キーパターン修復: ${result}`);
+        return result;
+      }
+    }
+  }
+  
+  // パターン2: ネストされたオブジェクトの二重化 {"key": {"nested": "value"}{"anotherKey": "value"}
+  const nestedPattern = /}\s*{/;
+  if (nestedPattern.test(jsonStr)) {
+    const parts = jsonStr.split(/}\s*{/);
+    if (parts.length > 1) {
+      // 最初の部分に閉じ括弧を追加
+      const result = parts[0] + '}';
+      console.log(`ネストパターン修復: ${result}`);
+      return result;
+    }
+  }
+  
+  // パターン3: 特定のツール呼び出しで見られる特殊パターン
+  // {"filepath": "app.py"{"filepath": "app.py"{"dirPath": "/", "recursive": false}
+  const repeatedFilepathPattern = /\{\s*"filepath"\s*:\s*"([^"]+)"\s*\{\s*"filepath"\s*:/;
+  const filepathMatch = jsonStr.match(repeatedFilepathPattern);
+  if (filepathMatch && filepathMatch[1]) {
+    const result = `{"filepath": "${filepathMatch[1]}"}`;
+    console.log(`filepath特殊パターン修復: ${result}`);
+    return result;
+  }
+  
+  // パターン4: filepath + dirPath混合パターン
+  const mixedFilepathDirPathPattern = /\{\s*"filepath"\s*:\s*"([^"]+)"\s*\{\s*"dirPath"\s*:/;
+  const mixedMatch = jsonStr.match(mixedFilepathDirPathPattern);
+  if (mixedMatch && mixedMatch[1]) {
+    const result = `{"filepath": "${mixedMatch[1]}"}`;
+    console.log(`filepath+dirPath混合パターン修復: ${result}`);
+    return result;
   }
   
   return jsonStr;
@@ -346,7 +461,6 @@ export function repairDuplicatedJsonPattern(jsonStr: string): string {
  * ツール引数をデルタベースで処理
  * 部分的なJSONフラグメントを累積し、完全なJSONになるまで処理
  * 
- * @param toolName ツール名（検索ツールの特別処理に使用）
  * @param currentArgs 現在の引数文字列
  * @param deltaArgs 新しい引数フラグメント
  * @returns 処理結果オブジェクト
@@ -363,8 +477,11 @@ export function processToolArgumentsDelta(
     };
   }
   
+  // デルタ前に重複パターン検出と修復を適用
+  const repairedDelta = repairDuplicatedJsonPattern(deltaArgs);
+  
   // JSONデルタ処理を使用
-  const result = processJsonDelta(currentArgs, deltaArgs);
+  const result = processJsonDelta(currentArgs, repairedDelta);
   
   // 完全なJSONかどうかをチェック
   if (result.complete && result.valid) {
@@ -380,6 +497,7 @@ export function processToolArgumentsDelta(
         };
       } catch (e) {
         // 解析エラーの場合は不完全とみなす
+        console.warn(`JSONパース失敗: ${e instanceof Error ? e.message : String(e)}`);
         return {
           processedArgs: result.combined,
           isComplete: false
