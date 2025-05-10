@@ -6,7 +6,7 @@
 
 Databricksインテグレーションは、メインの`Databricks.ts`クラスと、`Databricks/`ディレクトリ内の複数の特化したモジュールから構成されています。モジュール化された設計により、責任を明確に分離し、共通ユーティリティを最大限に活用しています。
 
-### 強化されたモジュール構造と責任分担
+### オーケストレーターパターンに基づくモジュール構造
 
 ```
 core/
@@ -140,6 +140,95 @@ core/
 - 型アサーションとガードの提供
 - 標準ライブラリ型の拡張
 - 型安全なエラー処理のサポート
+- 責任分担を明確にするためのモジュールインターフェース型の提供
+
+## モジュール間の効果的な連携
+
+オーケストレーター（`Databricks.ts`）は、各専門モジュールを調整し、フローを制御します：
+
+```typescript
+// Databricks.ts（オーケストレーター）
+protected async *_streamChat(messages: ChatMessage[], signal: AbortSignal, options: DatabricksCompletionOptions): AsyncGenerator<ChatMessage> {
+  // 設定の検証を設定管理モジュールに委譲
+  DatabricksConfig.validateApiConfig(this.apiKey, this.apiBase);
+  
+  // メッセージの前処理をツール処理モジュールに委譲
+  const processedMessages = ToolCallProcessor.preprocessToolCallsAndResults(messages);
+  
+  // リトライループ
+  while (retryCount <= MAX_RETRIES) {
+    try {
+      // リクエスト処理を実行
+      const result = await this.processStreamingRequest(processedMessages, signal, options, retryCount);
+      
+      // 結果を返す（正常終了）
+      if (result.success) {
+        for (const message of result.messages) {
+          yield message;
+        }
+        break;
+      } else {
+        // エラー処理とリトライをエラーハンドラモジュールに委譲
+        retryCount++;
+        const errorToPass = result.error || new Error("Unknown error");
+        await DatabricksErrorHandler.handleRetry(retryCount, errorToPass, result.state);
+      }
+    } catch (error) {
+      // 予期しないエラーの処理もエラーハンドラモジュールに委譲
+      retryCount++;
+      await DatabricksErrorHandler.handleRetry(retryCount, error);
+    }
+  }
+}
+
+// メインの処理メソッドも責任を委譲
+private async processStreamingRequest(
+  messages: ChatMessage[], 
+  signal: AbortSignal, 
+  options: DatabricksCompletionOptions,
+  retryCount: number
+): Promise<{
+  success: boolean;
+  messages: ChatMessage[];
+  error?: Error;
+  state?: StreamingState;
+}> {
+  try {
+    // リクエストパラメータの構築をヘルパーモジュールに委譲
+    const args = DatabricksHelpers.convertArgs(options);
+    
+    // メッセージ変換をメッセージ処理モジュールに委譲
+    const formattedMessages = MessageProcessor.convertToOpenAIFormat(
+      messages, MessageProcessor.sanitizeMessages(messages)
+    );
+    
+    // URL正規化を設定管理モジュールに委譲
+    const apiBaseUrl = this.apiBase ? DatabricksConfig.normalizeApiUrl(this.apiBase) : "";
+    
+    // タイムアウトコントローラ設定を設定管理モジュールに委譲
+    const { timeoutController, timeoutId, combinedSignal } = 
+      DatabricksConfig.setupTimeoutController(signal, options);
+    
+    // APIリクエスト実行
+    const response = await this.fetch(apiBaseUrl, { /* リクエスト設定 */ });
+    
+    // ストリーミングレスポンス処理をストリーミングモジュールに委譲
+    const streamResult = await StreamingProcessor.processStreamingResponse(
+      response, messages, retryCount, this.alwaysLogThinking
+    );
+    
+    // 結果を返却
+    return streamResult;
+  } catch (error) {
+    // エラー結果の構築
+    return { 
+      success: false, 
+      messages: [], 
+      error: error instanceof Error ? error : new Error(getErrorMessage(error)) 
+    };
+  }
+}
+```
 
 ## 最近の改善点
 
@@ -179,6 +268,10 @@ core/
 - **インターフェースの一貫性**: `ToolCall`や`ToolResultMessage`などの主要インターフェースを整理
 - **重複定義の解消**: 複数の場所に分散していた型定義を一元化
 - **型参照の適切化**: `extension.d.ts`から適切な参照パスを設定
+- **モジュールインターフェース型の導入**: 各モジュールの責任を明確にするインターフェース型を追加
+- **型安全なエラー処理**: エラー処理に関連する型定義を強化
+- **JSDocコメントの充実**: すべての型定義に詳細な説明を追加
+- **型の相互運用性向上**: モジュール間で一貫した型定義を使用
 
 ### 5. 並列ツール呼び出し制御の強化
 
@@ -224,7 +317,14 @@ if (jsonDelta.complete) {
 }
 
 // ツール引数のデルタ処理
-const toolArgsDelta = processToolArgumentsDelta(jsonBuffer, toolCallDelta.function.arguments);
+const toolArgsDelta = processToolArgumentsDelta(currentArgs, deltaArgs);
+if (toolArgsDelta.isComplete) {
+  // 完全な引数として処理
+  updatedArgs = toolArgsDelta.processedArgs;
+} else {
+  // バッファリングを継続
+  jsonBuffer = toolArgsDelta.processedArgs;
+}
 ```
 
 ### 2. エラー処理ユーティリティ
@@ -274,6 +374,7 @@ buffer = JsonBufferHelpers.addToBuffer(fragment, buffer, maxBufferSize);
 if (JsonBufferHelpers.isBufferComplete(buffer)) {
   const data = safeJsonParse(buffer, defaultValue);
   // データ処理
+  buffer = JsonBufferHelpers.resetBuffer();
 }
 
 // コンテンツデルタの処理:
@@ -282,43 +383,42 @@ updatedMessage = processResult.updatedMessage;
 shouldYield = processResult.shouldYield;
 ```
 
-## モジュール間のインターフェースと連携
+## モジュール間のインターフェースと連携の強化
 
-各モジュールは明確に定義されたインターフェースを通じて連携します。
+各モジュールは型安全なインターフェースを通じて連携します：
 
 ```typescript
-// Databricks.ts（オーケストレーター）
-protected async *_streamChat(messages: ChatMessage[], signal: AbortSignal, options: DatabricksCompletionOptions): AsyncGenerator<ChatMessage> {
-  // 設定の検証を設定管理モジュールに委譲
-  DatabricksConfig.validateApiConfig(this.apiKey, this.apiBase);
-  
-  // メッセージの前処理をツール処理モジュールに委譲
-  const processedMessages = ToolCallProcessor.preprocessToolCallsAndResults(messages);
-  
-  // リトライループ
-  while (retryCount <= MAX_RETRIES) {
-    try {
-      // リクエスト処理を実行
-      const result = await this.processStreamingRequest(processedMessages, signal, options, retryCount);
-      
-      // 結果を返す（正常終了）
-      if (result.success) {
-        for (const message of result.messages) {
-          yield message;
-        }
-        break;
-      } else {
-        // エラー処理とリトライをエラーハンドラモジュールに委譲
-        retryCount++;
-        const errorToPass = result.error || new Error("Unknown error");
-        await DatabricksErrorHandler.handleRetry(retryCount, errorToPass, result.state);
-      }
-    } catch (error) {
-      // 予期しないエラーの処理もエラーハンドラモジュールに委譲
-      retryCount++;
-      await DatabricksErrorHandler.handleRetry(retryCount, error);
-    }
+// 型定義ファイルでのインターフェース定義
+export interface ConfigManagerInterface {
+  getConfig(options?: DatabricksCompletionOptions): DatabricksConfig;
+  normalizeApiUrl(url: string): string;
+  validateApiConfig(apiKey: string | undefined, apiBase: string | undefined): void;
+  setupTimeoutController(signal: AbortSignal, options: DatabricksCompletionOptions): {
+    timeoutController: AbortController;
+    timeoutId: NodeJS.Timeout;
+    combinedSignal: AbortSignal;
+  };
+}
+
+export interface ErrorHandlerInterface {
+  parseErrorResponse(response: Response): Promise<{ error: Error }>;
+  handleRetry(retryCount: number, error: unknown, state?: any): Promise<boolean>;
+  withRetry<T>(operation: () => Promise<T>, state?: any): Promise<T>;
+  handleStreamingError(error: unknown, state: StreamingState): ErrorHandlingResult;
+  isTransientError(error: unknown): boolean;
+}
+
+// インターフェースを実装するモジュール
+export class DatabricksConfig implements ConfigManagerInterface {
+  static getConfig(options?: DatabricksCompletionOptions): DatabricksConfig {
+    // 実装
   }
+  
+  static normalizeApiUrl(url: string): string {
+    // 実装
+  }
+  
+  // 他のメソッド...
 }
 ```
 
