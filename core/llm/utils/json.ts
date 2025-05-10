@@ -282,6 +282,67 @@ export function extractJsonAndRemainder(text: string): [any, string] | null {
 }
 
 /**
+ * JSONデルタを処理するユーティリティ
+ * 断片的に受け取るJSONを適切に処理する
+ * 
+ * @param currentJson 現在のJSON文字列
+ * @param deltaJson 新たに受け取ったJSONデルタ
+ * @returns 処理結果オブジェクト
+ */
+export function processJsonDelta(
+  currentJson: string,
+  deltaJson: string
+): { combined: string; complete: boolean; valid: boolean } {
+  // 現在のJSONとデルタを結合
+  const combined = currentJson + deltaJson;
+  
+  // 有効なJSONかチェック
+  const validJson = extractValidJson(combined);
+  const isValid = !!validJson;
+  
+  // 完全なJSONかチェック（JSONオブジェクトの場合は最後の文字が}）
+  const isComplete = isValid && 
+    ((validJson.trim().startsWith("{") && validJson.trim().endsWith("}")) ||
+     (validJson.trim().startsWith("[") && validJson.trim().endsWith("]")));
+  
+  return {
+    combined,
+    complete: isComplete,
+    valid: isValid
+  };
+}
+
+/**
+ * JSONオブジェクトの二重化パターンを検出して修復
+ * {"filepath": "app.py"}{"filepath": "app.py"} のようなパターンに対応
+ * 
+ * @param jsonStr 処理するJSON文字列
+ * @returns 修復されたJSON文字列
+ */
+export function repairDuplicatedJsonPattern(jsonStr: string): string {
+  if (!jsonStr || typeof jsonStr !== 'string') {
+    return jsonStr;
+  }
+  
+  // 二重化パターンを検出する正規表現
+  const duplicatePattern = /\{\s*"(\w+)"\s*:\s*"([^"]+)"\s*\}\s*\{\s*"\1"\s*:/g;
+  
+  if (duplicatePattern.test(jsonStr)) {
+    // 有効なJSONを抽出
+    const validJson = extractValidJson(jsonStr);
+    if (validJson) {
+      return validJson;
+    }
+    
+    // 特定のパターンに対する修復
+    // {"name": "value"}{"name": ... -> {"name": "value"}
+    return jsonStr.replace(duplicatePattern, '{$1": "$2"}');
+  }
+  
+  return jsonStr;
+}
+
+/**
  * 値がオブジェクトかどうかを判定するヘルパー関数
  * 
  * @param item チェックする値

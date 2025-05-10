@@ -61,6 +61,10 @@ The framework includes robust support for agent functionality:
 - Tool definition and execution through LLM APIs
 - Streaming tool calls and responses
 - Provider-specific adaptations for tool handling
+- Tool argument validation and repair mechanisms
+- Standardized tool result formatting across providers
+- Anthropic-style JSON delta processing for more robust tool calls
+- Control for parallel tool calls to prevent duplicated JSON issues
 
 ### Multi-Provider Architecture
 Designed to work with a wide variety of LLM providers:
@@ -74,6 +78,7 @@ Comprehensive streaming implementation:
 - Proper handling of structured data in streams
 - Support for advanced features like "thinking" blocks
 - Robust JSON fragment handling in streaming contexts
+- Delta-based JSON processing for improved stability with partial JSON
 
 ### Template System
 Flexible prompt template system:
@@ -87,6 +92,17 @@ Robust JSON processing utilities for handling streaming and partial content:
 - Safe parsing with type information and error handling
 - Deep merging of JSON objects with proper structure preservation
 - Buffer management for accumulating JSON fragments in streams
+- Automatic repair of malformed JSON in tool arguments
+- Delta-based JSON processing for Anthropic-style incremental JSON updates
+- Pattern detection and repair for duplicated JSON structures
+
+### Robust Error Handling
+Comprehensive error handling system:
+- Standardized error processing across the framework
+- Common utilities for error detection and classification
+- Retry mechanisms with exponential backoff
+- State preservation during retries for streaming operations
+- Connection error recovery with session resumption
 
 ## Provider Implementation Patterns
 
@@ -190,6 +206,19 @@ Agent mode allows LLMs to use tools to accomplish tasks. To enable Agent support
 
 The framework automatically detects and enables Agent functionality for supported models like Claude 3.5/3.7, GPT-4, and others through the auto-detection system.
 
+### Enhanced Agent Capabilities
+
+The framework includes several features to enhance Agent functionality:
+
+1. **Message Preprocessing**: Ensures tool calls and tool results are properly matched in conversations
+2. **Tool Argument Repair**: Automatically detects and fixes malformed JSON in tool arguments
+3. **Streaming Tool Calls**: Supports real-time streaming of tool calls and results
+4. **Tool Result Standardization**: Normalizes tool results across different providers
+5. **Error Recovery**: Maintains state during connection errors to resume tool operations
+6. **File Operation Support**: Special handling for file operation tools like file creation and editing
+7. **JSON Delta Processing**: Enhanced handling of partial JSON in streaming contexts using delta-based approaches
+8. **Parallel Tool Call Control**: Options to control parallel tool call behavior to prevent duplicated JSON structures
+
 ## Best Practices
 
 ### JSON Processing in Streaming Contexts
@@ -197,7 +226,7 @@ The framework automatically detects and enables Agent functionality for supporte
 When handling JSON in streaming contexts (especially with tool calls), use the enhanced JSON utilities:
 
 ```typescript
-import { safeJsonParse, extractValidJson } from "../utils/json";
+import { safeJsonParse, extractValidJson, processJsonDelta } from "../utils/json";
 import { JsonBufferHelpers } from "../utils/streamProcessing";
 
 // Extract valid JSON from potentially mixed content
@@ -219,6 +248,16 @@ if (JsonBufferHelpers.isBufferComplete(buffer)) {
     // Reset buffer
     buffer = JsonBufferHelpers.resetBuffer();
   }
+}
+
+// For delta-based JSON processing (Anthropic style)
+const result = processJsonDelta(currentJson, deltaJson);
+if (result.complete) {
+  // Process complete JSON
+  const data = safeJsonParse(result.combined, null);
+  // Handle complete JSON object
+} else {
+  // Continue accumulating JSON fragments
 }
 ```
 

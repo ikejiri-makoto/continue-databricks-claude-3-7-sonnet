@@ -86,7 +86,10 @@ export function hasToolResultBlocksAtBeginning(message: ChatMessage): boolean {
   
   const content = message.content.trim();
   // ツール結果ブロックのパターンを確認
+  // ツール結果ブロックのパターンを広げる
   return content.startsWith('<tool_result') || 
          content.startsWith('{"role": "tool"') ||
-         content.startsWith('{"role":"tool"');
+         content.startsWith('{"role":"tool"') ||
+         content.startsWith('role: tool') ||
+         content.startsWith('tool_result');
 }

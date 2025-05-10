@@ -121,7 +121,13 @@ export class DatabricksErrorHandler {
     return { 
       success: false, 
       messages: [], 
-      error: error instanceof Error ? error : new Error(errorMessage)
+      error: error instanceof Error ? error : new Error(errorMessage),
+      state: {
+        jsonBuffer: "",
+        isBufferingJson: false,
+        toolCalls: [],
+        currentToolCallIndex: null
+      }
     };
   }
 }

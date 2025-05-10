@@ -4,6 +4,7 @@ import { extractContentAsString } from "../../utils/messageUtils.js";
 import { hasToolResultBlocksAtBeginning } from "../../utils/messageUtils.js";
 import { isSearchTool, processSearchToolArguments, formatToolResultsContent } from "../../utils/toolUtils.js";
 import { doesModelSupportTools } from "../../utils/toolUtils.js";
+import { safeJsonParse, extractValidJson, repairDuplicatedJsonPattern, isValidJson } from "../../utils/json.js";
 
 /**
  * ツール呼び出し処理クラス
@@ -63,6 +64,31 @@ export class ToolCallProcessor {
           previousHadToolCalls = false;
           previousToolCalls = [];
           continue;
+        }
+      }
+      
+      // ユーザーメッセージの後に空のツール結果配列を追加（必要に応じて）
+      // これによりツールの呼び出し後の応答でエラーが発生するのを防ぐ
+      if (currentMessage.role === 'user' && i > 0 && messages[i-1].role === 'assistant') {
+        const prevMessage = messages[i-1] as any;
+        if (prevMessage.toolCalls && prevMessage.toolCalls.length > 0) {
+          // 現在のメッセージコンテンツにツール結果ブロックがあるか確認
+          const content = typeof currentMessage.content === 'string' ? currentMessage.content : '';
+          if (!content.trim().startsWith('<tool_result') && !content.trim().startsWith('{"role":"tool"')) {
+            // ツール呼び出しに対応するツール結果を追加
+            const dummyResults = this.createDummyToolResults(prevMessage.toolCalls);
+            const toolResultsContent = formatToolResultsContent(dummyResults);
+            
+            // 結果を含む新しいメッセージを作成
+            const newMessage = {
+              ...currentMessage,
+              content: toolResultsContent + content
+            };
+            
+            // 処理済みメッセージに追加
+            processedMessages.push(newMessage);
+            continue;
+          }
         }
       }
       
@@ -165,6 +191,115 @@ export class ToolCallProcessor {
     messages: ChatMessage[]
   ): string {
     return processSearchToolArguments(toolName, currentArgs, newArgs, messages);
+  }
+
+  /**
+   * ツール呼び出し引数の修復を試みる
+   * 特に入れ子構造や重複する引数の問題を修正
+   * 
+   * @param args 修復する引数文字列
+   * @returns 修復された引数文字列
+   */
+  static repairToolArguments(args: string): string {
+    if (!args || args.trim() === '') {
+      return '{}';
+    }
+    
+    // まず、二重化パターンを検出して修復（共通ユーティリティを使用）
+    const repairedArgs = repairDuplicatedJsonPattern(args);
+    if (repairedArgs !== args) {
+      return repairedArgs;
+    }
+    
+    // 明らかな重複パターンをチェック
+    const repeatedPattern = /\{\s*"\w+"\s*:\s*[^{]*\{\s*"\w+"\s*:/;
+    if (repeatedPattern.test(args)) {
+      // JSONの先頭から有効な部分を抽出
+      const validJson = extractValidJson(args);
+      if (validJson) {
+        return validJson;
+      }
+      
+      // 特定のパターンの修復: {"filepath": "app.py"{"filepath": "app.py"
+      const doubleFilepathPattern = /\{\s*"filepath"\s*:\s*"(.*?)"\s*\{\s*"filepath"\s*:/;
+      const match = args.match(doubleFilepathPattern);
+      if (match && match[1]) {
+        return `{"filepath": "${match[1]}"}`;  
+      }
+      
+      // 特定のパターンの修復: {"query": "value"{"query": "value"
+      const doubleQueryPattern = /\{\s*"query"\s*:\s*"(.*?)"\s*\{\s*"query"\s*:/;
+      const queryMatch = args.match(doubleQueryPattern);
+      if (queryMatch && queryMatch[1]) {
+        return `{"query": "${queryMatch[1]}"}`;  
+      }
+    }
+    
+    // ネストされたJSONを検出しようとする
+    try {
+      return JSON.stringify(safeJsonParse(args, {}));
+    } catch (e) {
+      console.warn(`引数の修復に失敗しました: ${e}`);
+      return args;
+    }
+  }
+
+  /**
+   * 複数のツール引数をデルタベースで処理
+   * 部分的なJSONを累積し、完全なJSONになるまで処理
+   * 
+   * @param toolName ツール名
+   * @param jsonBuffer 現在のJSONバッファ
+   * @param newJsonFragment 新しいJSONフラグメント
+   * @returns 処理されたJSONオブジェクト
+   */
+  static processToolArgumentsDelta(
+    toolName: string | undefined,
+    jsonBuffer: string,
+    newJsonFragment: string
+  ): { 
+    processedArgs: string;
+    isComplete: boolean;
+  } {
+    // 空のフラグメントは無視
+    if (!newJsonFragment || newJsonFragment.trim() === '') {
+      return { 
+        processedArgs: jsonBuffer, 
+        isComplete: isValidJson(jsonBuffer) 
+      };
+    }
+    
+    // バッファと新しいフラグメントを結合
+    const combinedBuffer = jsonBuffer + newJsonFragment;
+    
+    // 有効なJSONを抽出
+    const validJson = extractValidJson(combinedBuffer);
+    
+    // 有効なJSONが抽出できた場合
+    if (validJson) {
+      try {
+        // 解析してみる
+        const parsedJson = JSON.parse(validJson);
+        
+        // 完全なJSONオブジェクトの場合
+        return { 
+          processedArgs: JSON.stringify(parsedJson),
+          isComplete: true
+        };
+      } catch (e) {
+        // JSONとして無効な場合（まだ不完全）
+        return { 
+          processedArgs: combinedBuffer,
+          isComplete: false
+        };
+      }
+    }
+    
+    // 有効なJSONが抽出できない場合
+    return { 
+      processedArgs: combinedBuffer,
+      isComplete: false
+    };
   }
 
   /**

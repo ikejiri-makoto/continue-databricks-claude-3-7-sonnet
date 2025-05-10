@@ -29,8 +29,7 @@ core/
     │       └── types/          (型定義 - インターフェースと型の定義)
     │           ├── index.ts        (型定義のエントリーポイント - すべての型をエクスポート)
     │           ├── types.ts        (主要な型定義 - 専用インターフェースを定義)
-    │           ├── extension.d.ts  (型拡張定義 - コア型をDatabricks固有の要件で拡張)
-    │           └── README.md       (型定義の使用方法と説明)
+    │           └── extension.d.ts  (型拡張定義 - コア型をDatabricks固有の要件で拡張)
     └── utils/
         ├── errors.ts          (エラー処理 - getErrorMessage, isConnectionErrorを提供)
         ├── json.ts            (JSON処理 - safeStringify, safeJsonParse, extractValidJson, deepMergeJson関数を提供)
@@ -48,6 +47,7 @@ core/
 - リクエストのルーティング
 - 高レベルのエラー処理
 - 責任を適切なモジュールに委譲
+- 並列ツール呼び出し制御の設定管理
 
 **2. `config.ts` - 設定管理**
 - API設定の読み込みと検証
@@ -79,17 +79,23 @@ core/
 - JSONフラグメントの累積処理
 - ツール呼び出しのストリーミング処理
 - 接続エラーからの回復
+- Anthropic風のJSONデルタベース処理の実装
+- 部分的なJSONの効率的な処理
 
 **7. `toolcalls.ts` - ツールコール処理**
 - ツール呼び出しの処理と標準化
-- ツール呼び出し引数の処理
+- ツール呼び出し引数の処理と修復
 - ツール結果の統合
 - 検索ツールの特別処理
+- ツール呼び出し後のメッセージ前処理
+- JSONデルタベースによるツール引数の段階的処理
+- 二重化されたJSONパターンの検出と修復
 
 **8. `types/` - 型定義**
 - 厳密な型インターフェースの定義
 - 型安全なコードのサポート
 - 共通型定義の拡張
+- JSON処理関連の型定義強化
 
 ## 共通ユーティリティの活用強化
 
@@ -112,6 +118,17 @@ if (validJson) {
 
 // JSONオブジェクトのディープマージ
 const mergedConfig = deepMergeJson(defaultConfig, userConfig);
+
+// JSONデルタ処理
+const jsonDelta = processJsonDelta(currentJson, deltaJson);
+if (jsonDelta.complete) {
+  // 完全なJSONとして処理
+} else {
+  // バッファリングを継続
+}
+
+// 二重化されたJSONパターンの修復
+const repairedJson = repairDuplicatedJsonPattern(malformedJson);
 ```
 
 ### 2. エラー処理ユーティリティ
@@ -149,6 +166,17 @@ buffer = JsonBufferHelpers.addToBuffer(fragment, buffer, maxBufferSize);
 if (JsonBufferHelpers.isBufferComplete(buffer)) {
   const data = safeJsonParse(buffer, defaultValue);
   // データ処理
+}
+
+// JSONデルタベース処理:
+const result = processJsonDelta(currentJson, deltaJson);
+if (result.complete && result.valid) {
+  // 完全なJSONとして処理
+  const data = safeJsonParse(result.combined, defaultValue);
+  // 処理完了
+} else {
+  // さらにフラグメントを累積
+  currentJson = result.combined;
 }
 ```
 
@@ -257,11 +285,16 @@ Continue拡張機能のツール呼び出し機能を強化しています：
 - **検索ツールの強化**: 検索クエリが常に適切に設定されるよう特別処理を実装
 - **引数処理の改善**: JSONフラグメントを適切に処理し、完全なJSONになるまでバッファリング
 - **ツール結果の統合**: ツール呼び出しの結果を会話の流れに自然に統合
+- **ツール引数の修復**: 壊れたJSON引数を自動的に検出して修復
+- **メッセージ前処理の強化**: ツール呼び出しと結果の整合性を保つための前処理機能
+- **JSONデルタベース処理**: Anthropicスタイルのデルタベースでの部分的なJSONの処理
+- **並列ツール呼び出し制御**: OpenAIスタイルの並列ツール呼び出し制御で重複問題を防止
 
 ### 3. 信頼性の高いエラー処理と回復メカニズム
 
 - **自動リトライ**: 接続エラーやタイムアウト発生時に指数バックオフ方式でリトライ
 - **状態の復元**: 接続エラー発生時に処理状態を保持し、再接続時に復元
+- **状態の一貫性**: すべてのエラーパターンで一貫した状態プロパティを返し、型安全性を確保
 - **タイムアウト管理**: HTTPレベルでのタイムアウト制御とAbortController/AbortSignalの活用
 - **型安全な設計**: 厳密な型チェックとnull/undefined処理による実行時エラーの防止
 - **イミュータブルなデータフロー**: 変数の再代入を最小限に抑え、予測可能な動作を実現
@@ -274,6 +307,187 @@ Continue拡張機能のツール呼び出し機能を強化しています：
 - **余分なデータの処理**: JSONの後に余分なデータがある場合でも適切に処理
 - **部分的なJSONの累積**: ストリーミングで受信する断片的なJSONを適切に累積
 - **エラー回復メカニズム**: JSONパースエラーが発生した場合のフォールバック処理
+- **JSONデータの修復**: 壊れたJSON形式を自動的に検出して修復するメカニズム
+- **JSON二重化パターンの検出と修復**: {"filepath": "app.py"}{"filepath": "app.py"} のような重複パターンを検出して修復
+- **デルタベースのJSON処理**: Anthropicスタイルの部分的なJSON処理による堅牢な実装
+
+### 5. Agentプログラミング機能のサポート
+
+Continue拡張機能のAgentプログラミング機能を強化しています：
+
+- **ツール結果の自動補完**: ツール呼び出し後のメッセージに必要なツール結果ブロックを自動的に挿入
+- **ツール引数の修復**: 特に `builtin_create_new_file` などのファイル操作に関する引数の修復を強化
+- **入れ子構造の検出**: 複雑な入れ子構造のJSONを検出して修復するメカニズム
+- **メッセージ前処理パイプライン**: API呼び出し前にメッセージの整合性を確保するための前処理
+
+## 改修内容
+
+最新の改修では、以下の機能と改善が実装されました：
+
+### 1. OpenAIスタイルの並列ツール呼び出し制御
+
+ツール呼び出し処理で二重化されたJSONを防止するために、OpenAIの実装からインスピレーションを得た`parallel_tool_calls = false`設定を追加しました。これにより、ツール引数が重複する問題（例: `{"filepath": "app.py"}{"filepath": "app.py"}`）を防ぎます。
+
+```typescript
+// Databricks.ts の convertArgs メソッドに追加
+if (options.tools && Array.isArray(options.tools) && options.tools.length > 0) {
+  // ツール定義を設定
+  finalOptions.tools = options.tools.map(tool => ({
+    type: "function",
+    function: {
+      name: tool.function.name,
+      description: tool.function.description,
+      parameters: tool.function.parameters,
+    }
+  }));
+
+  // OpenAIのアプローチを取り入れた並列ツール呼び出し制御
+  finalOptions.parallel_tool_calls = false;
+  
+  // その他の処理...
+}
+```
+
+### 2. AnthropicスタイルのデルタベースのJSON処理
+
+Anthropicの実装から着想を得た、部分的なJSONフラグメントを扱うための強力な機能を実装しました。これにより、ストリーミング中のJSONが断片的に届いても適切に処理できます。
+
+```typescript
+// json.ts に追加した新しい関数
+export function processJsonDelta(
+  currentJson: string,
+  deltaJson: string
+): { combined: string; complete: boolean; valid: boolean } {
+  // 現在のJSONとデルタを結合
+  const combined = currentJson + deltaJson;
+  
+  // 有効なJSONかチェック
+  const validJson = extractValidJson(combined);
+  const isValid = !!validJson;
+  
+  // 完全なJSONかチェック
+  const isComplete = isValid && 
+    ((validJson.trim().startsWith("{") && validJson.trim().endsWith("}")) ||
+     (validJson.trim().startsWith("[") && validJson.trim().endsWith("]")));
+  
+  return {
+    combined,
+    complete: isComplete,
+    valid: isValid
+  };
+}
+```
+
+### 3. JSONのパターン検出と修復機能
+
+JSONの二重化パターンを検出して修復するための新しいユーティリティ関数を実装しました：
+
+```typescript
+export function repairDuplicatedJsonPattern(jsonStr: string): string {
+  if (!jsonStr || typeof jsonStr !== 'string') {
+    return jsonStr;
+  }
+  
+  // 二重化パターンを検出する正規表現
+  const duplicatePattern = /\{\s*"(\w+)"\s*:\s*"([^"]+)"\s*\}\s*\{\s*"\1"\s*:/g;
+  
+  if (duplicatePattern.test(jsonStr)) {
+    // 有効なJSONを抽出
+    const validJson = extractValidJson(jsonStr);
+    if (validJson) {
+      return validJson;
+    }
+    
+    // 特定のパターンに対する修復
+    return jsonStr.replace(duplicatePattern, '{$1": "$2"}');
+  }
+  
+  return jsonStr;
+}
+```
+
+### 4. ツール呼び出し引数のデルタベース処理
+
+ToolCallProcessorに、部分的なツール引数を処理する新しいメソッドを追加しました：
+
+```typescript
+static processToolArgumentsDelta(
+  toolName: string | undefined,
+  jsonBuffer: string,
+  newJsonFragment: string
+): { 
+  processedArgs: string;
+  isComplete: boolean;
+} {
+  // JSONデルタの処理
+  const result = processJsonDelta(jsonBuffer, newJsonFragment);
+  
+  // JSONの完全性をチェック
+  if (result.complete && result.valid) {
+    // 完全なJSONの処理と修復
+    const validJson = extractValidJson(result.combined);
+    if (validJson) {
+      // 必要に応じて修復
+      const repairedJson = repairDuplicatedJsonPattern(validJson);
+      
+      // ツール名に基づいた特殊処理
+      if (toolName && isSearchTool(toolName)) {
+        // 検索ツールの特別処理
+        return {
+          processedArgs: processSearchToolArguments(toolName, "", repairedJson),
+          isComplete: true
+        };
+      }
+      
+      return {
+        processedArgs: repairedJson,
+        isComplete: true
+      };
+    }
+  }
+  
+  // まだ完全なJSONではない場合
+  return {
+    processedArgs: result.combined,
+    isComplete: false
+  };
+}
+```
+
+### 5. ストリーミング処理の改善
+
+StreamingProcessorの`processToolCallDelta`メソッドを改良し、Anthropicスタイルのデルタベース処理を実装しました：
+
+```typescript
+// JSON引数を処理する部分
+if (toolCallDelta.function?.arguments && result.updatedCurrentToolCall) {
+  // デルタベースでJSONを処理
+  const argsResult = ToolCallProcessor.processToolArgumentsDelta(
+    result.updatedCurrentToolCall.function.name,
+    result.updatedJsonBuffer,
+    toolCallDelta.function.arguments
+  );
+  
+  // 処理結果の更新
+  result.updatedJsonBuffer = argsResult.processedArgs;
+  
+  // JSONが完成したかチェック
+  if (argsResult.isComplete) {
+    // 完全なJSON引数を現在のツール呼び出しに設定
+    result.updatedCurrentToolCall.function.arguments = argsResult.processedArgs;
+    result.updatedIsBufferingJson = false;
+    result.updatedJsonBuffer = "";
+    
+    // ツール呼び出し配列を更新
+    if (result.updatedCurrentToolCallIndex !== null) {
+      result.updatedToolCalls[result.updatedCurrentToolCallIndex] = result.updatedCurrentToolCall;
+    }
+    
+    // メッセージを提供する必要があることを示す
+    result.shouldYieldMessage = true;
+  }
+}
+```
 
 ## 開発ガイドライン
 
@@ -313,6 +527,9 @@ Databricksインテグレーションを拡張または修正する際は、以�
 - **有効なJSON抽出**: 混合コンテンツからJSONを抽出する場合は`extractValidJson`を使用する
 - **JSONバッファリング**: ストリーミングJSONフラグメントは`JsonBufferHelpers`で処理する
 - **サイズ制限**: JSONバッファには最大サイズ制限を設ける
+- **JSON修復**: `repairToolArguments`などの修復機能を活用して壊れたJSONを修復する
+- **デルタベース処理**: JSONフラグメントの処理には`processJsonDelta`を使用する
+- **パターン検出**: JSONの二重化パターンは`repairDuplicatedJsonPattern`で修復する
 
 これらのガイドラインを遵守することで、コードの品質、可読性、保守性が向上し、バグの発生リスクを低減できます。
 
@@ -335,329 +552,4 @@ models:
 
 ## Databricks LLM Types
 
-`types/` ディレクトリには、Databricks Claude 3.7 Sonnetインテグレーションで使用される型定義が含まれています。型定義は、コード全体の型安全性を確保し、開発時のエラー検出を強化するために重要な役割を果たします。
-
-### モジュール構造と責任分担
-
-```
-types/
-├── index.ts         (型定義のエントリーポイント - すべての型をエクスポート)
-├── types.ts         (主要な型定義 - 専用インターフェースを定義)
-└── extension.d.ts   (型拡張定義 - コア型をDatabricks固有の要件で拡張)
-```
-
-#### 各ファイルの明確な責任
-
-**1. `index.ts` - エントリーポイント**
-- 型定義のエントリーポイントとして機能
-- `types.ts`からすべての型定義をエクスポート
-- 型拡張定義をインポート
-
-**2. `types.ts` - 主要な型定義**
-- Databricks固有のインターフェース定義
-- ツール呼び出し型の定義
-- ストリーミング関連の型定義
-- レスポンス処理の型定義
-- 状態管理のインターフェース
-
-**3. `extension.d.ts` - 型拡張定義**
-- コアモジュールの既存型をDatabricks固有の要件で拡張
-- 三重スラッシュ参照ディレクティブによる型参照
-- フォールバックとしてのインライン型定義
-
-### 主要な型定義
-
-#### 1. ベース型定義
-
-```typescript
-// ツール呼び出しの型定義
-export interface ToolCall {
-  id: string;
-  type: "function";
-  function: {
-    name: string;
-    arguments: string;
-  };
-}
-```
-
-#### 2. ストリーミング関連の型定義
-
-```typescript
-// Databricksの思考（Thinking）チャンク型定義
-export interface ThinkingChunk {
-  thinking?: string | object;
-  signature?: string;
-}
-
-// Databricksレスポンスデルタの型定義
-export interface ResponseDelta {
-  content?: string;
-  tool_calls?: {
-    index: number;
-    id?: string;
-    function?: {
-      name?: string;
-      arguments?: string;
-    }
-  }[];
-}
-
-// ストリーミングチャンクの型定義
-export interface StreamingChunk {
-  thinking?: ThinkingChunk;
-  choices?: {
-    delta: ResponseDelta;
-  }[];
-}
-```
-
-#### 3. 処理結果の型定義
-
-```typescript
-// ストリーミング処理の結果型定義
-export interface StreamingResult {
-  updatedMessage: ChatMessage;
-  updatedToolCalls: ToolCall[];
-  updatedCurrentToolCall: ToolCall | null;
-  updatedCurrentToolCallIndex: number | null;
-  updatedJsonBuffer: string;
-  updatedIsBufferingJson: boolean;
-  thinkingMessage?: ChatMessage;
-  shouldYieldMessage: boolean;
-}
-
-// ツール呼び出し処理の結果型定義
-export interface ToolCallResult {
-  updatedToolCalls: ToolCall[];
-  updatedCurrentToolCall: ToolCall | null;
-  updatedCurrentToolCallIndex: number | null;
-  updatedJsonBuffer: string;
-  updatedIsBufferingJson: boolean;
-  shouldYieldMessage: boolean;
-}
-```
-
-#### 4. 状態管理の型定義
-
-```typescript
-// 永続的なストリーム状態の型定義
-export interface PersistentStreamState {
-  jsonBuffer: string;
-  isBufferingJson: boolean;
-  toolCallsInProgress: ToolCall[];
-  currentToolCallIndex: number | null;
-  contentBuffer: string;
-  lastReconnectTimestamp: number;
-}
-```
-
-### 型拡張
-
-既存のコア型定義を拡張してDatabricks固有の機能をサポートしています：
-
-#### 1. LLMOptionsの拡張
-
-```typescript
-interface LLMOptions {
-  /**
-   * 思考プロセスを常にログに表示するかどうかの設定
-   * trueの場合は常に表示、falseの場合は開発モードのみ表示
-   */
-  thinkingProcess?: boolean;
-}
-```
-
-#### 2. CompletionOptionsの拡張
-
-```typescript
-interface CompletionOptions {
-  /**
-   * リクエストのタイムアウト (秒)
-   * デフォルトは300秒 (5分)
-   */
-  requestTimeout?: number;
-}
-```
-
-#### 3. ThinkingChatMessageの拡張
-
-```typescript
-interface ThinkingChatMessage extends ChatMessage {
-  role: "thinking";
-  content: string | object;
-  signature?: string;
-  redactedThinking?: string;
-  toolCalls?: any[];
-}
-```
-
-### 共通ユーティリティとの連携
-
-型定義は共通ユーティリティと密接に連携し、以下の原則に従っています：
-
-#### 1. 厳格な型チェック
-
-```typescript
-// nullかundefinedかを明確に区別する型
-function processToolCall(
-  toolCall: ToolCall | null,
-  index: number | null
-): ToolCallResult {
-  // 実装
-}
-```
-
-#### 2. 型安全なエラー処理
-
-```typescript
-// エラー処理における型安全性の確保
-try {
-  // API呼び出しやその他の操作
-} catch (error: unknown) {
-  // 型を明示的に絞り込む
-  if (error instanceof Error) {
-    // Errorオブジェクトとして処理
-  } else if (typeof error === 'string') {
-    // 文字列エラーメッセージとして処理
-  } else {
-    // その他の型のエラーを処理
-  }
-}
-```
-
-#### 3. 状態管理の型サポート
-
-```typescript
-// ストリーミング状態を型安全に管理
-const initialState: PersistentStreamState = {
-  jsonBuffer: "",
-  isBufferingJson: false,
-  toolCallsInProgress: [],
-  currentToolCallIndex: null,
-  contentBuffer: "",
-  lastReconnectTimestamp: Date.now()
-};
-```
-
-### ベストプラクティス
-
-Databricks型定義を拡張または使用する際は、以下のベストプラクティスに従ってください：
-
-#### 1. 明示的な型アノテーション
-
-- 関数シグネチャに明示的な型を使用する
-- 戻り値の型を明示的に指定する
-- 複雑なオブジェクトに型アノテーションを追加する
-
-```typescript
-function processStream(
-  chunk: StreamingChunk, 
-  state: PersistentStreamState
-): StreamingResult {
-  // 実装
-}
-```
-
-#### 2. NULL安全性の確保
-
-- null可能な値には必ず条件チェックを行う
-- オプショナルプロパティには安全にアクセスする
-- nullとundefinedを明確に区別する
-
-```typescript
-// null安全なアクセス
-const toolName = toolCall?.function?.name || "unknown";
-
-// nullとundefinedの区別
-const index: number | null = value !== undefined 
-  ? Number(value) 
-  : null;
-```
-
-#### 3. 型の絞り込み
-
-- 型ガードを使用して複雑な型を絞り込む
-- instanceofやtypeof演算子を活用する
-- カスタム型ガード関数を作成する
-
-```typescript
-// カスタム型ガード関数
-function isThinkingChunk(chunk: unknown): chunk is ThinkingChunk {
-  if (typeof chunk !== 'object' || chunk === null) return false;
-  return 'thinking' in chunk || 'signature' in chunk;
-}
-
-// 型ガードの使用
-if (isThinkingChunk(response)) {
-  // responseはThinkingChunk型として処理可能
-}
-```
-
-#### 4. 型拡張の明確な文書化
-
-- 型拡張には常にJSDocコメントを添付する
-- なぜ拡張が必要なのかを説明する
-- デフォルト値や使用例を提供する
-
-```typescript
-/**
- * リクエストのタイムアウト設定オプション
- * 
- * @param seconds タイムアウト時間（秒）
- * @default 300 (5分)
- * @example
- * const options = { requestTimeout: 600 }; // 10分のタイムアウト
- */
-```
-
-これらのガイドラインを遵守することで、型安全性が向上し、バグの発生を未然に防止できます。
-
-### 共通ユーティリティの活用強化
-
-型定義の使用時には、以下の共通ユーティリティを活用してください：
-
-#### 1. 型安全なJSON処理
-
-```typescript
-// jsonユーティリティと型定義の連携
-import { safeJsonParse } from "../../../utils/json.js";
-import type { StreamingChunk } from "../types/index.js";
-
-// 型安全なJSONパース
-const chunk = safeJsonParse<StreamingChunk>(jsonText, defaultChunk);
-```
-
-#### 2. エラー処理と型の連携
-
-```typescript
-// エラーユーティリティと型定義の連携
-import { getErrorMessage } from "../../../utils/errors.js";
-import type { PersistentStreamState } from "../types/index.js";
-
-// 型安全なエラー処理
-try {
-  // 処理
-} catch (error: unknown) {
-  const state: PersistentStreamState = {
-    // エラー発生時の状態復元
-  };
-  console.error(`エラーが発生しました: ${getErrorMessage(error)}`);
-}
-```
-
-#### 3. ストリーム処理と型の連携
-
-```typescript
-// ストリーム処理ユーティリティと型定義の連携
-import { processContentDelta } from "../../../utils/streamProcessing.js";
-import type { ResponseDelta } from "../types/index.js";
-
-// 型安全なストリーム処理
-const delta: ResponseDelta = {
-  content: "新しいコンテンツ"
-};
-const updatedContent = processContentDelta(currentContent, delta.content);
-```
-
-これらの共通ユーティリティを活用することで、型安全性を保ちながらコードの重複を削減できます。
+`types/` ディレクトリには、Databricks Claude 3.7 Sonnetインテグレーションで使用される型定義が含まれています。型定義は、コード全体の型安全性を確保し、開発時のエラー検出を強化するために重要な役割を果たします。詳細は、`types/README.md`を参照してください。

@@ -35,6 +35,8 @@ JSON processing utilities that:
 - Provide type-safe JSON operations for LLM responses
 - Extract valid JSON from mixed content or streaming fragments
 - Process incomplete JSON data in streaming contexts
+- Implement delta-based JSON processing for Anthropic-style partial JSON updates
+- Provide tools for detecting and repairing duplicated JSON patterns
 
 **Key functions:**
 - `safeStringify(obj: unknown, defaultValue?: string): string` - Converts objects to strings with error handling
@@ -44,6 +46,8 @@ JSON processing utilities that:
 - `processJsonFragment(fragment: string): any | null` - Processes partial JSON fragments in streams
 - `deepMergeJson(target: any, source: any): any` - Recursively merges JSON objects with proper handling
 - `extractJsonAndRemainder(text: string): [any, string] | null` - Extracts JSON and returns remaining content
+- `processJsonDelta(currentJson: string, deltaJson: string): {combined: string; complete: boolean; valid: boolean}` - Processes JSON fragments using delta-based approach
+- `repairDuplicatedJsonPattern(jsonStr: string): string` - Detects and repairs duplicated JSON patterns
 
 ### `messageUtils.ts`
 Message processing utilities that:
@@ -51,11 +55,14 @@ Message processing utilities that:
 - Extract and transform content from complex message structures
 - Provide helpers for working with chat message histories
 - Extract query contexts and relevant information from conversation history
+- Validate tool result blocks in messages
 
 **Key functions:**
 - `extractContentAsString(content: any): string` - Safely extracts content as string from various formats
 - `extractQueryContext(messages: any[]): string` - Extracts the main query context from a conversation
 - `sanitizeMessages(messages: any[]): any[]` - Cleans messages for API consumption
+- `hasToolResultBlocksAtBeginning(message: ChatMessage): boolean` - Checks if message starts with tool result blocks
+- `messageHasToolCalls(message: ChatMessage): boolean` - Checks if message contains tool calls
 
 ### `sseProcessing.ts`
 Server-Sent Events (SSE) processing utilities that:
@@ -74,6 +81,7 @@ Stream processing utilities that:
 - Manage stream state and error handling
 - Provide utilities for combining and consuming streamed content
 - Handle partial JSON fragments in streaming contexts
+- Support delta-based JSON processing for streaming contexts
 
 **Key functions:**
 - `processContentDelta(currentContent: string, delta: string): string` - Handles incremental content updates
@@ -85,17 +93,27 @@ Stream processing utilities that:
   - `extractJsonAndRemainder(buffer)` - Extracts JSON and returns remaining content
   - `safelyMergeJsonStrings(firstJson, secondJson)` - Safely merges two JSON strings
 - `StreamProcessor` - Base class for provider-specific stream processors
+- `JsonDeltaProcessor` - Utilities for processing JSON deltas in streaming contexts:
+  - `processJsonDelta(currentJson, deltaJson)` - Processes partial JSON fragments using delta-based approach
+  - `isDeltaComplete(delta)` - Checks if JSON delta represents a complete JSON object
+  - `mergeDeltaWithCurrent(current, delta)` - Merges delta JSON with current buffer
 
 ### `toolUtils.ts`
 Tool-related utilities that:
 - Help identify and process tool calls in LLM responses
 - Provide specialized handling for search and other common tools
 - Format tool results for different providers
+- Standardize tool result formats between providers
+- Process tool arguments with support for delta-based JSON
 
 **Key functions:**
 - `isSearchTool(name: string): boolean` - Identifies if a tool is a search tool
 - `processSearchToolArguments(name: string, args: string, context: string): string` - Processes search tool arguments
 - `formatToolResultsContent(results: any): string` - Formats tool results in standardized format
+- `doesModelSupportTools(provider: string, model: string): boolean` - Checks if a model supports tool functionality
+- `isToolOfType(toolName: string, typePatterns: string[]): boolean` - Checks if a tool belongs to a specific category
+- `repairToolArguments(args: string): string` - Repairs malformed JSON in tool arguments
+- `processToolArgumentsDelta(args: string, delta: string): {processed: string, complete: boolean}` - Processes tool arguments using delta-based approach
 
 ### `typeUtils.ts`
 Type safety utilities that:
@@ -115,7 +133,7 @@ The utility modules are designed to be used together to provide comprehensive su
 ### JSON Processing in Streaming Contexts
 
 ```typescript
-import { safeJsonParse, extractValidJson } from "./json";
+import { safeJsonParse, extractValidJson, processJsonDelta } from "./json";
 import { JsonBufferHelpers } from "./streamProcessing";
 
 // Accumulated buffer for JSON fragments
@@ -138,6 +156,22 @@ function processJsonFragment(fragment: string) {
       // Reset buffer after successful processing
       buffer = JsonBufferHelpers.resetBuffer();
     }
+  }
+}
+
+// For delta-based JSON processing (Anthropic-style)
+function processDeltaJsonFragment(currentJson: string, deltaJson: string) {
+  // Process JSON using delta-based approach
+  const result = processJsonDelta(currentJson, deltaJson);
+  
+  // Check if we now have a complete JSON object
+  if (result.complete) {
+    const data = safeJsonParse<ToolCallArguments>(result.combined, defaultArgs);
+    processData(data);
+    return "";  // Reset after processing
+  } else {
+    // Continue accumulating fragments
+    return result.combined;
   }
 }
 ```
@@ -230,6 +264,64 @@ function processMessages(messages: ChatMessage[]): {
 }
 ```
 
+### Tool Call Processing and Repair
+
+```typescript
+import { safeJsonParse, extractValidJson, repairDuplicatedJsonPattern } from "./json";
+import { isSearchTool, processSearchToolArguments, formatToolResultsContent } from "./toolUtils";
+
+// Process and repair tool arguments
+function processToolArguments(args: string, toolName: string, messages: ChatMessage[]): string {
+  // Try to repair broken JSON arguments
+  let repairedArgs = args;
+  
+  // Check for nested or broken JSON structures
+  if (typeof args === 'string') {
+    // First, check for duplicated JSON patterns and repair them
+    repairedArgs = repairDuplicatedJsonPattern(args);
+    
+    // Extract valid JSON from potentially broken structure
+    const validJson = extractValidJson(repairedArgs);
+    if (validJson) {
+      repairedArgs = validJson;
+    } else {
+      // Try other repair approaches
+      const doublePropertyPattern = /\{\s*"(\w+)"\s*:\s*"(.*?)"\s*\{\s*"\1"\s*:/;
+      const match = args.match(doublePropertyPattern);
+      if (match && match[1] && match[2]) {
+        repairedArgs = `{"${match[1]}": "${match[2]}"}`;
+      }
+    }
+  }
+  
+  // If it's a search tool, use specialized processing
+  if (isSearchTool(toolName)) {
+    return processSearchToolArguments(toolName, "", repairedArgs, messages);
+  }
+  
+  // For other tools, ensure valid JSON
+  try {
+    const parsedArgs = safeJsonParse(repairedArgs, {});
+    return JSON.stringify(parsedArgs);
+  } catch {
+    // Return the repaired args if parsing fails
+    return repairedArgs;
+  }
+}
+
+// Create proper tool result blocks
+function createToolResults(toolCalls: ToolCall[]): string {
+  // Format tool results in a standardized format
+  const toolResults = toolCalls.map(tool => ({
+    role: "tool",
+    tool_call_id: tool.id,
+    content: `Tool execution result for ${tool.function.name}`
+  }));
+  
+  return formatToolResultsContent(toolResults);
+}
+```
+
 ## Best Practices for Utility Usage
 
 ### Type Safety
@@ -271,12 +363,63 @@ try {
 }
 ```
 
+#### State-Aware Error Handling
+
+When working with streaming or stateful operations, include state information in error results:
+
+```typescript
+import { getErrorMessage, isConnectionError } from "./errors";
+
+interface ErrorResult<T> {
+  success: boolean;
+  error: Error;
+  state: T;  // Always include state property for all error patterns
+}
+
+function handleProcessingError<T>(error: unknown, currentState: T): ErrorResult<T> {
+  const errorMessage = getErrorMessage(error);
+  
+  if (isConnectionError(error) || 
+      (error instanceof DOMException && error.name === 'AbortError')) {
+    // For connection errors, preserve current state
+    return {
+      success: false,
+      error: error instanceof Error ? error : new Error(errorMessage),
+      state: { ...currentState }  // Copy current state
+    };
+  } else {
+    // For other errors, also include state property but use initial values
+    return {
+      success: false,
+      error: error instanceof Error ? error : new Error(errorMessage),
+      state: createInitialState<T>()  // Function to create initial state
+    };
+  }
+}
+
+// Usage example
+try {
+  // Processing operation
+} catch (error: unknown) {
+  const result = handleProcessingError(error, currentState);
+  
+  if (result.success === false) {
+    // Display error message
+    console.error(`Error occurred: ${result.error.message}`);
+    
+    // Use error state for recovery
+    const recoveryState = result.state;
+    // Recovery process...
+  }
+}
+```
+
 ### JSON Processing
 
 For handling JSON in streaming contexts or when parsing potentially malformed JSON:
 
 ```typescript
-import { safeJsonParse, isValidJson, extractValidJson } from "./json";
+import { safeJsonParse, isValidJson, extractValidJson, processJsonDelta } from "./json";
 import { JsonBufferHelpers } from "./streamProcessing";
 
 // For complete JSON:
@@ -308,6 +451,20 @@ if (result) {
   // Process jsonObj
   // Handle remainder separately
 }
+
+// Delta-based JSON processing:
+let currentJson = "";
+
+// When receiving a delta:
+const result = processJsonDelta(currentJson, deltaJson);
+currentJson = result.combined;
+
+// Check if we now have complete JSON:
+if (result.complete && result.valid) {
+  const data = safeJsonParse(currentJson, defaultValue);
+  // Process complete JSON
+  currentJson = ""; // Reset buffer
+}
 ```
 
 ## Module Integration Guidelines
@@ -328,6 +485,8 @@ To maximize code reuse and maintain clear responsibility boundaries:
    - Always use `safeJsonParse` instead of direct `JSON.parse`
    - Extract valid JSON with `extractValidJson` when dealing with mixed content
    - Process streaming JSON fragments with `JsonBufferHelpers`
+   - Use delta-based processing with `processJsonDelta` for Anthropic-style incremental JSON
+   - Repair duplicated JSON patterns with `repairDuplicatedJsonPattern`
    - Use proper type annotations with generic parameters
 
 7. **Immutable Data Patterns**:

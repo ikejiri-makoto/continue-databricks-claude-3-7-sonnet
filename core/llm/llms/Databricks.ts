@@ -14,11 +14,10 @@ import { DatabricksConfig } from "./Databricks/config.js";
 import { MessageProcessor } from "./Databricks/messages.js";
 import { ToolCallProcessor } from "./Databricks/toolcalls.js";
 import { StreamingProcessor } from "./Databricks/streaming.js";
-
 // 型定義のインポート
 // 型拡張を最初に読み込み、その後具体的な型をインポート
 import "./Databricks/types/extension.d.ts";
-import { ToolCall } from "./Databricks/types/types.js";
+import { ToolCall, ToolResultMessage } from "./Databricks/types/types.js";
 
 // 定数定義
 const DEFAULT_MAX_TOKENS = 32000;
@@ -112,6 +111,10 @@ class Databricks extends BaseLLM {
         }
       }));
 
+      // OpenAIのアプローチを取り入れた並列ツール呼び出し制御
+      // JSON破損防止のためparallel_tool_calls=falseを設定
+      finalOptions.parallel_tool_calls = false;
+
       // ツールがあるにもかかわらずQueryパラメータが不足する可能性のある特定のツールを検出
       const searchTools = options.tools.filter(tool => 
         isSearchTool(tool.function.name)
@@ -172,13 +175,17 @@ class Databricks extends BaseLLM {
   ): AsyncGenerator<ChatMessage> {
     this.validateApiConfig();
     
+    // ToolCallProcessorからツール呼び出しメッセージの前処理を取得
+    const processedMessages = ToolCallProcessor.preprocessToolCallsAndResults(messages);
+    
     let retryCount = 0;
     let lastError: Error | null = null;
 
     while (retryCount <= MAX_RETRIES) {
       try {
         // リクエストとレスポンスの処理
-        const result = await this.processStreamingRequest(messages, signal, options, retryCount);
+        // 前処理されたメッセージを使用
+        const result = await this.processStreamingRequest(processedMessages, signal, options, retryCount);
         
         // 正常に処理が完了したらループを終了
         if (result.success) {

@@ -1,6 +1,5 @@
 import { ChatMessage, ThinkingChatMessage } from "../../../../index.js";
 
-// 重複インポートを解消し、参照方法を統一
 /// <reference path="./extension.d.ts" />
 
 /**
@@ -72,6 +71,15 @@ export interface ToolCallResult {
   updatedJsonBuffer: string;
   updatedIsBufferingJson: boolean;
   shouldYieldMessage: boolean;
+}
+
+/**
+ * ツール結果メッセージの型定義
+ */
+export interface ToolResultMessage {
+  role: 'tool';
+  tool_call_id: string;
+  content: string;
 }
 
 /**

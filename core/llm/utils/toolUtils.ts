@@ -137,10 +137,25 @@ export function processSearchToolArguments(
  * @returns フォーマットされたツール結果テキスト
  */
 export function formatToolResultsContent(toolResults: any[]): string {
+  if (!toolResults || toolResults.length === 0) {
+    return '';
+  }
+  
   let result = '';
   
   for (const toolResult of toolResults) {
-    result += `<tool_result>\n${JSON.stringify(toolResult, null, 2)}\n</tool_result>\n\n`;
+    // 無効なツール結果をスキップ
+    if (!toolResult || !toolResult.role) continue;
+    
+    // 結果の形式をDatabricks Claude 3.7 Sonnet APIへの対応に合わせて改善
+    // 欠落フィールドのチェックと追加
+    const formattedResult = {
+      role: toolResult.role,
+      tool_call_id: toolResult.tool_call_id || toolResult.toolCallId,
+      content: toolResult.content || "Tool execution result"
+    };
+    
+    result += `<tool_result>\n${JSON.stringify(formattedResult, null, 2)}\n</tool_result>\n\n`;
   }
   
   return result;
