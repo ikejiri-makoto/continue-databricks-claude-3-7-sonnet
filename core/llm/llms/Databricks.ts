@@ -1,9 +1,18 @@
 import { ChatMessage, CompletionOptions, LLMOptions } from "../../index.js";
-import { renderChatMessage, stripImages } from "../../util/messageContent.js";
+import { renderChatMessage } from "../../util/messageContent.js";
 import { BaseLLM } from "../index.js";
-import * as fs from "fs";
-import * as path from "path";
-import * as yaml from "js-yaml";
+
+// 共通ユーティリティのインポート
+import { getErrorMessage, isConnectionError } from "../utils/errors.js";
+import { safeStringify } from "../utils/json.js";
+import { processSSEStream } from "../utils/sseProcessing.js";
+
+// Databricks固有のモジュールインポート
+import { DatabricksConfig } from "./Databricks/config.js";
+import { MessageProcessor } from "./Databricks/messages.js";
+import { ToolCallProcessor } from "./Databricks/toolcalls.js";
+import { StreamingProcessor } from "./Databricks/streaming.js";
+import { ToolCall } from "./Databricks/types.js";
 
 /**
  * Databricks Claude LLM クラス
@@ -16,90 +25,23 @@ class Databricks extends BaseLLM {
     contextLength: 200_000,
     completionOptions: {
       model: "databricks-claude-3-7-sonnet",
-      maxTokens: 100000,
+      maxTokens: 128000,  // 修正: la128000 → 128000
       temperature: 1,
     },
+    capabilities: {
+      tools: true
+    }
   };
 
   constructor(options: LLMOptions) {
     super(options);
     // 設定ファイルからapiBaseとapiKeyを読み取る
     if (!this.apiBase) {
-      this.apiBase = this.getApiBaseFromConfig();
+      this.apiBase = DatabricksConfig.getApiBaseFromConfig();
     }
     if (!this.apiKey) {
-      this.apiKey = this.getApiKeyFromConfig();
+      this.apiKey = DatabricksConfig.getApiKeyFromConfig();
     }
-  }
-
-  /**
-   * 設定ファイルからapiBaseを読み取る
-   */
-  private getApiBaseFromConfig(): string {
-    const configPaths = [
-      path.join(process.env.USERPROFILE || "", ".continue", "config.yaml"),
-      path.join(process.cwd(), "extensions", ".continue-debug", "config.yaml")
-    ];
-
-    for (const configPath of configPaths) {
-      try {
-        if (fs.existsSync(configPath)) {
-          const configContent = fs.readFileSync(configPath, "utf8");
-          const config = yaml.load(configContent) as any;
-
-          // Databricksモデル設定を探す
-          if (config && config.models) {
-            for (const model of config.models) {
-              if (model.provider === "databricks" && model.apiBase) {
-                console.log(`Found Databricks apiBase in ${configPath}`);
-                return model.apiBase;
-              }
-            }
-          }
-        }
-      } catch (error) {
-        console.error(`Error reading config from ${configPath}:`, error);
-      }
-    }
-
-    // デフォルト値
-    console.warn("No Databricks apiBase found in config files, using default");
-    return "dummy-url";
-  }
-
-  /**
-   * 設定ファイルからapiKeyを読み取る
-   */
-  private getApiKeyFromConfig(): string {
-    const configPaths = [
-      path.join(process.env.USERPROFILE || "", ".continue", "config.yaml"),
-      path.join(process.cwd(), "extensions", ".continue-debug", "config.yaml")
-    ];
-
-    for (const configPath of configPaths) {
-      try {
-        if (fs.existsSync(configPath)) {
-          const configContent = fs.readFileSync(configPath, "utf8");
-          const config = yaml.load(configContent) as any;
-
-          // Databricksモデル設定を探す
-          if (config && config.models) {
-            for (const model of config.models) {
-              if (model.provider === "databricks" && model.apiKey) {
-                console.log(`Found Databricks apiKey in ${configPath}`);
-                return model.apiKey;
-              }
-            }
-          }
-        }
-      } catch (error) {
-        console.error(`Error reading config from ${configPath}:`, error);
-      }
-    }
-
-    // デフォルト値
-    console.warn("No Databricks apiKey found in config files, using default");
-    return "dapi-dummy-key";
   }
 
   /**
@@ -112,9 +54,9 @@ class Databricks extends BaseLLM {
     // 最小値を設定して小さすぎる値を防止（少なくとも4096）
     const maxTokens = Math.max(options.maxTokens || 32000, 4096);
     
-    // 思考予算を計算 - max_tokensの半分または最大16000を上限とする
+    // 思考予算を計算 - max_tokensの半分または最大64000を上限とする
     // 常にmax_tokensよりも小さくなるようにする
-    const thinkingBudget = Math.min(Math.floor(maxTokens * 0.5), 16000);
+    const thinkingBudget = Math.min(Math.floor(maxTokens * 0.5), 64000);
     
     // OpenAI互換形式のリクエストパラメータ
     const finalOptions: any = {
@@ -126,11 +68,13 @@ class Databricks extends BaseLLM {
       stream: options.stream ?? true,
     };
 
-    // 思考モードを有効にする（max_tokensとの整合性を確保）
-    finalOptions.thinking = {
-      type: "enabled",
-      budget_tokens: thinkingBudget
-    };
+    // 重要: Databricksエンドポイントでは思考モードオプションをリクエストに設定しません
+    // エラーメッセージで「messages.1.content.0.type: Expected `thinking`...」というエラーが発生するため
+    // 思考モードはメッセージの形式で実現する必要があり、APIオプションとしては送信しない
+    // finalOptions.thinking = {
+    //   type: "enabled",
+    //   budget_tokens: thinkingBudget
+    // };
 
     // デバッグログ
     console.log(`Token settings - max_tokens: ${maxTokens}, thinking budget: ${thinkingBudget}`);
@@ -145,6 +89,16 @@ class Databricks extends BaseLLM {
           parameters: tool.function.parameters,
         }
       }));
+
+      // ツールがあるにもかかわらずQueryパラメータが不足する可能性のある特定のツールを検出
+      const searchTools = options.tools.filter(tool => 
+        tool.function.name.includes("search") || 
+        tool.function.name.includes("検索")
+      );
+
+      if (searchTools.length > 0) {
+        console.log(`検索ツールが検出されました: ${searchTools.map(t => t.function.name).join(', ')}`);
+      }
     }
 
     if (options.toolChoice) {
@@ -163,116 +117,19 @@ class Databricks extends BaseLLM {
    * ChatMessageをOpenAI形式に変換
    */
   private convertMessages(messages: ChatMessage[]): any[] {
-    // システムメッセージを抽出
-    const systemMessage = messages.find(m => m.role === "system");
-    let systemContent = "";
+    // まず、会話履歴をサニタイズして標準形式に変換
+    const sanitizedMessages = MessageProcessor.sanitizeMessages(messages);
     
-    if (systemMessage) {
-      if (typeof systemMessage.content === "string") {
-        systemContent = systemMessage.content;
-      } else if (Array.isArray(systemMessage.content)) {
-        // contentをanyとして扱う
-        const content = systemMessage.content as any[];
-        // テキスト部分のみを抽出
-        const textParts = content
-          .filter(part => part && part.type === "text")
-          .map(part => part.text || "");
-        systemContent = textParts.join("\n");
-      }
-      
-      // 水平思考とステップバイステップの指示を追加
-      if (!systemContent.includes("水平思考") && !systemContent.includes("ステップバイステップ")) {
-        systemContent += "\n\n水平思考で考えて！\nステップバイステップで考えて！";
-      }
-    }
+    // ツール呼び出しと結果の前処理を行う
+    const processedMessages = ToolCallProcessor.preprocessToolCallsAndResults(sanitizedMessages);
     
-    // メッセージをOpenAI形式に変換（システムメッセージを除く）
-    const convertedMessages: any[] = messages
-      .filter(m => m.role !== "system")
-      .map(message => {
-        // ツール結果メッセージ
-        if (message.role === "tool") {
-          return {
-            role: "tool",
-            content: renderChatMessage(message) || "",
-            tool_call_id: message.toolCallId || ""
-          };
-        }
-        
-        // ツール呼び出しを含むアシスタントメッセージ
-        if (message.role === "assistant" && message.toolCalls && message.toolCalls.length > 0) {
-          return {
-            role: "assistant",
-            content: typeof message.content === "string" ? message.content : "",
-            tool_calls: message.toolCalls.map(toolCall => ({
-              id: toolCall.id || "",
-              type: "function",
-              function: {
-                name: toolCall.function?.name || "",
-                arguments: toolCall.function?.arguments || "{}"
-              }
-            }))
-          };
-        }
-        
-        // 通常のテキストメッセージ
-        if (typeof message.content === "string") {
-          return {
-            role: message.role,
-            content: message.content
-          };
-        }
-        
-        // 複合コンテンツのメッセージ（画像を含む）
-        if (Array.isArray(message.content)) {
-          // contentをanyとして扱う
-          const content = message.content as any[];
-          const formattedContent = content.map(part => {
-            if (part && part.type === "text") {
-              return {
-                type: "text",
-                text: part.text || ""
-              };
-            } else if (part && part.type === "image") {
-              // 異なる画像形式を処理
-              return {
-                type: "image_url",
-                image_url: {
-                  url: part.imageUrl?.url || "",
-                  detail: "high"
-                }
-              };
-            }
-            return part;
-          });
-          
-          return {
-            role: message.role,
-            content: formattedContent
-          };
-        }
-        
-        // フォールバック
-        return {
-          role: message.role,
-          content: ""
-        };
-      });
-    
-    // システムメッセージがあれば先頭に追加
-    // OpenAI形式ではシステムメッセージを使用するが、このコンパイルエラーを避けるため
-    // システムメッセージはOpenAI APIには送信するが、型チェックをバイパスする
-    if (systemContent) {
-      // 明示的にanyとして追加（TypeScriptの型チェックを避ける）
-      convertedMessages.unshift({
-        role: "system",
-        content: systemContent
-      } as any);
-    }
-    
-    return convertedMessages;
+    // OpenAI形式に変換
+    return MessageProcessor.convertToOpenAIFormat(messages, processedMessages);
   }
 
+  /**
+   * ストリーミング用の補完メソッド
+   */
   protected async *_streamComplete(
     prompt: string,
     signal: AbortSignal,
@@ -284,6 +141,9 @@ class Databricks extends BaseLLM {
     }
   }
 
+  /**
+   * ストリーミングチャットメソッド - Databricks上のClaude 3.7 Sonnetと対話する
+   */
   protected async *_streamChat(
     messages: ChatMessage[],
     signal: AbortSignal,
@@ -297,149 +157,218 @@ class Databricks extends BaseLLM {
       throw new Error("Request not sent. Could not find Databricks API endpoint URL in your config.");
     }
 
-    // リクエストボディに必要なパラメータを構築
-    const args = this.convertArgs(options);
-    
-    // OpenAI形式のリクエストボディを構築
-    const requestBody = {
-      ...args,
-      messages: this.convertMessages(messages),
-    };
+    // リトライ設定
+    const MAX_RETRIES = 3;
+    let retryCount = 0;
+    let lastError: Error | null = null;
 
-    // URLの末尾のスラッシュを確認・修正
-    let apiBaseUrl = this.apiBase;
-    
-    // URLが/invocations/で終わる場合、末尾のスラッシュを削除
-    if (apiBaseUrl.endsWith('/invocations/')) {
-      apiBaseUrl = apiBaseUrl.slice(0, -1);
-      console.log(`APIベースURL修正: 末尾のスラッシュを削除しました - ${apiBaseUrl}`);
-    }
-    
-    // デバッグログ
-    console.log(`Sending request to Databricks API: ${apiBaseUrl}`);
-    console.log('Request body:', JSON.stringify(requestBody, null, 2));
-
-    // DatabricksのエンドポイントにOpenAI形式でリクエスト
-    // new URL()コンストラクタを使わず、直接URLを使用
-    const response = await this.fetch(apiBaseUrl, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "Authorization": `Bearer ${this.apiKey}`,
-      },
-      body: JSON.stringify(requestBody),
-      signal,
-    });
-
-    if (!response.ok) {
-      const errorText = await response.text();
+    while (retryCount <= MAX_RETRIES) {
       try {
-        const errorJson = JSON.parse(errorText);
-        throw new Error(`Databricks API error: ${response.status} - ${errorJson.error?.message || errorJson.message || errorText}`);
-      } catch (e) {
-        throw new Error(`Databricks API error: ${response.status} - ${errorText}`);
-      }
-    }
-
-    // ストリーミングなしの場合は単一のレスポンスを返す
-    if (options.stream === false) {
-      const data = await response.json();
-      yield { 
-        role: "assistant", 
-        content: data.choices[0].message.content 
-      };
-      return;
-    }
-
-    // ストリーミングレスポンスの処理方法
-    // response.body?.getReaderの代わりにtext()メソッドを使用する
-    const responseText = await response.text();
-    
-    // 応答が空の場合は早期リターン
-    if (!responseText || responseText.trim() === "") {
-      console.warn("Empty response from Databricks API");
-      return;
-    }
-
-    // レスポンステキストを解析して行ごとに処理
-    const lines = responseText.split("\n");
-    let currentToolCall: any = null;
-    
-    for (const line of lines) {
-      // 空行またはDONEマーカーをスキップ
-      if (!line || line === "data: [DONE]") continue;
-      
-      // 'data: '接頭辞をチェック
-      const jsonStr = line.startsWith("data: ") ? line.slice(5) : line;
-      
-      try {
-        const data = JSON.parse(jsonStr);
+        // リクエストボディに必要なパラメータを構築
+        const args = this.convertArgs(options);
         
-        // チャンクデータを処理
-        const delta = data.choices?.[0]?.delta;
+        // OpenAI形式のリクエストボディを構築
+        const requestBody = {
+          ...args,
+          messages: this.convertMessages(messages),
+        };
+
+        // URLの末尾のスラッシュを確認・修正
+        let apiBaseUrl = DatabricksConfig.normalizeApiUrl(this.apiBase);
         
-        if (!delta) {
-          // 完全なメッセージの場合
-          if (data.choices?.[0]?.message) {
-            yield { 
-              role: "assistant", 
-              content: data.choices[0].message.content 
-            };
+        // デバッグログ
+        console.log(`Sending request to Databricks API: ${apiBaseUrl}`);
+        console.log('Request body:', JSON.stringify(requestBody, null, 2));
+
+        // リクエストタイムアウトを設定
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), 120000); // 120秒のタイムアウト
+        
+        // シグナルを結合（ユーザー提供のものと内部タイムアウト）
+        const combinedSignal = AbortSignal.any([signal, controller.signal]);
+
+        // DatabricksのエンドポイントにOpenAI形式でリクエスト
+        const response = await this.fetch(apiBaseUrl, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "Authorization": `Bearer ${this.apiKey}`,
+          },
+          body: JSON.stringify(requestBody),
+          signal: combinedSignal,
+        });
+
+        // タイムアウトタイマーをクリア
+        clearTimeout(timeoutId);
+
+        if (!response.ok) {
+          const errorText = await response.text();
+          try {
+            const errorJson = JSON.parse(errorText);
+            console.log(`Request ID: ${response.headers.get("request-id")}, Status: ${response.status}`);
+            throw new Error(`Databricks API error: ${response.status} - ${errorJson.error?.message || errorJson.message || errorText}`);
+          } catch (e) {
+            throw new Error(`Databricks API error: ${response.status} - ${errorText}`);
           }
-          continue;
         }
-        
-        // 通常のテキストデルタ
-        if (delta.content) {
-          yield { role: "assistant", content: delta.content };
+
+        // ストリーミングなしの場合は単一のレスポンスを返す
+        if (options.stream === false) {
+          const data = await response.json();
+          yield { 
+            role: "assistant", 
+            content: safeStringify(data.choices[0].message.content, "")
+          };
+          return;
         }
-        
-        // ツール呼び出しデルタ
-        if (delta.tool_calls && delta.tool_calls.length > 0) {
-          for (const toolCall of delta.tool_calls) {
-            if (toolCall.index === 0 && toolCall.function?.name) {
-              currentToolCall = {
-                id: toolCall.id || `call_${Date.now()}`,
-                type: "function",
-                function: {
-                  name: toolCall.function.name,
-                  arguments: ""
-                }
-              };
+
+        // ストリーミングレスポンスの処理
+        let currentMessage: ChatMessage = { role: "assistant", content: "" };
+        let toolCalls: ToolCall[] = [];
+        let currentToolCall: ToolCall | null = null;
+        let currentToolCallIndex: number | null = null;
+        let thinkingChunkCount = 0;
+
+        // JSONフラグメントのバッファリングのための変数
+        let jsonBuffer: string = "";
+        let isBufferingJson: boolean = false;
+
+        console.log("------------- 応答処理開始 -------------");
+
+        try {
+          // 共通のSSEストリーム処理ユーティリティを使用
+          for await (const chunk of processSSEStream(response)) {
+            // 受信したチャンクのデバッグ
+            console.log(`Received chunk type: ${Object.keys(chunk).join(", ")}`);
+            
+            // ストリーミングチャンクを処理
+            const processResult = StreamingProcessor.processChunk(
+              chunk,
+              currentMessage,
+              toolCalls,
+              currentToolCall,
+              currentToolCallIndex,
+              jsonBuffer,
+              isBufferingJson,
+              messages
+            );
+            
+            // 処理結果を適用
+            currentMessage = processResult.updatedMessage;
+            toolCalls = processResult.updatedToolCalls;
+            currentToolCall = processResult.updatedCurrentToolCall;
+            currentToolCallIndex = processResult.updatedCurrentToolCallIndex;
+            jsonBuffer = processResult.updatedJsonBuffer;
+            isBufferingJson = processResult.updatedIsBufferingJson;
+            
+            // 思考メッセージがある場合
+            if (processResult.thinkingMessage) {
+              thinkingChunkCount++;
+              
+              // デバッグログ
+              if (thinkingChunkCount % 10 === 0) {
+                console.log(`\n===== 思考チャンク #${thinkingChunkCount} =====`);
+                console.log(processResult.thinkingMessage.content.toString().substring(0, 100) + "...");
+              }
+              
+              yield processResult.thinkingMessage;
+              continue;
             }
             
-            if (currentToolCall && toolCall.function?.arguments) {
-              currentToolCall.function.arguments += toolCall.function.arguments;
-              
-              yield {
-                role: "assistant",
-                content: "",
-                toolCalls: [
-                  {
-                    id: currentToolCall.id,
-                    type: "function",
-                    function: {
-                      name: currentToolCall.function.name,
-                      arguments: currentToolCall.function.arguments
-                    }
-                  }
-                ]
-              };
+            // 通常のメッセージまたはツール呼び出しメッセージの場合
+            if (processResult.shouldYieldMessage) {
+              // ツール呼び出しがある場合、ツール呼び出しを含むメッセージをyield
+              if (toolCalls.filter(Boolean).length > 0) {
+                const msgWithTools: ChatMessage & {toolCalls?: ToolCall[]} = {
+                  role: "assistant",
+                  content: currentMessage.content,
+                  toolCalls: toolCalls.filter(Boolean)
+                };
+                
+                yield msgWithTools;
+              } else {
+                // 通常のメッセージをyield
+                yield { ...currentMessage };
+              }
             }
           }
+
+          // 正常に処理が完了したらループを終了
+          console.log("ストリーミング処理が正常に完了しました。");
+          break;
+
+        } catch (streamError: unknown) {
+          // エラーの詳細をログに記録
+          const errorMessage = getErrorMessage(streamError);
+          console.error(`Error processing streaming response: ${errorMessage}`);
+          
+          // 「Premature close」エラーなどの特定の接続エラーでリトライ
+          if (isConnectionError(streamError)) {
+            retryCount++;
+            
+            if (retryCount <= MAX_RETRIES) {
+              // バックオフ時間（指数バックオフ）
+              const backoffTime = Math.min(1000 * Math.pow(2, retryCount), 10000);
+              console.log(`ストリーミングエラー発生、${backoffTime}ms後に再試行します (${retryCount}/${MAX_RETRIES})`);
+              await new Promise(resolve => setTimeout(resolve, backoffTime));
+              lastError = streamError instanceof Error ? streamError : new Error(errorMessage);
+              continue; // ループの先頭に戻ってリトライ
+            }
+          }
+          
+          // その他のエラーはそのまま投げる
+          throw streamError;
         }
-        
-        // 思考（thinking）モードのデルタ処理
-        if (data.thinking) {
-          yield {
-            role: "thinking",
-            content: data.thinking.thinking || "",
-            signature: data.thinking.signature
+
+        // 未処理のJSONバッファがあれば最終処理
+        StreamingProcessor.finalizeJsonBuffer(jsonBuffer, isBufferingJson, currentToolCall, messages);
+
+        // 検索ツールで引数がない場合、デフォルトのクエリを設定
+        toolCalls = StreamingProcessor.ensureSearchToolArguments(toolCalls, messages);
+
+        // 処理統計を出力
+        if (thinkingChunkCount > 0) {
+          console.log(`\n===== 思考モード処理完了 =====`);
+          console.log(`合計思考チャンク数: ${thinkingChunkCount}`);
+        }
+
+        console.log(`\n===== 応答処理完了 =====`);
+
+        // 最終的なメッセージを返す
+        const finalToolCalls = toolCalls.filter(Boolean);
+        if (currentMessage.content || finalToolCalls.length > 0) {
+          // 標準的なChatMessageを使いながら、toolCallsプロパティを追加
+          const chatMsg: ChatMessage = {
+            role: "assistant",
+            content: currentMessage.content
           };
+          
+          // ツール呼び出しがある場合は追加プロパティとして設定
+          if (finalToolCalls.length > 0) {
+            (chatMsg as any).toolCalls = finalToolCalls;
+          }
+          
+          yield chatMsg;
         }
         
-      } catch (e) {
-        console.error("Error parsing response data:", e, "Line:", line);
+        // 正常に完了したらループを抜ける
+        break;
+        
+      } catch (error: unknown) {
+        retryCount++;
+        const errorMessage = getErrorMessage(error);
+        lastError = error instanceof Error ? error : new Error(errorMessage);
+        
+        if (retryCount <= MAX_RETRIES) {
+          // バックオフ時間（指数バックオフ）
+          const backoffTime = Math.min(1000 * Math.pow(2, retryCount), 10000);
+          console.error(`エラーが発生、${backoffTime}ms後に再試行します (${retryCount}/${MAX_RETRIES}): ${errorMessage}`);
+          await new Promise(resolve => setTimeout(resolve, backoffTime));
+        } else {
+          // 最大リトライ回数を超えた場合はエラーを投げる
+          console.error(`最大リトライ回数 (${MAX_RETRIES}) を超えました。最後のエラー: ${errorMessage}`);
+          throw lastError;
+        }
       }
     }
   }

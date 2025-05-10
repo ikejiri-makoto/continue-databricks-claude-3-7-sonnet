@@ -1,0 +1,1094 @@
+import { ChatMessage, CompletionOptions, LLMOptions } from "../../index.js";
+import { renderChatMessage, stripImages } from "../../util/messageContent.js";
+import { BaseLLM } from "../index.js";
+import * as fs from "fs";
+import * as path from "path";
+import * as yaml from "js-yaml";
+import { streamSse } from "../stream.js";
+
+/**
+ * Databricks Claude LLM クラス
+ * OpenAI互換APIを使用してDatabricks上のClaude 3.7 Sonnetにアクセスする
+ */
+class Databricks extends BaseLLM {
+  static providerName = "databricks";
+  static defaultOptions: Partial<LLMOptions> = {
+    model: "databricks-claude-3-7-sonnet",
+    contextLength: 200_000,
+    completionOptions: {
+      model: "databricks-claude-3-7-sonnet",
+      maxTokens: 128000,
+      temperature: 1,
+    },
+    capabilities: {
+      tools: true
+    }
+  };
+
+  constructor(options: LLMOptions) {
+    super(options);
+    // 設定ファイルからapiBaseとapiKeyを読み取る
+    if (!this.apiBase) {
+      this.apiBase = this.getApiBaseFromConfig();
+    }
+    if (!this.apiKey) {
+      this.apiKey = this.getApiKeyFromConfig();
+    }
+  }
+
+  /**
+   * 設定ファイルからapiBaseを読み取る
+   */
+  private getApiBaseFromConfig(): string {
+    const configPaths = [
+      path.join(process.env.USERPROFILE || "", ".continue", "config.yaml"),
+      path.join(process.cwd(), "extensions", ".continue-debug", "config.yaml")
+    ];
+
+    for (const configPath of configPaths) {
+      try {
+        if (fs.existsSync(configPath)) {
+          const configContent = fs.readFileSync(configPath, "utf8");
+          const config = yaml.load(configContent) as any;
+
+          // Databricksモデル設定を探す
+          if (config && config.models) {
+            for (const model of config.models) {
+              if (model.provider === "databricks" && model.apiBase) {
+                console.log(`Found Databricks apiBase in ${configPath}`);
+                return model.apiBase;
+              }
+            }
+          }
+        }
+      } catch (error) {
+        console.error(`Error reading config from ${configPath}:`, error);
+      }
+    }
+
+    // デフォルト値
+    console.warn("No Databricks apiBase found in config files, using default");
+    return "dummy-url";
+  }
+
+  /**
+   * 設定ファイルからapiKeyを読み取る
+   */
+  private getApiKeyFromConfig(): string {
+    const configPaths = [
+      path.join(process.env.USERPROFILE || "", ".continue", "config.yaml"),
+      path.join(process.cwd(), "extensions", ".continue-debug", "config.yaml")
+    ];
+
+    for (const configPath of configPaths) {
+      try {
+        if (fs.existsSync(configPath)) {
+          const configContent = fs.readFileSync(configPath, "utf8");
+          const config = yaml.load(configContent) as any;
+
+          // Databricksモデル設定を探す
+          if (config && config.models) {
+            for (const model of config.models) {
+              if (model.provider === "databricks" && model.apiKey) {
+                console.log(`Found Databricks apiKey in ${configPath}`);
+                return model.apiKey;
+              }
+            }
+          }
+        }
+      } catch (error) {
+        console.error(`Error reading config from ${configPath}:`, error);
+      }
+    }
+
+    // デフォルト値
+    console.warn("No Databricks apiKey found in config files, using default");
+    return "dapi-dummy-key";
+  }
+
+  /**
+   * オブジェクトを安全に文字列化するヘルパーメソッド
+   * [object Object]や未定義値を防ぐ
+   */
+  private safeStringify(obj: any, defaultValue: string = ""): string {
+    if (obj === null || obj === undefined) {
+      return defaultValue;
+    }
+    
+    if (typeof obj === "string") {
+      return obj;
+    }
+    
+    if (typeof obj === "object") {
+      try {
+        return JSON.stringify(obj);
+      } catch (e) {
+        console.error(`オブジェクトのシリアライズエラー:`, e);
+        return defaultValue;
+      }
+    }
+    
+    return String(obj);
+  }
+
+  /**
+   * 文字列がJSON形式として有効かどうかをチェックする
+   * @param jsonString チェックする文字列
+   * @returns 有効なJSONの場合はtrue、そうでない場合はfalse
+   */
+  private isValidJson(jsonString: string): boolean {
+    if (!jsonString || jsonString.trim() === "") {
+      return false;
+    }
+    
+    try {
+      JSON.parse(jsonString);
+      return true;
+    } catch (e) {
+      return false;
+    }
+  }
+
+  /**
+   * 部分的なJSONフラグメントを修復して有効なJSONに変換する試み
+   * @param jsonFragment JSON断片
+   * @param defaultValue デフォルト値
+   * @returns 修復されたJSONオブジェクト、または指定されたデフォルト値
+   */
+  private tryRepairJsonFragment(jsonFragment: string, defaultValue: any = {}): any {
+    if (!jsonFragment || jsonFragment.trim() === "") {
+      return defaultValue;
+    }
+    
+    // すでに有効なJSONならそのまま解析
+    if (this.isValidJson(jsonFragment)) {
+      return JSON.parse(jsonFragment);
+    }
+    
+    // ケース1: 開始括弧 { から始まるが、終了していない場合
+    // 例: {"query": "香川県... → {"query": "香川県..."}
+    if (jsonFragment.trim().startsWith('{') && !jsonFragment.trim().endsWith('}')) {
+      try {
+        const possibleJson = jsonFragment.trim() + '"}';
+        if (this.isValidJson(possibleJson)) {
+          return JSON.parse(possibleJson);
+        }
+      } catch (e) {
+        // 修復試行が失敗した場合は無視
+      }
+    }
+    
+    // ケース2: ダブルクォートで囲まれていない文字列の場合、queryパラメータの値の一部と見なす
+    // 例: "香川県..." → {"query": "香川県..."}
+    if (!jsonFragment.includes('{') && !jsonFragment.includes('}')) {
+      try {
+        const possibleQueryValue = jsonFragment.trim();
+        return { query: possibleQueryValue };
+      } catch (e) {
+        // 変換に失敗した場合は無視
+      }
+    }
+    
+    // ケース3: 開始括弧がなく、終了括弧で終わる場合
+    // 例: ...丸亀市"} → {"query": "...丸亀市"}
+    if (!jsonFragment.trim().startsWith('{') && jsonFragment.trim().endsWith('}')) {
+      try {
+        const possibleQueryValue = jsonFragment.trim().replace(/"}$/, '');
+        return { query: possibleQueryValue };
+      } catch (e) {
+        // 変換に失敗した場合は無視
+      }
+    }
+    
+    // 修復の試みがすべて失敗した場合はデフォルト値を返す
+    return defaultValue;
+  }
+
+  /**
+   * JSON文字列を安全にパースするヘルパーメソッド
+   * 不完全・不正なJSONを適切に処理する
+   * 括弧の深さを追跡して複数連結されたJSONオブジェクトから最初の完全なオブジェクトを抽出する
+   */
+  private safeJsonParse(jsonString: string): any {
+    if (!jsonString || jsonString.trim() === "") {
+      return {};
+    }
+    
+    try {
+      // まず、直接パースを試みる
+      return JSON.parse(jsonString);
+    } catch (e) {
+      // 直接パースに失敗した場合、最初の完全なJSONオブジェクトを抽出する
+      try {
+        // 最初の開き括弧を探す
+        const firstBraceIndex = jsonString.indexOf('{');
+        if (firstBraceIndex >= 0) {
+          let depth = 0;
+          let endIndex = -1;
+          
+          // 文字列を解析して対応する閉じ括弧を見つける（括弧の深さを追跡）
+          for (let i = firstBraceIndex; i < jsonString.length; i++) {
+            if (jsonString[i] === '{') depth++;
+            else if (jsonString[i] === '}') depth--;
+            
+            // 括弧のバランスが取れた（depth = 0）時、最初のJSONオブジェクトの終わりを見つけた
+            if (depth === 0) {
+              endIndex = i + 1;
+              break;
+            }
+          }
+          
+          if (endIndex > 0) {
+            const firstObject = jsonString.substring(firstBraceIndex, endIndex);
+            console.log(`複数のJSONオブジェクトが検出されたため、最初のオブジェクトのみを使用: ${firstObject}`);
+            return JSON.parse(firstObject);
+          }
+        }
+      } catch (nestedError) {
+        console.warn(`JSON解析エラー (複数オブジェクト抽出失敗): ${nestedError}, 対象文字列: '${jsonString}'`);
+      }
+      
+      // JSON文字列の修復を試みる
+      try {
+        return this.tryRepairJsonFragment(jsonString);
+      } catch (repairError) {
+        console.warn(`JSON修復エラー: ${repairError}, 対象文字列: '${jsonString}'`);
+      }
+      
+      // すべての解析試行が失敗した場合、空のオブジェクトを返す
+      console.warn(`JSON解析エラー: ${e}, 対象文字列: '${jsonString}'`);
+      return {};
+    }
+  }
+
+  /**
+   * テキストコンテンツを抽出するヘルパーメソッド
+   */
+  private extractTextContent(content: any[]): string {
+    if (!Array.isArray(content)) return "";
+    
+    return content
+      .filter(part => part && part.type === "text")
+      .map(part => part.text || "")
+      .join("\n");
+  }
+
+  /**
+   * メッセージ内容を文字列として抽出するヘルパーメソッド
+   */
+  private extractContentAsString(content: any): string {
+    if (typeof content === "string") {
+      return content;
+    } else if (Array.isArray(content)) {
+      return this.extractTextContent(content);
+    } else if (content && typeof content === "object") {
+      return this.safeStringify(content, "");
+    }
+    return "";
+  }
+
+  /**
+   * クエリコンテキストを抽出するヘルパーメソッド
+   * ユーザーの入力から検索クエリを見つけ出す
+   */
+  private extractQueryContext(messages: ChatMessage[]): string {
+    // 直近のユーザーメッセージをチェック
+    const recentUserMessages = [...messages].reverse().filter(m => m.role === "user");
+    
+    if (recentUserMessages.length > 0) {
+      const lastUserMessage = recentUserMessages[0];
+      const content = typeof lastUserMessage.content === "string" 
+        ? lastUserMessage.content
+        : this.extractContentAsString(lastUserMessage.content);
+      
+      // 適切なキーワードを抽出（最初の20単語以内）
+      const words = content.split(/\s+/).slice(0, 20).join(" ");
+      if (words.length > 0) {
+        return words;
+      }
+    }
+    
+    // デフォルトのクエリを返す
+    return "search query";
+  }
+
+  /**
+   * 会話履歴内の既存メッセージをサニタイズする
+   * 特に過去のアシスタントメッセージとthinkingメッセージを適切な形式に変換
+   */
+  private sanitizeMessages(messages: ChatMessage[]): ChatMessage[] {
+    return messages.map(message => {
+      // アシスタントメッセージの処理
+      if (message.role === "assistant") {
+        const contentStr = this.extractContentAsString(message.content);
+        
+        // ツール呼び出しがある場合は保持
+        if (message.toolCalls && message.toolCalls.length > 0) {
+          return {
+            role: "assistant",
+            content: contentStr,
+            toolCalls: message.toolCalls
+          };
+        }
+        
+        // 通常のアシスタントメッセージ
+        return {
+          role: "assistant",
+          content: contentStr
+        };
+      }
+      
+      // thinking メッセージはそのまま保持
+      if (message.role === "thinking") {
+        const thinkingContent = typeof message.content === "string" 
+          ? message.content 
+          : this.safeStringify(message.content, "");
+        
+        return {
+          role: "thinking",
+          content: thinkingContent,
+          signature: message.signature
+        };
+      }
+      
+      // ツール結果メッセージ
+      if (message.role === "tool") {
+        return {
+          role: "tool",
+          content: typeof message.content === "string" ? message.content : this.extractContentAsString(message.content),
+          toolCallId: message.toolCallId
+        };
+      }
+      
+      // その他のメッセージ（userなど）
+      return {
+        role: message.role,
+        content: typeof message.content === "string" ? message.content : this.extractContentAsString(message.content),
+      };
+    });
+  }
+
+  /**
+   * OpenAI形式のオプションに変換
+   */
+  public convertArgs(options: CompletionOptions) {
+    const modelName = options.model || "databricks-claude-3-7-sonnet";
+    
+    // max_tokensのデフォルト値または指定値を取得
+    // 最小値を設定して小さすぎる値を防止（少なくとも4096）
+    const maxTokens = Math.max(options.maxTokens || 32000, 4096);
+    
+    // 思考予算を計算 - max_tokensの半分または最大64000を上限とする
+    // 常にmax_tokensよりも小さくなるようにする
+    const thinkingBudget = Math.min(Math.floor(maxTokens * 0.5), 64000);
+    
+    // OpenAI互換形式のリクエストパラメータ
+    const finalOptions: any = {
+      model: modelName,
+      max_tokens: maxTokens,
+      temperature: options.temperature ?? 1,
+      top_p: options.topP,
+      stop: options.stop?.filter(x => x.trim() !== ""),
+      stream: options.stream ?? true,
+    };
+
+    // 重要: Databricksエンドポイントでは思考モードオプションをリクエストに設定しません
+    // エラーメッセージで「messages.1.content.0.type: Expected `thinking`...」というエラーが発生するため
+    // 思考モードはメッセージの形式で実現する必要があり、APIオプションとしては送信しない
+    // finalOptions.thinking = {
+    //   type: "enabled",
+    //   budget_tokens: thinkingBudget
+    // };
+
+    // デバッグログ
+    console.log(`Token settings - max_tokens: ${maxTokens}, thinking budget: ${thinkingBudget}`);
+
+    // ツール関連のパラメータがある場合のみ追加
+    if (options.tools) {
+      finalOptions.tools = options.tools.map(tool => ({
+        type: "function",
+        function: {
+          name: tool.function.name,
+          description: tool.function.description,
+          parameters: tool.function.parameters,
+        }
+      }));
+
+      // ツールがあるにもかかわらずQueryパラメータが不足する可能性のある特定のツールを検出
+      const searchTools = options.tools.filter(tool => 
+        tool.function.name.includes("search") || 
+        tool.function.name.includes("検索")
+      );
+
+      if (searchTools.length > 0) {
+        console.log(`検索ツールが検出されました: ${searchTools.map(t => t.function.name).join(', ')}`);
+      }
+    }
+
+    if (options.toolChoice) {
+      finalOptions.tool_choice = {
+        type: "function",
+        function: {
+          name: options.toolChoice.function.name
+        }
+      };
+    }
+
+    return finalOptions;
+  }
+
+  /**
+   * ChatMessageをOpenAI形式に変換
+   */
+  private convertMessages(messages: ChatMessage[]): any[] {
+    // まず、会話履歴をサニタイズして標準形式に変換
+    const sanitizedMessages = this.sanitizeMessages(messages);
+    
+    // システムメッセージを抽出
+    const systemMessage = sanitizedMessages.find(m => m.role === "system");
+    let systemContent = "";
+    
+    if (systemMessage) {
+      if (typeof systemMessage.content === "string") {
+        systemContent = systemMessage.content;
+      } else if (Array.isArray(systemMessage.content)) {
+        const content = systemMessage.content as any[];
+        const textParts = content
+          .filter(part => part && part.type === "text")
+          .map(part => part.text || "");
+        systemContent = textParts.join("\n");
+      }
+      
+      // 水平思考とステップバイステップの指示を追加
+      if (!systemContent.includes("水平思考") && !systemContent.includes("ステップバイステップ")) {
+        systemContent += "\n\n水平思考で考えて！\nステップバイステップで考えて！";
+      }
+    }
+    
+    // thinkingメッセージを抽出（存在する場合）
+    const thinkingMessages = sanitizedMessages.filter(m => m.role === "thinking");
+    const hasThinkingContent = thinkingMessages.length > 0;
+    let latestThinkingContent = "";
+    
+    if (hasThinkingContent) {
+      // 最新のthinkingメッセージを使用
+      const lastThinking = thinkingMessages[thinkingMessages.length - 1];
+      latestThinkingContent = typeof lastThinking.content === "string" 
+        ? lastThinking.content 
+        : this.safeStringify(lastThinking.content, "");
+    }
+    
+    // メッセージをOpenAI形式に変換（システムメッセージを除く）
+    const convertedMessages: any[] = sanitizedMessages
+      .filter(m => m.role !== "system" && m.role !== "thinking")
+      .map(message => {
+        // ツール結果メッセージ
+        if (message.role === "tool") {
+          return {
+            role: "tool",
+            content: typeof message.content === "string" ? message.content : "",
+            tool_call_id: message.toolCallId || ""
+          };
+        }
+        
+        // アシスタントメッセージの処理
+        if (message.role === "assistant") {
+          const contentStr = typeof message.content === "string" 
+            ? message.content 
+            : this.safeStringify(message.content, "");
+            
+          // ツール呼び出しを含むアシスタントメッセージの特別処理
+          if (message.toolCalls && message.toolCalls.length > 0) {
+            // 重要: Databricks上のClaude 3.7 Sonnetでは、アシスタントメッセージの最初の要素が
+            // 思考(thinking)または要約された思考(redacted_thinking)である必要がある
+            // また、アシスタントの通常の応答もテキスト形式で表示するようにする
+            
+            return {
+              role: "assistant",
+              content: contentStr, // 単一の文字列として送信
+              tool_calls: message.toolCalls.map(toolCall => {
+                // 特に検索ツールの場合には、queryパラメータが確実に存在するようにする
+                let args = toolCall.function?.arguments || "{}";
+                let argsObj = {};
+                
+                try {
+                  if (typeof args === "string") {
+                    argsObj = JSON.parse(args);
+                  } else {
+                    argsObj = args;
+                  }
+                  
+                  // webツール検索の場合、queryパラメータが必要
+                  if (toolCall.function?.name?.includes("search") && !argsObj.hasOwnProperty("query")) {
+                    // ユーザーメッセージから適切なクエリを抽出
+                    const queryContext = this.extractQueryContext(sanitizedMessages);
+                    argsObj = { query: queryContext };
+                    args = JSON.stringify(argsObj);
+                  }
+                } catch (e) {
+                  console.warn(`ツール引数の解析エラー: ${e}, 引数: ${args}`);
+                  // 整形できない場合は、基本的なクエリパラメータを含むJSONを使用
+                  if (toolCall.function?.name?.includes("search")) {
+                    // ユーザーメッセージから適切なクエリを抽出
+                    const queryContext = this.extractQueryContext(sanitizedMessages);
+                    args = JSON.stringify({ query: queryContext });
+                  } else {
+                    args = "{}";
+                  }
+                }
+                
+                return {
+                  id: toolCall.id || "",
+                  type: "function",
+                  function: {
+                    name: toolCall.function?.name || "",
+                    arguments: args
+                  }
+                };
+              })
+            };
+          }
+          
+          // 通常のアシスタントメッセージ（thinking情報なし）
+          // 重要: Databricks上のClaude 3.7は単純なテキスト形式のメッセージで問題なく機能する
+          return {
+            role: "assistant",
+            content: contentStr
+          };
+        }
+        
+        // ユーザーメッセージなど、その他のメッセージタイプ
+        if (typeof message.content === "string") {
+          return {
+            role: message.role,
+            content: message.content
+          };
+        }
+        
+        // 複合コンテンツのメッセージ（画像を含む）
+        if (Array.isArray(message.content)) {
+          const content = message.content as any[];
+          const formattedContent = content.map(part => {
+            if (part && part.type === "text") {
+              return {
+                type: "text",
+                text: part.text || ""
+              };
+            } else if (part && part.type === "image") {
+              return {
+                type: "image_url",
+                image_url: {
+                  url: part.imageUrl?.url || "",
+                  detail: "high"
+                }
+              };
+            }
+            return part;
+          });
+          
+          return {
+            role: message.role,
+            content: formattedContent
+          };
+        }
+        
+        // フォールバック：コンテンツが解析できない場合は空文字列
+        return {
+          role: message.role,
+          content: ""
+        };
+      });
+    
+    // システムメッセージがあれば先頭に追加
+    if (systemContent) {
+      convertedMessages.unshift({
+        role: "system",
+        content: systemContent
+      } as any);
+    }
+    
+    return convertedMessages;
+  }
+
+  /**
+   * ストリーミング用の補完メソッド
+   */
+  protected async *_streamComplete(
+    prompt: string,
+    signal: AbortSignal,
+    options: CompletionOptions,
+  ): AsyncGenerator<string> {
+    const messages = [{ role: "user" as const, content: prompt }];
+    for await (const update of this._streamChat(messages, signal, options)) {
+      yield renderChatMessage(update);
+    }
+  }
+
+  /**
+   * ストリーミングチャットメソッド - Databricks上のClaude 3.7 Sonnetと対話する
+   */
+  protected async *_streamChat(
+    messages: ChatMessage[],
+    signal: AbortSignal,
+    options: CompletionOptions,
+  ): AsyncGenerator<ChatMessage> {
+    if (!this.apiKey || this.apiKey === "") {
+      throw new Error("Request not sent. Databricks API key is not set in your config.");
+    }
+
+    if (!this.apiBase) {
+      throw new Error("Request not sent. Could not find Databricks API endpoint URL in your config.");
+    }
+
+    try {
+      // リクエストボディに必要なパラメータを構築
+      const args = this.convertArgs(options);
+      
+      // OpenAI形式のリクエストボディを構築
+      const requestBody = {
+        ...args,
+        messages: this.convertMessages(messages),
+      };
+
+      // URLの末尾のスラッシュを確認・修正
+      let apiBaseUrl = this.apiBase;
+      
+      // URLが/invocations/で終わる場合、末尾のスラッシュを削除
+      if (apiBaseUrl.endsWith('/invocations/')) {
+        apiBaseUrl = apiBaseUrl.slice(0, -1);
+        console.log(`APIベースURL修正: 末尾のスラッシュを削除しました - ${apiBaseUrl}`);
+      }
+      
+      // デバッグログ
+      console.log(`Sending request to Databricks API: ${apiBaseUrl}`);
+      console.log('Request body:', JSON.stringify(requestBody, null, 2));
+
+      // DatabricksのエンドポイントにOpenAI形式でリクエスト
+      const response = await this.fetch(apiBaseUrl, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "Authorization": `Bearer ${this.apiKey}`,
+        },
+        body: JSON.stringify(requestBody),
+        signal,
+      });
+
+      if (!response.ok) {
+        const errorText = await response.text();
+        try {
+          const errorJson = JSON.parse(errorText);
+          console.log(`Request ID: ${response.headers.get("request-id")}, Status: ${response.status}`);
+          throw new Error(`Databricks API error: ${response.status} - ${errorJson.error?.message || errorJson.message || errorText}`);
+        } catch (e) {
+          throw new Error(`Databricks API error: ${response.status} - ${errorText}`);
+        }
+      }
+
+      // ストリーミングなしの場合は単一のレスポンスを返す
+      if (options.stream === false) {
+        const data = await response.json();
+        yield { 
+          role: "assistant", 
+          content: this.safeStringify(data.choices[0].message.content, "")
+        };
+        return;
+      }
+
+      // ストリーミングレスポンスの処理（streamSse関数使用）
+      let currentMessage: ChatMessage = { role: "assistant", content: "" };
+      let toolCalls: any[] = [];
+      let currentToolCall: any = null;
+      let currentToolCallIndex: number | null = null;
+      let hasThinking = false;
+      let thinkingContent = "";
+      let thinkingChunkCount = 0;
+
+      // JSONフラグメントのバッファリングのための変数
+      let currentJsonBuffer: string = "";
+      let jsonFragmentMode: boolean = false;
+      let expectedJsonCompletion: boolean = false;
+
+      console.log("------------- 応答処理開始 -------------");
+
+      for await (const chunk of streamSse(response)) {
+        // 受信したチャンクのデバッグ
+        console.log(`Received chunk type: ${Object.keys(chunk).join(", ")}`);
+        
+        // thinking（思考）モードの処理 - Databricksでは実際には発生しない
+        if (chunk.thinking) {
+          hasThinking = true;
+          thinkingChunkCount++;
+          
+          // 思考内容を適切にシリアライズ
+          let newThinking = "";
+          if (typeof chunk.thinking.thinking === "string") {
+            newThinking = chunk.thinking.thinking || "";
+          } else if (chunk.thinking.thinking && typeof chunk.thinking.thinking === "object") {
+            newThinking = this.safeStringify(chunk.thinking.thinking, "[思考データ]");
+          }
+          
+          thinkingContent += newThinking;
+          
+          // 思考内容のログ出力
+          console.log(`\n===== 思考チャンク #${thinkingChunkCount} =====`);
+          console.log(newThinking);
+          console.log("============================");
+          
+          // 思考メッセージをyield - シンプルな形式に
+          yield {
+            role: "thinking",
+            content: thinkingContent,
+            signature: chunk.thinking.signature
+          };
+        }
+
+        // メッセージコンテンツの処理 - [object Object]を防ぐためのシリアライズ処理を追加
+        if (chunk.choices?.[0]?.delta?.content) {
+          const newContent = typeof chunk.choices[0].delta.content === "string" 
+            ? chunk.choices[0].delta.content 
+            : this.safeStringify(chunk.choices[0].delta.content, "");
+            
+          if (typeof currentMessage.content === "string") {
+            currentMessage.content += newContent;
+          } else {
+            currentMessage.content = newContent;
+          }
+          
+          // メッセージをyield - シンプルなテキスト形式で
+          yield { ...currentMessage };
+        }
+
+        // ツールコールの処理
+        if (chunk.choices?.[0]?.delta?.tool_calls && chunk.choices[0].delta.tool_calls.length > 0) {
+          const toolCallDelta = chunk.choices[0].delta.tool_calls[0];
+          
+          // 新しいツール呼び出しの初期化またはインデックスベースでの更新
+          if (toolCallDelta.index !== undefined) {
+            const index = toolCallDelta.index;
+            
+            // 新しいツール呼び出しの開始
+            if (currentToolCallIndex !== index) {
+              currentToolCallIndex = index;
+              
+              // ツール呼び出し配列の拡張（必要に応じて）
+              while (toolCalls.length <= index) {
+                toolCalls.push(null);
+              }
+              
+              // 新しいツール呼び出しの初期化
+              if (!toolCalls[index]) {
+                currentToolCall = {
+                  id: toolCallDelta.id || `call_${Date.now()}_${index}`,
+                  type: "function",
+                  function: {
+                    name: "",
+                    arguments: ""
+                  }
+                };
+                toolCalls[index] = currentToolCall;
+                
+                // ツール名があれば設定
+                if (toolCallDelta.function?.name) {
+                  currentToolCall.function.name = toolCallDelta.function.name;
+                  
+                  // 検索ツールの場合、デフォルトの引数を予め設定
+                  if (currentToolCall.function.name.includes("search_web")) {
+                    // ユーザーメッセージから適切なクエリを抽出
+                    const queryContext = this.extractQueryContext(messages);
+                    currentToolCall.function.arguments = JSON.stringify({ query: queryContext });
+                  }
+                }
+                
+                // JSONフラグメントのバッファリングを初期化
+                currentJsonBuffer = "";
+                jsonFragmentMode = false;
+                expectedJsonCompletion = false;
+              } else {
+                currentToolCall = toolCalls[index];
+              }
+            }
+            
+            // 関数名の更新
+            if (toolCallDelta.function?.name) {
+              currentToolCall.function.name = toolCallDelta.function.name;
+            }
+            
+            // 関数引数の更新 - JSONフラグメントがストリーミングされる場合の対応
+            if (toolCallDelta.function?.arguments) {
+              let newArgs = typeof toolCallDelta.function.arguments === "string" 
+                ? toolCallDelta.function.arguments 
+                : this.safeStringify(toolCallDelta.function.arguments, "");
+              
+              // JSONフラグメントの処理
+              if (newArgs) {
+                // JSONフラグメントの開始を検出（"{" で始まる）
+                if (newArgs.trim().startsWith('{') && !this.isValidJson(newArgs)) {
+                  jsonFragmentMode = true;
+                  expectedJsonCompletion = true;
+                  currentJsonBuffer = newArgs;
+                  console.log(`JSONフラグメントバッファリング開始: ${currentJsonBuffer}`);
+                } 
+                // JSONフラグメントの続き
+                else if (jsonFragmentMode && expectedJsonCompletion) {
+                  currentJsonBuffer += newArgs;
+                  console.log(`JSONフラグメントバッファ追加: ${currentJsonBuffer}`);
+                  
+                  // バッファされたJSONが有効かチェック
+                  if (this.isValidJson(currentJsonBuffer)) {
+                    console.log(`バッファリングされたJSONが完成しました: ${currentJsonBuffer}`);
+                    jsonFragmentMode = false;
+                    expectedJsonCompletion = false;
+                    
+                    // 完成したJSONを引数に設定
+                    if (currentToolCall.function.arguments) {
+                      // 既存の引数がある場合はマージ
+                      try {
+                        let existingArgs = this.safeJsonParse(currentToolCall.function.arguments);
+                        let newArgsObj = JSON.parse(currentJsonBuffer);
+                        const mergedArgs = { ...existingArgs, ...newArgsObj };
+                        currentToolCall.function.arguments = JSON.stringify(mergedArgs);
+                      } catch (e) {
+                        // マージに失敗した場合は新しいJSONを使用
+                        currentToolCall.function.arguments = currentJsonBuffer;
+                      }
+                    } else {
+                      // 既存の引数がない場合は直接設定
+                      currentToolCall.function.arguments = currentJsonBuffer;
+                    }
+                    
+                    // バッファをリセット
+                    currentJsonBuffer = "";
+                  }
+                }
+                // 単独のJSONフラグメント（既に有効なJSON）
+                else if (this.isValidJson(newArgs)) {
+                  // 有効なJSONの場合は既存の引数とマージ
+                  if (currentToolCall.function.arguments) {
+                    try {
+                      let existingArgs = this.safeJsonParse(currentToolCall.function.arguments);
+                      let newArgsObj = JSON.parse(newArgs);
+                      const mergedArgs = { ...existingArgs, ...newArgsObj };
+                      currentToolCall.function.arguments = JSON.stringify(mergedArgs);
+                    } catch (e) {
+                      // マージに失敗した場合は新しいJSONを使用
+                      currentToolCall.function.arguments = newArgs;
+                    }
+                  } else {
+                    // 既存の引数がない場合は直接設定
+                    currentToolCall.function.arguments = newArgs;
+                  }
+                }
+                // JSONフラグメントストリーミングの終了検出（"}" で終わる）
+                else if (jsonFragmentMode && newArgs.trim().endsWith('}')) {
+                  currentJsonBuffer += newArgs;
+                  console.log(`JSONフラグメントバッファ完了: ${currentJsonBuffer}`);
+                  
+                  // 最終的なJSONの解析を試みる
+                  try {
+                    const parsedJson = this.safeJsonParse(currentJsonBuffer);
+                    
+                    // 既存の引数とマージ
+                    if (currentToolCall.function.arguments) {
+                      try {
+                        let existingArgs = this.safeJsonParse(currentToolCall.function.arguments);
+                        const mergedArgs = { ...existingArgs, ...parsedJson };
+                        currentToolCall.function.arguments = JSON.stringify(mergedArgs);
+                      } catch (e) {
+                        // マージに失敗した場合は新しいJSONを使用
+                        currentToolCall.function.arguments = JSON.stringify(parsedJson);
+                      }
+                    } else {
+                      // 既存の引数がない場合は直接設定
+                      currentToolCall.function.arguments = JSON.stringify(parsedJson);
+                    }
+                  } catch (e) {
+                    console.warn(`JSONフラグメント解析エラー: ${e}, バッファ: '${currentJsonBuffer}'`);
+                    
+                    // 解析に失敗した場合でも、最善の推測を試みる
+                    const repairedJson = this.tryRepairJsonFragment(currentJsonBuffer);
+                    if (Object.keys(repairedJson).length > 0) {
+                      if (currentToolCall.function.arguments) {
+                        try {
+                          let existingArgs = this.safeJsonParse(currentToolCall.function.arguments);
+                          const mergedArgs = { ...existingArgs, ...repairedJson };
+                          currentToolCall.function.arguments = JSON.stringify(mergedArgs);
+                        } catch (mergeError) {
+                          currentToolCall.function.arguments = JSON.stringify(repairedJson);
+                        }
+                      } else {
+                        currentToolCall.function.arguments = JSON.stringify(repairedJson);
+                      }
+                    }
+                  }
+                  
+                  // バッファとフラグをリセット
+                  jsonFragmentMode = false;
+                  expectedJsonCompletion = false;
+                  currentJsonBuffer = "";
+                }
+                // その他のフラグメント（JSONの一部だが、開始・終了ブレースがない）
+                else if (jsonFragmentMode) {
+                  // バッファに追加
+                  currentJsonBuffer += newArgs;
+                  console.log(`JSONフラグメントバッファ継続: ${currentJsonBuffer}`);
+                } 
+                // 非JSONフラグメント
+                else {
+                  // 検索ツールの場合、queryパラメータ形式に変換して追加
+                  if (currentToolCall.function.name?.includes("search")) {
+                    // 既存の引数がある場合はパースしてマージ
+                    if (currentToolCall.function.arguments) {
+                      try {
+                        let existingArgs = this.safeJsonParse(currentToolCall.function.arguments);
+                        if (!existingArgs.query) {
+                          existingArgs.query = newArgs.trim();
+                        } else {
+                          existingArgs.query += newArgs.trim();
+                        }
+                        currentToolCall.function.arguments = JSON.stringify(existingArgs);
+                      } catch (e) {
+                        // パースに失敗した場合は新しいクエリを作成
+                        currentToolCall.function.arguments = JSON.stringify({ query: newArgs.trim() });
+                      }
+                    } else {
+                      // 既存の引数がない場合は新しいクエリを作成
+                      currentToolCall.function.arguments = JSON.stringify({ query: newArgs.trim() });
+                    }
+                  } else {
+                    // 通常の引数として追加
+                    if (currentToolCall.function.arguments) {
+                      currentToolCall.function.arguments += newArgs;
+                    } else {
+                      currentToolCall.function.arguments = newArgs;
+                    }
+                  }
+                }
+              }
+              
+              // 特定のツール（検索など）の場合、必須パラメータを確認
+              if (currentToolCall.function.name?.includes("search") && 
+                  !jsonFragmentMode && // バッファリングモードでない場合のみチェック
+                  currentToolCall.function.arguments) {
+                try {
+                  // 現在の引数をパースしてみる
+                  const args = this.safeJsonParse(currentToolCall.function.arguments);
+                  
+                  // queryパラメータがなければ追加
+                  if (!args.query) {
+                    // ユーザーメッセージから適切なクエリを抽出
+                    const queryContext = this.extractQueryContext(messages);
+                    args.query = queryContext;
+                    currentToolCall.function.arguments = JSON.stringify(args);
+                  }
+                } catch (e) {
+                  // JSONとして不完全な場合、ログに記録して続行
+                  // バッファリングモードでなければ、適切なqueryパラメータの形式に変換を試みる
+                  console.warn(`不完全なJSON引数: ${currentToolCall.function.arguments}, エラー: ${e}`);
+                  
+                  if (!currentToolCall.function.arguments.includes("query")) {
+                    const queryContext = this.extractQueryContext(messages);
+                    if (currentToolCall.function.arguments.trim().startsWith('{')) {
+                      // 既存のJSONの一部と思われる場合は修復を試みる
+                      const repairedJson = this.tryRepairJsonFragment(currentToolCall.function.arguments);
+                      repairedJson.query = queryContext;
+                      currentToolCall.function.arguments = JSON.stringify(repairedJson);
+                    } else {
+                      // 単純にテキストがある場合は、それをqueryパラメータの値として使用
+                      currentToolCall.function.arguments = JSON.stringify({ query: currentToolCall.function.arguments.trim() || queryContext });
+                    }
+                  }
+                }
+              }
+            } else if (currentToolCall.function.name?.includes("search") && 
+                      (!currentToolCall.function.arguments || currentToolCall.function.arguments === "")) {
+              // 検索ツールで引数が空の場合、デフォルト値を設定
+              const queryContext = this.extractQueryContext(messages);
+              currentToolCall.function.arguments = JSON.stringify({ query: queryContext });
+            }
+            
+            // ツール呼び出しを含むメッセージをyield
+            const validToolCalls = toolCalls.filter(Boolean);
+            if (validToolCalls.length > 0) {
+              const yieldMessage: ChatMessage = {
+                role: "assistant",
+                content: currentMessage.content,
+                toolCalls: validToolCalls
+              };
+              
+              yield yieldMessage;
+            }
+          }
+        }
+      }
+
+      // JSONバッファに残ったデータがあれば最終処理
+      if (jsonFragmentMode && currentJsonBuffer && currentToolCall) {
+        console.log(`最終JSONフラグメントバッファ処理: ${currentJsonBuffer}`);
+        
+        // 未完了のJSONバッファがある場合、修復を試みる
+        try {
+          const repairedJson = this.tryRepairJsonFragment(currentJsonBuffer);
+          
+          // 既存の引数とマージ
+          if (currentToolCall.function.arguments) {
+            try {
+              let existingArgs = this.safeJsonParse(currentToolCall.function.arguments);
+              const mergedArgs = { ...existingArgs, ...repairedJson };
+              currentToolCall.function.arguments = JSON.stringify(mergedArgs);
+            } catch (e) {
+              currentToolCall.function.arguments = JSON.stringify(repairedJson);
+            }
+          } else {
+            currentToolCall.function.arguments = JSON.stringify(repairedJson);
+          }
+        } catch (e) {
+          console.warn(`最終JSONフラグメント処理エラー: ${e}`);
+          
+          // 修復が失敗した場合、検索ツールならクエリパラメータを追加
+          if (currentToolCall.function.name?.includes("search") && 
+              (!currentToolCall.function.arguments || !currentToolCall.function.arguments.includes("query"))) {
+            const queryContext = this.extractQueryContext(messages);
+            
+            if (currentToolCall.function.arguments) {
+              try {
+                let existingArgs = this.safeJsonParse(currentToolCall.function.arguments);
+                existingArgs.query = queryContext;
+                currentToolCall.function.arguments = JSON.stringify(existingArgs);
+              } catch (parseError) {
+                currentToolCall.function.arguments = JSON.stringify({ query: queryContext });
+              }
+            } else {
+              currentToolCall.function.arguments = JSON.stringify({ query: queryContext });
+            }
+          }
+        }
+      }
+
+      // 処理統計を出力
+      if (hasThinking) {
+        console.log(`\n===== 思考モード処理完了 =====`);
+        console.log(`合計思考チャンク数: ${thinkingChunkCount}`);
+        console.log(`合計思考文字数: ${thinkingContent.length}`);
+        console.log(`-------------------------------\n`);
+      } else {
+        console.log(`\n===== 応答処理完了 =====`);
+      }
+
+      // 最終的なメッセージを返す
+      const finalToolCalls = toolCalls.filter(Boolean);
+      if (currentMessage.content || finalToolCalls.length > 0) {
+        yield {
+          role: "assistant",
+          content: currentMessage.content,
+          toolCalls: finalToolCalls
+        };
+      }
+    } catch (error) {
+      console.error("Error processing streaming response:", error);
+      throw error;
+    }
+  }
+}
+
+export default Databricks;

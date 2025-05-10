@@ -22,6 +22,16 @@ export const PROVIDER_TOOL_SUPPORT: Record<
       "gemini",
     ].some((part) => model.toLowerCase().startsWith(part));
   },
+  databricks: (model) => {
+    // Databricksでホストされているクラウドモデルも対応させる
+    if (
+      ["claude-3-5", "claude-3.5", "claude-3-7", "claude-3.7", "databricks-claude"].some((part) =>
+        model.toLowerCase().includes(part),
+      )
+    ) {
+      return true;
+    }
+  },
   anthropic: (model) => {
     if (
       ["claude-3-5", "claude-3.5", "claude-3-7", "claude-3.7"].some((part) =>

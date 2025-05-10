@@ -1,0 +1,684 @@
+import { ChatMessage, CompletionOptions, LLMOptions } from "../../index.js";
+import { renderChatMessage, stripImages } from "../../util/messageContent.js";
+import { BaseLLM } from "../index.js";
+import * as fs from "fs";
+import * as path from "path";
+import * as yaml from "js-yaml";
+import { streamSse } from "../stream.js";
+
+/**
+ * Databricks Claude LLM クラス
+ * OpenAI互換APIを使用してDatabricks上のClaude 3.7 Sonnetにアクセスする
+ */
+class Databricks extends BaseLLM {
+  static providerName = "databricks";
+  static defaultOptions: Partial<LLMOptions> = {
+    model: "databricks-claude-3-7-sonnet",
+    contextLength: 200_000,
+    completionOptions: {
+      model: "databricks-claude-3-7-sonnet",
+      maxTokens: 128000,
+      temperature: 1,
+    },
+    capabilities: {
+      tools: true
+    }
+  };
+
+  constructor(options: LLMOptions) {
+    super(options);
+    // 設定ファイルからapiBaseとapiKeyを読み取る
+    if (!this.apiBase) {
+      this.apiBase = this.getApiBaseFromConfig();
+    }
+    if (!this.apiKey) {
+      this.apiKey = this.getApiKeyFromConfig();
+    }
+  }
+
+  /**
+   * 設定ファイルからapiBaseを読み取る
+   */
+  private getApiBaseFromConfig(): string {
+    const configPaths = [
+      path.join(process.env.USERPROFILE || "", ".continue", "config.yaml"),
+      path.join(process.cwd(), "extensions", ".continue-debug", "config.yaml")
+    ];
+
+    for (const configPath of configPaths) {
+      try {
+        if (fs.existsSync(configPath)) {
+          const configContent = fs.readFileSync(configPath, "utf8");
+          const config = yaml.load(configContent) as any;
+
+          // Databricksモデル設定を探す
+          if (config && config.models) {
+            for (const model of config.models) {
+              if (model.provider === "databricks" && model.apiBase) {
+                console.log(`Found Databricks apiBase in ${configPath}`);
+                return model.apiBase;
+              }
+            }
+          }
+        }
+      } catch (error) {
+        console.error(`Error reading config from ${configPath}:`, error);
+      }
+    }
+
+    // デフォルト値
+    console.warn("No Databricks apiBase found in config files, using default");
+    return "dummy-url";
+  }
+
+  /**
+   * 設定ファイルからapiKeyを読み取る
+   */
+  private getApiKeyFromConfig(): string {
+    const configPaths = [
+      path.join(process.env.USERPROFILE || "", ".continue", "config.yaml"),
+      path.join(process.cwd(), "extensions", ".continue-debug", "config.yaml")
+    ];
+
+    for (const configPath of configPaths) {
+      try {
+        if (fs.existsSync(configPath)) {
+          const configContent = fs.readFileSync(configPath, "utf8");
+          const config = yaml.load(configContent) as any;
+
+          // Databricksモデル設定を探す
+          if (config && config.models) {
+            for (const model of config.models) {
+              if (model.provider === "databricks" && model.apiKey) {
+                console.log(`Found Databricks apiKey in ${configPath}`);
+                return model.apiKey;
+              }
+            }
+          }
+        }
+      } catch (error) {
+        console.error(`Error reading config from ${configPath}:`, error);
+      }
+    }
+
+    // デフォルト値
+    console.warn("No Databricks apiKey found in config files, using default");
+    return "dapi-dummy-key";
+  }
+
+  /**
+   * テキストコンテンツを抽出するヘルパーメソッド
+   */
+  private extractTextContent(content: any[]): string {
+    if (!Array.isArray(content)) return "";
+    
+    return content
+      .filter(part => part && part.type === "text")
+      .map(part => part.text || "")
+      .join("\n");
+  }
+
+  /**
+   * メッセージ内容を文字列として抽出するヘルパーメソッド
+   */
+  private extractContentAsString(content: any): string {
+    if (typeof content === "string") {
+      return content;
+    } else if (Array.isArray(content)) {
+      return this.extractTextContent(content);
+    } else if (content && typeof content === "object") {
+      // JSONとして文字列化できる場合は変換、できなければ空文字列を返す
+      try {
+        return JSON.stringify(content);
+      } catch (e) {
+        return "";
+      }
+    }
+    return "";
+  }
+
+  /**
+   * 会話履歴内の既存メッセージをサニタイズする
+   * 特に過去のアシスタントメッセージをthinking対応の形式に変換
+   */
+  private sanitizeMessages(messages: ChatMessage[]): ChatMessage[] {
+    return messages.map(message => {
+      // アシスタントメッセージの処理
+      if (message.role === "assistant") {
+        const contentStr = this.extractContentAsString(message.content);
+        
+        // ツール呼び出しがある場合は保持
+        if (message.toolCalls && message.toolCalls.length > 0) {
+          return {
+            role: "assistant",
+            content: contentStr,
+            toolCalls: message.toolCalls
+          };
+        }
+        
+        // 通常のアシスタントメッセージ
+        return {
+          role: "assistant",
+          content: contentStr
+        };
+      }
+      
+      // thinking メッセージはそのまま
+      if (message.role === "thinking") {
+        return message;
+      }
+      
+      // ツール結果メッセージ
+      if (message.role === "tool") {
+        return {
+          role: "tool",
+          content: typeof message.content === "string" ? message.content : this.extractContentAsString(message.content),
+          toolCallId: message.toolCallId
+        };
+      }
+      
+      // その他のメッセージ（userなど）
+      return {
+        role: message.role,
+        content: typeof message.content === "string" ? message.content : this.extractContentAsString(message.content),
+      };
+    });
+  }
+
+  /**
+   * OpenAI形式のオプションに変換
+   */
+  public convertArgs(options: CompletionOptions) {
+    const modelName = options.model || "databricks-claude-3-7-sonnet";
+    
+    // max_tokensのデフォルト値または指定値を取得
+    // 最小値を設定して小さすぎる値を防止（少なくとも4096）
+    const maxTokens = Math.max(options.maxTokens || 32000, 4096);
+    
+    // 思考予算を計算 - max_tokensの半分または最大64000を上限とする
+    // 常にmax_tokensよりも小さくなるようにする
+    const thinkingBudget = Math.min(Math.floor(maxTokens * 0.5), 64000);
+    
+    // OpenAI互換形式のリクエストパラメータ
+    const finalOptions: any = {
+      model: modelName,
+      max_tokens: maxTokens,
+      temperature: options.temperature ?? 1,
+      top_p: options.topP,
+      stop: options.stop?.filter(x => x.trim() !== ""),
+      stream: options.stream ?? true,
+    };
+
+    // 思考モードを有効にする（max_tokensとの整合性を確保）
+    // budget_tokens: Claude 3.7 Sonnetの思考トークンの上限
+    // 値は「max_tokensの50%」か「64000トークン」のいずれか小さい方に設定
+    // 例: max_tokensが128000の場合、budget_tokensは64000に設定される
+    // 例: max_tokensが20000の場合、budget_tokensは10000に設定される
+    finalOptions.thinking = {
+      type: "enabled",
+      budget_tokens: thinkingBudget
+    };
+
+    // デバッグログ
+    console.log(`Token settings - max_tokens: ${maxTokens}, thinking budget: ${thinkingBudget}`);
+
+    // ツール関連のパラメータがある場合のみ追加
+    if (options.tools) {
+      finalOptions.tools = options.tools.map(tool => ({
+        type: "function",
+        function: {
+          name: tool.function.name,
+          description: tool.function.description,
+          parameters: tool.function.parameters,
+        }
+      }));
+    }
+
+    if (options.toolChoice) {
+      finalOptions.tool_choice = {
+        type: "function",
+        function: {
+          name: options.toolChoice.function.name
+        }
+      };
+    }
+
+    return finalOptions;
+  }
+
+  /**
+   * ChatMessageをOpenAI形式に変換
+   */
+  private convertMessages(messages: ChatMessage[]): any[] {
+    // まず、会話履歴をサニタイズして標準形式に変換
+    const sanitizedMessages = this.sanitizeMessages(messages);
+    
+    // システムメッセージを抽出
+    const systemMessage = sanitizedMessages.find(m => m.role === "system");
+    let systemContent = "";
+    
+    if (systemMessage) {
+      if (typeof systemMessage.content === "string") {
+        systemContent = systemMessage.content;
+      } else if (Array.isArray(systemMessage.content)) {
+        const content = systemMessage.content as any[];
+        const textParts = content
+          .filter(part => part && part.type === "text")
+          .map(part => part.text || "");
+        systemContent = textParts.join("\n");
+      }
+      
+      // 水平思考とステップバイステップの指示を追加
+      if (!systemContent.includes("水平思考") && !systemContent.includes("ステップバイステップ")) {
+        systemContent += "\n\n水平思考で考えて！\nステップバイステップで考えて！";
+      }
+    }
+    
+    // メッセージをOpenAI形式に変換（システムメッセージを除く）
+    const convertedMessages: any[] = sanitizedMessages
+      .filter(m => m.role !== "system")
+      .map(message => {
+        // ツール結果メッセージ
+        if (message.role === "tool") {
+          return {
+            role: "tool",
+            content: typeof message.content === "string" ? message.content : "",
+            tool_call_id: message.toolCallId || ""
+          };
+        }
+        
+        // thinking メッセージの処理
+        if (message.role === "thinking") {
+          const thinkingContent = typeof message.content === "string" 
+            ? message.content 
+            : "";
+              
+          // thinking型としてメッセージ内のcontent配列の最初の要素に配置
+          // Claude APIの要件：思考モードが有効な場合は、アシスタントメッセージの最初の要素がthinking型である必要がある
+          return {
+            role: "assistant",
+            content: [
+              {
+                type: "thinking",
+                thinking: thinkingContent
+              }
+            ]
+          };
+        }
+        
+        // ツール呼び出しを含むアシスタントメッセージは特別な処理
+        if (message.role === "assistant" && message.toolCalls && message.toolCalls.length > 0) {
+          const contentStr = typeof message.content === "string" ? message.content : "";
+          
+          // 思考モードが有効な場合、アシスタントメッセージの最初の要素にthinking型を追加
+          return {
+            role: "assistant",
+            content: [
+              {
+                type: "thinking",
+                thinking: contentStr || "思考中..."
+              },
+              {
+                type: "text",
+                text: contentStr || ""
+              }
+            ],
+            tool_calls: message.toolCalls.map(toolCall => ({
+              id: toolCall.id || "",
+              type: "function",
+              function: {
+                name: toolCall.function?.name || "",
+                arguments: toolCall.function?.arguments || "{}"
+              }
+            }))
+          };
+        }
+        
+        // 通常のアシスタントメッセージ（thinking対応）
+        if (message.role === "assistant") {
+          const contentStr = typeof message.content === "string" ? message.content : "";
+          
+          // Claudeの要件に合わせて、thinking型を最初の要素に配置
+          return {
+            role: "assistant",
+            content: [
+              {
+                type: "thinking",
+                thinking: contentStr || "思考中..."
+              },
+              {
+                type: "text",
+                text: contentStr || ""
+              }
+            ]
+          };
+        }
+        
+        // ユーザーメッセージなど、その他のメッセージタイプ
+        if (typeof message.content === "string") {
+          return {
+            role: message.role,
+            content: message.content
+          };
+        }
+        
+        // 複合コンテンツのメッセージ（画像を含む）
+        if (Array.isArray(message.content)) {
+          const content = message.content as any[];
+          const formattedContent = content.map(part => {
+            if (part && part.type === "text") {
+              return {
+                type: "text",
+                text: part.text || ""
+              };
+            } else if (part && part.type === "image") {
+              return {
+                type: "image_url",
+                image_url: {
+                  url: part.imageUrl?.url || "",
+                  detail: "high"
+                }
+              };
+            }
+            return part;
+          });
+          
+          return {
+            role: message.role,
+            content: formattedContent
+          };
+        }
+        
+        // フォールバック：コンテンツが解析できない場合は空文字列
+        return {
+          role: message.role,
+          content: ""
+        };
+      });
+    
+    // システムメッセージがあれば先頭に追加
+    if (systemContent) {
+      convertedMessages.unshift({
+        role: "system",
+        content: systemContent
+      } as any);
+    }
+    
+    return convertedMessages;
+  }
+
+  protected async *_streamComplete(
+    prompt: string,
+    signal: AbortSignal,
+    options: CompletionOptions,
+  ): AsyncGenerator<string> {
+    const messages = [{ role: "user" as const, content: prompt }];
+    for await (const update of this._streamChat(messages, signal, options)) {
+      yield renderChatMessage(update);
+    }
+  }
+
+  protected async *_streamChat(
+    messages: ChatMessage[],
+    signal: AbortSignal,
+    options: CompletionOptions,
+  ): AsyncGenerator<ChatMessage> {
+    if (!this.apiKey || this.apiKey === "") {
+      throw new Error("Request not sent. Databricks API key is not set in your config.");
+    }
+
+    if (!this.apiBase) {
+      throw new Error("Request not sent. Could not find Databricks API endpoint URL in your config.");
+    }
+
+    try {
+      // リクエストボディに必要なパラメータを構築
+      const args = this.convertArgs(options);
+      
+      // OpenAI形式のリクエストボディを構築
+      const requestBody = {
+        ...args,
+        messages: this.convertMessages(messages),
+      };
+
+      // URLの末尾のスラッシュを確認・修正
+      let apiBaseUrl = this.apiBase;
+      
+      // URLが/invocations/で終わる場合、末尾のスラッシュを削除
+      if (apiBaseUrl.endsWith('/invocations/')) {
+        apiBaseUrl = apiBaseUrl.slice(0, -1);
+        console.log(`APIベースURL修正: 末尾のスラッシュを削除しました - ${apiBaseUrl}`);
+      }
+      
+      // デバッグログ
+      console.log(`Sending request to Databricks API: ${apiBaseUrl}`);
+      console.log('Request body:', JSON.stringify(requestBody, null, 2));
+
+      // DatabricksのエンドポイントにOpenAI形式でリクエスト
+      const response = await this.fetch(apiBaseUrl, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "Authorization": `Bearer ${this.apiKey}`,
+        },
+        body: JSON.stringify(requestBody),
+        signal,
+      });
+
+      if (!response.ok) {
+        const errorText = await response.text();
+        try {
+          const errorJson = JSON.parse(errorText);
+          console.log(`Request ID: ${response.headers.get("request-id")}, Status: ${response.status}`);
+          throw new Error(`Databricks API error: ${response.status} - ${errorJson.error?.message || errorJson.message || errorText}`);
+        } catch (e) {
+          throw new Error(`Databricks API error: ${response.status} - ${errorText}`);
+        }
+      }
+
+      // ストリーミングなしの場合は単一のレスポンスを返す
+      if (options.stream === false) {
+        const data = await response.json();
+        yield { 
+          role: "assistant", 
+          content: data.choices[0].message.content 
+        };
+        return;
+      }
+
+      // ストリーミングレスポンスの処理（streamSse関数使用）
+      let currentMessage: ChatMessage = { role: "assistant", content: "" };
+      let toolCalls: any[] = [];
+      let currentToolCall: any = null;
+      let currentToolCallIndex: number | null = null;
+      let hasThinking = false;
+      let thinkingContent = "";
+      let thinkingChunkCount = 0;
+
+      console.log("------------- 思考モード処理開始 -------------");
+
+      for await (const chunk of streamSse(response)) {
+        // 受信したチャンクのデバッグ
+        console.log(`Received chunk type: ${Object.keys(chunk).join(", ")}`);
+        
+        // thinking（思考）モードの処理
+        if (chunk.thinking) {
+          hasThinking = true;
+          thinkingChunkCount++;
+          
+          // 思考内容を累積 - 正しくシリアライズして[object Object]を防ぐ
+          let newThinking = "";
+          if (typeof chunk.thinking.thinking === "string") {
+            newThinking = chunk.thinking.thinking || "";
+          } else if (chunk.thinking.thinking && typeof chunk.thinking.thinking === "object") {
+            try {
+              // オブジェクトをJSON文字列化
+              newThinking = JSON.stringify(chunk.thinking.thinking);
+            } catch (e) {
+              newThinking = "[思考モード: オブジェクト変換エラー]";
+            }
+          }
+          
+          thinkingContent += newThinking;
+          
+          // 思考内容のログ出力（常時表示）
+          console.log(`\n===== 思考チャンク #${thinkingChunkCount} =====`);
+          console.log(newThinking);
+          console.log("============================");
+          
+          // 思考メッセージをyield
+          yield {
+            role: "thinking",
+            content: thinkingContent,
+            signature: chunk.thinking.signature
+          };
+        }
+
+        // メッセージコンテンツの処理
+        if (chunk.choices?.[0]?.delta?.content) {
+          if (typeof currentMessage.content === "string") {
+            currentMessage.content += chunk.choices[0].delta.content;
+          } else {
+            currentMessage.content = chunk.choices[0].delta.content;
+          }
+          
+          // メッセージをyield - Claudeの思考モード要件に準拠した形式
+          if (hasThinking) {
+            // 思考情報があれば、content配列内の要素として含める
+            yield {
+              role: "assistant",
+              content: [
+                {
+                  type: "thinking",
+                  thinking: thinkingContent || "思考中..."
+                },
+                {
+                  type: "text",
+                  text: currentMessage.content as string
+                }
+              ]
+            };
+          } else {
+            // 思考情報がなければ通常のテキストとして扱う
+            yield { ...currentMessage };
+          }
+        }
+
+        // ツールコールの処理
+        if (chunk.choices?.[0]?.delta?.tool_calls && chunk.choices[0].delta.tool_calls.length > 0) {
+          const toolCallDelta = chunk.choices[0].delta.tool_calls[0];
+          
+          // 新しいツール呼び出しの初期化またはインデックスベースでの更新
+          if (toolCallDelta.index !== undefined) {
+            const index = toolCallDelta.index;
+            
+            // 新しいツール呼び出しの開始
+            if (currentToolCallIndex !== index) {
+              currentToolCallIndex = index;
+              
+              // ツール呼び出し配列の拡張（必要に応じて）
+              while (toolCalls.length <= index) {
+                toolCalls.push(null);
+              }
+              
+              // 新しいツール呼び出しの初期化
+              if (!toolCalls[index]) {
+                currentToolCall = {
+                  id: toolCallDelta.id || `call_${Date.now()}_${index}`,
+                  type: "function",
+                  function: {
+                    name: "",
+                    arguments: ""
+                  }
+                };
+                toolCalls[index] = currentToolCall;
+              } else {
+                currentToolCall = toolCalls[index];
+              }
+            }
+            
+            // 関数名の更新
+            if (toolCallDelta.function?.name) {
+              currentToolCall.function.name = toolCallDelta.function.name;
+            }
+            
+            // 関数引数の更新
+            if (toolCallDelta.function?.arguments) {
+              // 引数を追加
+              currentToolCall.function.arguments += toolCallDelta.function.arguments;
+              
+              // 引数の検証（完全なJSONになっているか）
+              try {
+                // 試験的にJSONとして解析（エラーが発生しなければ完全なJSON）
+                JSON.parse(currentToolCall.function.arguments);
+              } catch (e) {
+                // まだ完全なJSONではない - 問題ない、引き続き累積する
+              }
+            }
+            
+            // ツール呼び出しを含むメッセージをyield
+            const validToolCalls = toolCalls.filter(Boolean);
+            if (validToolCalls.length > 0) {
+              const yieldMessage: ChatMessage = {
+                role: "assistant",
+                content: hasThinking ? 
+                  // 思考情報がある場合、Claudeが期待する形式でcontentを構築
+                  [
+                    {
+                      type: "thinking",
+                      thinking: thinkingContent || "思考中..."
+                    },
+                    {
+                      type: "text",
+                      text: currentMessage.content as string || ""
+                    }
+                  ] : 
+                  // 思考情報がない場合は通常のテキスト
+                  currentMessage.content,
+                toolCalls: validToolCalls
+              };
+              
+              yield yieldMessage;
+            }
+          }
+        }
+      }
+
+      // 思考モードの統計を出力
+      if (hasThinking) {
+        console.log(`\n===== 思考モード処理完了 =====`);
+        console.log(`合計思考チャンク数: ${thinkingChunkCount}`);
+        console.log(`合計思考文字数: ${thinkingContent.length}`);
+        console.log(`-------------------------------\n`);
+      }
+
+      // 最終的なメッセージを返す
+      const finalToolCalls = toolCalls.filter(Boolean);
+      if (currentMessage.content || finalToolCalls.length > 0) {
+        yield {
+          role: "assistant",
+          content: hasThinking ? 
+            // 思考情報がある場合、Claudeが期待する形式でcontentを構築
+            [
+              {
+                type: "thinking",
+                thinking: thinkingContent || "思考中..."
+              },
+              {
+                type: "text",
+                text: currentMessage.content as string || ""
+              }
+            ] : 
+            // 思考情報がない場合は通常のテキスト
+            currentMessage.content,
+          toolCalls: finalToolCalls
+        };
+      }
+    } catch (error) {
+      console.error("Error processing streaming response:", error);
+      throw error;
+    }
+  }
+}
+
+export default Databricks;
