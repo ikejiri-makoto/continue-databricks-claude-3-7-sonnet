@@ -4,7 +4,7 @@
 
 ## モジュール間の関係と連携
 
-Databricksインテグレーションは、メインの`Databricks.ts`クラスと、`Databricks/`ディレクトリ内の複数の特化したモジュールから構成されています。また、`core/llm/utils/`ディレクトリの共通ユーティリティも活用しています。以下は各モジュール間の関係と連携の概要です。
+Databricksインテグレーションは、メインの`Databricks.ts`クラスと、`Databricks/`ディレクトリ内の複数の特化したモジュールから構成されています。また、`core/llm/utils/`ディレクトリの共通ユーティリティも積極的に活用しています。以下は各モジュール間の関係と連携の概要です。
 
 ### モジュール構造と依存関係
 
@@ -15,6 +15,8 @@ core/
 │   └── messageContent.js      (チャットメッセージのレンダリング関数)
 └── llm/
     ├── index.js               (BaseLLMクラス - すべてのLLM実装の基底クラス)
+    ├── types/                 (共通型定義の拡張 - 適切な型安全性の確保)
+    │   └── databricks-extensions.d.ts (Databricks用の拡張型定義)
     ├── llms/
     │   ├── Databricks.ts       (メインクラス - 他のモジュールを統合)
     │   └── Databricks/
@@ -22,14 +24,16 @@ core/
     │       ├── messages.ts     (メッセージ変換 - メッセージフォーマットの調整)
     │       ├── streaming.ts    (ストリーム処理 - レスポンスの逐次処理)
     │       ├── toolcalls.ts    (ツールコール処理 - ツール呼び出しの処理)
-    │       └── types.ts        (型定義 - インターフェースと型の定義)
+    │       └── types/          (型定義 - インターフェースと型の定義)
+    │           ├── types.ts        (基本型定義)
+    │           └── extension.d.ts  (型拡張定義)
     └── utils/
-        ├── errors.js          (エラー処理 - getErrorMessage, isConnectionErrorを提供)
-        ├── json.js            (JSON処理 - safeStringify関数などを提供)
-        ├── messageUtils.js    (メッセージ処理 - コンテンツ抽出やクエリコンテキスト取得関数)
-        ├── sseProcessing.js   (SSE処理 - processSSEStream関数を提供)
-        ├── streamProcessing.js (ストリーム処理 - ストリームレスポンスの加工)
-        └── toolUtils.js       (ツール処理 - 検索ツールの識別と引数処理を提供)
+        ├── errors.ts          (エラー処理 - getErrorMessage, isConnectionErrorを提供)
+        ├── json.ts            (JSON処理 - safeStringify, safeJsonParse, deepMergeJson関数を提供)
+        ├── messageUtils.ts    (メッセージ処理 - コンテンツ抽出やクエリコンテキスト取得関数)
+        ├── sseProcessing.ts   (SSE処理 - processSSEStream関数を提供)
+        ├── streamProcessing.ts (ストリーム処理 - processContentDelta関数を提供)
+        └── toolUtils.ts       (ツール処理 - isSearchTool, processSearchToolArgumentsを提供)
 ```
 
 **Databricks.tsのインポート関係図：**
@@ -37,199 +41,377 @@ core/
 ```
 Databricks.ts
 ├── core/index.js から
-│   └── ChatMessage, CompletionOptions, LLMOptions (基本インターフェース)
+│   └── ChatMessage, CompletionOptions, LLMOptions, ThinkingChatMessage (基本インターフェース)
 ├── core/util/messageContent.js から
 │   └── renderChatMessage (チャットメッセージのレンダリング)
 ├── core/llm/index.js から
 │   └── BaseLLM (Databricksクラスの基底クラス)
+├── core/llm/types から
+│   └── databricks-extensions (共通型定義拡張)
 ├── core/llm/utils/ から
-│   ├── errors.js: getErrorMessage, isConnectionError (エラー処理)
-│   ├── json.js: safeStringify (JSON操作)
-│   └── sseProcessing.js: processSSEStream (SSEストリーム処理)
+│   ├── errors.ts: getErrorMessage, isConnectionError (エラー処理)
+│   ├── json.ts: safeStringify, safeJsonParse (JSON操作)
+│   ├── streamProcessing.ts: processContentDelta, JsonBufferHelpers (ストリーム処理)
+│   ├── sseProcessing.ts: processSSEStream (SSEストリーム処理)
+│   └── toolUtils.ts: isSearchTool, processSearchToolArguments (ツール処理)
 └── Databricks/ モジュールから
-    ├── config.js: DatabricksConfig (API設定)
-    ├── messages.js: MessageProcessor (メッセージ変換)
-    ├── toolcalls.js: ToolCallProcessor (ツール処理)
-    ├── streaming.js: StreamingProcessor (ストリーム処理)
-    └── types.js: ToolCall (型定義)
+    ├── config.ts: DatabricksConfig (API設定)
+    ├── messages.ts: MessageProcessor (メッセージ変換)
+    ├── toolcalls.ts: ToolCallProcessor (ツール処理)
+    ├── streaming.ts: StreamingProcessor (ストリーム処理)
+    └── types/: ToolCall, ThinkingChatMessage, etc. (型定義)
 ```
 
-## Databricks.tsのコアモジュール依存関係
+## 最新の改善点：コードの再構成とユーティリティ活用強化
 
-`Databricks.ts`ファイルは、複数のコアモジュールに依存しており、以下のインポート関係があります：
+最近の改修では以下の重要な改善を実施しました：
 
-### コアモジュールからのインポート
+### 1. 責任分割の明確化
 
-1. **`../../index.js`**（core/index.js）から：
-   - `ChatMessage` - チャットメッセージの基本インターフェース
-   - `CompletionOptions` - 補完リクエストのオプション
-   - `LLMOptions` - LLMの初期化オプション
+大きな`_streamChat`メソッドを複数の小さなメソッドに分割し、各メソッドの責任を明確化しました：
 
-2. **`../../util/messageContent.js`**（core/util/messageContent.js）から：
-   - `renderChatMessage` - チャットメッセージをテキストとしてレンダリングするユーティリティ関数
+- `validateApiConfig()` - API設定の検証のみを担当
+- `processStreamingRequest()` - ストリーミングリクエストの処理を担当
+- `setupTimeoutController()` - タイムアウト制御の設定のみを担当
+- `parseErrorResponse()` - エラーレスポンスの解析を担当
+- `processNonStreamingResponse()` - 非ストリーミングレスポンスの処理を担当
+- `processStreamingResponse()` - ストリーミングレスポンスの処理を担当
+- `finalizeStreamingProcessing()` - ストリーミング処理の最終化を担当
+- `handleRetry()` - リトライ処理のみを担当
 
-3. **`../index.js`**（core/llm/index.js）から：
-   - `BaseLLM` - すべてのLLM実装の基底クラス（Databricksクラスはこれを継承）
+この改修により、各メソッドがより小さく、テストしやすく、理解しやすくなりました。
 
-### ユーティリティモジュールからのインポート
+### 2. 共通ユーティリティの活用強化
 
-4. **`../utils/errors.js`**（core/llm/utils/errors.js）から：
-   - `getErrorMessage` - 様々な形式のエラーから一貫したエラーメッセージを抽出する関数
-   - `isConnectionError` - 接続関連のエラーを識別する関数（リトライ判断に使用）
+共通ユーティリティの活用を大幅に強化し、コードの重複を削減しました：
 
-5. **`../utils/json.js`**（core/llm/utils/json.js）から：
-   - `safeStringify` - オブジェクトを安全に文字列化する関数（循環参照などのエッジケースに対応）
+- `json.ts`に新たに追加された`safeJsonParse`と`deepMergeJson`関数を活用
+- `toolUtils.ts`からの`isSearchTool`と`processSearchToolArguments`をより広範囲に活用
+- `streamProcessing.ts`の`processContentDelta`と`JsonBufferHelpers`を適切に活用
+- 型安全性を高めるための共通パターンを導入
 
-6. **`../utils/sseProcessing.js`**（core/llm/utils/sseProcessing.js）から：
-   - `processSSEStream` - Server-Sent Eventsストリームを処理する関数
+### 3. ストリーミング処理の改善
 
-7. **`../utils/toolUtils.js`**（core/llm/utils/toolUtils.js）から：
-   - `isSearchTool` - ツール名が検索系かどうかを判定する関数
-   - `processSearchToolArguments` - 検索ツールの引数を適切に処理する関数
-   - `formatToolResultsContent` - ツール実行結果をフォーマットする関数
-   - `doesModelSupportTools` - モデルがツールをサポートするか確認する関数
+`StreamingProcessor`クラスでも同様に機能を分割し、責任を明確化しました：
 
-### Databricks固有モジュールからのインポート
+- `processChunk`メソッドをより小さな専門化された関数に分割
+- `updateToolCallFunctionName`と`updateToolCallArguments`など、特定の処理に特化した関数を導入
+- メッセージ処理、JSON処理、ツール処理のそれぞれを明確に分離
+- 戻り値の適切な型定義と、型安全な返却値パターンの導入
+- **定数変数の誤用修正**：`const`で宣言された変数への再代入エラーを修正し、イミュータブルな設計パターンを採用
 
-8. **`./Databricks/config.js`**から：
-   - `DatabricksConfig` - 設定ファイルからのAPI情報の読み込みや正規化を行うクラス
+### 4. 型安全性の向上
 
-9. **`./Databricks/messages.js`**から：
-   - `MessageProcessor` - メッセージ変換を担当するクラス
+型安全性を確保するための一貫したパターンを実装しました：
 
-10. **`./Databricks/toolcalls.js`**から：
-   - `ToolCallProcessor` - ツール呼び出しの処理を担当するクラス
+- 明示的な型アノテーションの使用
+- `null`チェックと境界チェックの統合
+- TypeScriptの型絞り込みを有効に活用する適切なパターンの導入
+- `undefined`と`null`の区別を明確にし、適切な型変換を導入
+- オプショナルプロパティへのアクセス前の存在チェックの徹底
 
-11. **`./Databricks/streaming.js`**から：
-    - `StreamingProcessor` - ストリーミングレスポンスの処理を担当するクラス
+### 5. 定数の抽出とコード品質の向上
 
-12. **`./Databricks/types.js`**から：
-    - `ToolCall` - ツール呼び出しの型定義
+可読性と保守性の向上のために以下の改善を実施しました：
 
-## モジュール構造の分析と設計判断
+- マジックナンバーを定数として抽出（`DEFAULT_MAX_TOKENS`、`DEFAULT_TIMEOUT_MS`など）
+- 複雑な条件を明確に分離し、それぞれを専用関数に移動
+- ロギングを強化し、トラブルシューティングを容易に
+- 重要な設定値に適切な最小値や最大値を設定
 
-現在のモジュール構造は、共通ユーティリティと特化したモジュールの適切なバランスを目指して設計されています。以下に各モジュールの役割と、なぜ別々のモジュールとして維持されるべきかについての分析を示します。
+## TypeScriptの型安全性とnullチェックのベストプラクティス
 
-### 1. `config.ts`（設定管理）
+Databricksインテグレーションのコードでは、TypeScriptの型安全性を確保するために以下のパターンを採用しています：
 
-このモジュールはDatabricks固有の設定ロードを処理しています。
+1. **型の絞り込みのためのローカル変数の活用**：
+   ```typescript
+   // 良い例: 型の絞り込みを確実にする
+   if (currentValue !== null) {
+     const safeValue = currentValue; // ローカル変数に代入して型を確定
+     // safeValueはnullでないことが保証される
+   }
+   ```
 
-**独自モジュールとしての理由**:
-- Databricksの特定の設定パラメータ（apiBase、apiKeyなど）を処理する専用ロジックが必要です
-- 設定ファイルからの読み込みとURL正規化（invocationsエンドポイントなど）の処理がDatabricks特有です
-- 他のプロバイダとは異なる設定フォーマットやデフォルト値を持っています
+2. **配列アクセス前の完全な境界チェック**：
+   ```typescript
+   if (currentToolCall !== null && currentToolCallIndex !== null) {
+     const index: number = Number(currentToolCallIndex);
+     
+     if (!Number.isNaN(index) && index >= 0 && index < toolCalls.length) {
+       toolCalls[index] = currentToolCall;
+     } else {
+       console.warn(`無効なツール呼び出しインデックス: ${currentToolCallIndex}`);
+     }
+   }
+   ```
 
-**共通ユーティリティの活用状況**:
-- 標準のfs、pathモジュールを使用して設定ファイルを読み込んでいます
-- 将来的には、共通の設定読み込みユーティリティが作成された場合に連携できる構造になっています
+3. **JSONの安全な処理**：
+   ```typescript
+   // 改修前:
+   try {
+     const parsedJson = JSON.parse(jsonBuffer);
+     // 処理
+   } catch (e) {
+     console.warn(`JSONバッファ処理エラー: ${e}`);
+   }
+   
+   // 改修後:
+   const parsedJson = safeJsonParse(jsonBuffer, null);
+   if (parsedJson !== null) {
+     // 処理
+   }
+   ```
 
-### 2. `messages.ts`（メッセージ変換）
+4. **イミュータブルな設計とオブジェクト更新パターン**：
+   ```typescript
+   // 定数オブジェクトを宣言
+   const result = {
+     updatedMessage: { ...currentMessage },
+     // その他のプロパティ
+   };
+   
+   // 改修前 - エラーの原因:
+   // result = this.updateToolCallFunctionName(...); // 定数への再代入はエラー
+   
+   // 改修後:
+   const updatedResult = this.updateToolCallFunctionName(...);
+   // 個別のプロパティを更新
+   result.updatedMessage = updatedResult.updatedMessage;
+   result.updatedToolCalls = updatedResult.updatedToolCalls;
+   // 他のプロパティも同様に更新
+   ```
 
-このモジュールはDatabricksのAPI形式に合わせたメッセージ変換を担当しています。
+5. **undefined/nullの明確な区別と適切な処理**：
+   ```typescript
+   // 改修前 - 型の不一致:
+   lastError = result.error; // Error | undefined を Error | null に代入できない
+   
+   // 改修後:
+   lastError = result.error !== undefined ? result.error : null;
+   ```
 
-**独自モジュールとしての理由**:
-- Claude 3.7 Sonnetの特殊な要件（「水平思考」と「ステップバイステップ」の指示など）に対応しています
-- ツール呼び出しを含むメッセージの特別処理が必要です
-- システムメッセージやthinkingメッセージの特殊な取り扱いを実装しています
+これらのパターンを一貫して適用することで、コンパイルエラーを防ぎ、実行時エラーのリスクを軽減しています。特に複雑な非同期処理を含むストリーミングコードでは、これらのパターンが非常に重要です。
 
-**共通ユーティリティの活用状況**:
-- `extractContentAsString`や`extractQueryContext`などの共通ユーティリティを活用しています
-- `safeStringify`でJSONの安全な処理を行っています
-- 将来的に共通のメッセージ処理が拡張された場合、このモジュールの一部は置き換えられる可能性があります
+## 各モジュールの役割と責任
 
-### 3. `streaming.ts`（ストリーム処理）
+### 1. `Databricks.ts`（メインクラス）
 
-このモジュールはDatabricksのストリーミングレスポンスの処理を担当しています。
+このモジュールはDatabricksインテグレーションのエントリーポイントとして機能し、以下の責任を持ちます：
 
-**独自モジュールとしての理由**:
-- Claude 3.7 Sonnetの思考プロセス（thinking）のストリーミング処理が特殊です
-- ツール呼び出しのストリーミングにDatabricks固有の処理が必要です
-- JSONフラグメントの高度なバッファリングメカニズムを実装しています
+- BaseLLMを継承し、必要なメソッドを実装
+- リクエストの基本的な検証とエラー処理
+- リトライと回復ロジックの調整
+- 他のモジュールの調整と連携
 
-**共通ユーティリティの活用状況**:
-- `processContentDelta`などの共通ストリーム処理ユーティリティを使用しています
-- `JsonBufferHelpers`を活用してJSON処理を行っています
-- 型安全性のために明示的な型アサーションを使用しています
+**共通ユーティリティの活用**:
+- `getErrorMessage`, `isConnectionError` - エラー処理の統一化
+- `safeStringify`, `safeJsonParse` - JSON処理の安全性確保
+- `processSSEStream` - SSEストリームの標準化された処理
 
-### 4. `toolcalls.ts`（ツールコール処理）
+### 2. `config.ts`（設定管理）
 
-このモジュールはツール呼び出しとその結果の処理を担当しています。
+このモジュールはDatabricks固有の設定ロードを処理しています：
 
-**独自モジュールとしての理由**:
-- Databricks APIのツール呼び出し形式に特化した処理が必要です
-- ツール結果メッセージの挿入や検索ツールの特別処理を実装しています
-- チャット履歴内でのツール呼び出しと結果の前処理に特化しています
+- 設定ファイルからAPI情報の読み込み
+- URLの正規化と検証
+- デフォルト値の提供
 
-**共通ユーティリティの活用状況**:
-- `isSearchTool`、`processSearchToolArguments`などの共通ツールユーティリティを使用しています
-- `formatToolResultsContent`を活用してツール結果をフォーマットします
-- `doesModelSupportTools`でモデルのツール対応を確認しています
+### 3. `messages.ts`（メッセージ変換）
 
-### 5. `types.ts`（型定義）
+このモジュールはDatabricksのAPI形式に合わせたメッセージ変換を担当しています：
 
-このモジュールはDatabricks統合のためのTypeScript型定義を提供します。
+- Claude 3.7 Sonnetの特殊な要件（「水平思考」と「ステップバイステップ」の指示など）の処理
+- ツール呼び出しを含むメッセージの変換
+- システムメッセージやthinkingメッセージの特殊な取り扱い
 
-**独自モジュールとしての理由**:
-- Databricks固有のメッセージ形式や構造を型として定義しています
-- ツール呼び出し、ストリーミングチャンク、思考メッセージなどの型を提供しています
-- 型安全性を確保し、開発時のエラー検出を向上させます
+**共通ユーティリティの活用**:
+- `extractContentAsString`, `extractQueryContext` - メッセージ内容の抽出
+- `safeStringify` - メッセージのJSON変換
 
-**共通ユーティリティの活用状況**:
-- `ChatMessage`などの基本型を拡張しています
-- 型の一貫性を保ちつつDatabricks固有の拡張を行っています
+### 4. `streaming.ts`（ストリーム処理）
 
-## モジュール構造の最適化方針
+このモジュールはDatabricksのストリーミングレスポンスの処理を担当しています：
 
-現在のモジュール構造はDatabricksの特殊要件に対応するために合理的な設計になっています。しかし、以下の方針でさらなる最適化が可能です。
+- 思考プロセス（thinking）のストリーミング処理
+- ツール呼び出しのストリーミング処理
+- JSONフラグメントのバッファリングと処理
+- 接続エラーからの回復処理
 
-1. **共通ユーティリティの活用強化**:
-   - 各モジュールが可能な限り共通ユーティリティを活用するようリファクタリングする
-   - 重複するロジックを特定し、適切な共通ユーティリティに移動する
+**共通ユーティリティの活用**:
+- `processContentDelta` - 増分コンテンツの処理
+- `JsonBufferHelpers` - JSON断片のバッファリング
+- `isSearchTool`, `processSearchToolArguments` - 検索ツールの特殊処理
+- `safeJsonParse` - 安全なJSON解析
 
-2. **モジュールの責任分担の明確化**:
-   - 各モジュールの役割と責任を明確に保ち、コードの可読性と保守性を向上させる
-   - モジュール間の依存関係を最小限に抑える
+### 5. `toolcalls.ts`（ツールコール処理）
 
-3. **段階的な最適化**:
-   - 大幅な変更よりも段階的な最適化を行う
-   - 新しい共通ユーティリティが追加されたら、Databricks固有モジュールを見直す
+このモジュールはツール呼び出しとその結果の処理を担当しています：
 
-この方針により、Databricks Claude 3.7 Sonnet統合の特殊機能を維持しつつ、コードの冗長性を減らし、保守性を向上させることができます。
+- ツール呼び出しの前処理と標準化
+- ツール結果メッセージの挿入
+- 検索ツールの特別処理
 
-## 主要な機能と特徴
+**共通ユーティリティの活用**:
+- `formatToolResultsContent` - ツール結果の標準フォーマット
+- `isSearchTool` - ツールタイプの判定
+- `processSearchToolArguments` - 検索ツール引数の処理
 
-### 1. Claude 3.7 Sonnetとの統合
+### 6. `types/`（型定義ディレクトリ）
 
-Databricksホステッドの最新のClaude 3.7 Sonnetモデルと完全に統合し、高度な対話機能を提供します：
+このディレクトリはDatabricks統合のためのTypeScript型定義を提供します：
 
-- **思考プロセスの表示**：モデルの思考過程をリアルタイムで表示する機能をサポートします
-- **ストリーミングレスポンス**：回答が生成されるにつれてリアルタイムで表示します
-- **長いコンテキスト**：最大200,000トークンの長いコンテキストウィンドウをサポートします
+- Databricks固有のメッセージ形式や構造の型定義
+- ツール呼び出し、ストリーミングチャンク、思考メッセージなどの型定義
+- 共通型定義の拡張とバックアップメカニズム
 
-### 2. ツール呼び出し機能
+## API互換性の考慮事項と対応策
 
-Continue拡張機能のツール呼び出し機能をフルサポートし、特に以下の機能を強化しています：
+DatabricksのAPIはOpenAI互換形式を提供していますが、完全な互換性はありません。特に以下の点に対応しています：
 
-- **検索ツールの強化**：検索クエリが常に適切に設定されるように特別な処理を実装しています
-- **引数処理の改善**：JSONフラグメントを適切に処理し、完全なJSONになるまでバッファリングします
-- **ツール結果の統合**：ツール呼び出しの結果を会話の流れに自然に統合します
+1. **タイムアウト処理の改善**:
+   ```typescript
+   const DEFAULT_TIMEOUT_MS = 300000; // 5分
+   const timeoutController = new AbortController();
+   const timeoutMs = (options as any).requestTimeout ? (options as any).requestTimeout * 1000 : DEFAULT_TIMEOUT_MS;
+   
+   const timeoutId = setTimeout(() => {
+     console.log(`リクエストタイムアウト（${timeoutMs}ms）に達したため中断します`);
+     timeoutController.abort('Request timeout');
+   }, timeoutMs);
+   
+   // ユーザー提供のシグナルと内部タイムアウトシグナルを結合
+   const combinedSignal = AbortSignal.any([signal, timeoutController.signal]);
+   ```
 
-### 3. エラー処理と回復メカニズム
+2. **リトライ処理の一元化と型安全性向上**:
+   ```typescript
+   private async handleRetry(
+     retryCount: number, 
+     error: Error, // 明示的にError型を要求
+     state?: any
+   ): Promise<void> {
+     // バックオフ時間（指数バックオフ）- 初回は短めに、その後長めに
+     const backoffTime = Math.min(2000 * Math.pow(2, retryCount - 1), 30000);
+     console.log(`リトライ準備中 (${retryCount}/${MAX_RETRIES}): ${error.message}`);
+     
+     // タイムアウトエラーの特別処理
+     if (error instanceof DOMException && error.name === 'AbortError') {
+       console.log(`タイムアウトによりリクエストが中止されました。リトライします。`);
+     }
+     
+     await new Promise(resolve => setTimeout(resolve, backoffTime));
+   }
+   ```
 
-堅牢なエラー処理と回復メカニズムを実装しています：
+3. **エラーレスポンスの安全なパース**:
+   ```typescript
+   private async parseErrorResponse(response: Response): Promise<{ error: Error }> {
+     const errorText = await response.text();
+     
+     // 明示的な型定義でプロパティアクセスを安全に
+     interface ErrorResponse {
+       error?: { message?: string; };
+       message?: string;
+     }
+     
+     const errorJson = safeJsonParse<ErrorResponse>(errorText, { error: { message: errorText } });
+     
+     // 各種プロパティの存在チェックを行い、安全にアクセス
+     const errorMessage = 
+       (errorJson.error && errorJson.error.message) || 
+       errorJson.message || 
+       errorText;
+     
+     return {
+       error: new Error(`Databricks API error: ${response.status} - ${errorMessage}`)
+     };
+   }
+   ```
 
-- **自動リトライ**：接続エラーが発生した場合、指数バックオフ方式で最大3回リトライします
-- **エラー分類**：様々なエラータイプを分類し、適切に対応します
-- **タイムアウト管理**：リクエストタイムアウトを管理し、長時間応答がない場合に適切に処理します
-- **型エラーの修正**：特にTypeScriptの型定義に関する問題を解決し、ストリーミング処理中の`thinkingMessage`の適切な型定義を保証します
+## 型安全性に関する主な改善点
 
-### 4. 日本語サポートの強化
+最近の改修では、TypeScriptの型システムの利点を最大限に活かすための重要な改善を行いました：
 
-日本語でのインタラクションを特に強化しています：
+1. **`undefined`と`null`の明確な区別**：
+   TypeScriptでは`undefined`と`null`は異なる型として扱われます。今回の修正では、これらを正しく処理するコードパターンを導入しました。
 
-- **「水平思考」と「ステップバイステップ」の指示**：日本語での思考プロセス指示をシステムメッセージに自動追加します
-- **日本語検索ツールの認識**：「検索」という単語を含むツール名も適切に処理します
-- **日本語エラーメッセージ**：エラーとリトライのログを日本語で出力します
+2. **オプショナルプロパティへの安全なアクセス**：
+   `errorJson.error?.message`のようなオプショナルチェーニングだけでなく、親オブジェクトの存在確認も含めた完全なチェックを行うようにしました。
+
+3. **イミュータブルな設計パターンの採用**：
+   `const`で宣言された変数に対する再代入を避け、代わりに戻り値の一部を使って更新する方法を採用しました。これにより、予期しない変数の変更を防ぎます。
+
+4. **戻り値の型定義の明確化**：
+   非同期関数やジェネレータ関数の戻り値の型をより明確に定義し、互換性のある型変換を行うようにしました。
+
+5. **配列インデックスの境界チェック強化**：
+   配列へのアクセス前に、インデックスがnullでないことの確認だけでなく、範囲内であることも検証するようになりました。
+
+これらの改善により、TypeScriptコンパイラによる型チェックが適切に機能し、潜在的なランタイムエラーを事前に検出できるようになりました。
+
+## 開発ガイドライン
+
+Databricksインテグレーションを拡張または修正する際は、以下のガイドラインに従ってください：
+
+1. **モジュール分離の原則**:
+   - 機能ごとに適切なモジュールに実装を追加する
+   - 大きな関数を小さな責任単位に分割する
+   - `Databricks.ts`はコーディネーターとして機能させ、詳細な実装は各サブモジュールに委譲する
+
+2. **共通ユーティリティの活用**:
+   - 新しいコードを書く前に、既存の共通ユーティリティが利用できないか確認する
+   - `safeJsonParse`, `deepMergeJson`などの新しく追加された関数を活用する
+   - プロバイダ特有のロジックとプロバイダに依存しない一般的なロジックを分離する
+
+3. **型安全性の確保**:
+   - null可能な値には必ず条件チェックを行う
+   - 配列アクセス前に境界チェックを実施する
+   - 型アサーションを最小限に抑え、必要な場合はコメントで理由を説明する
+   - 複雑な条件分岐では型の絞り込みに注意し、適切なパターンを使用する
+   - `const`宣言された変数への再代入は避け、プロパティ更新または新しい変数を使用する
+
+4. **エラー処理の一貫性**:
+   - `getErrorMessage`, `isConnectionError`などの共通関数を使用する
+   - 接続エラー、タイムアウトエラー、APIエラーなどを適切に区別する
+   - リトライ可能なエラーとリトライ不可能なエラーを明確に区別する
+
+5. **ステップバイステップのリファクタリング**:
+   - 大きな変更よりも段階的な改善を優先する
+   - 変更ごとにテストを行い、問題が発生した場合は迅速に対応する
+   - バグ修正と機能追加を分離し、一度に一つの改善に集中する
+
+これらのガイドラインに従うことで、コードの品質、可読性、保守性が向上し、バグの発生リスクを低減できます。
+
+## 機能と特徴
+
+### 1. Claude 3.7 Sonnetとの完全統合
+
+Databricksホステッドの最新のClaude 3.7 Sonnetモデルと完全に統合しています：
+
+- **思考プロセスの表示**: モデルの思考過程をリアルタイムで表示
+- **ストリーミングレスポンス**: 回答が生成されるにつれてリアルタイムで表示
+- **長いコンテキスト**: 最大200,000トークンの長いコンテキストウィンドウをサポート
+- **日本語サポート**: 「水平思考」と「ステップバイステップ」などの日本語指示に対応
+
+### 2. 堅牢なツール呼び出し機能
+
+Continue拡張機能のツール呼び出し機能を強化しています：
+
+- **検索ツールの強化**: 検索クエリが常に適切に設定されるよう特別処理を実装
+- **引数処理の改善**: JSONフラグメントを適切に処理し、完全なJSONになるまでバッファリング
+- **ツール結果の統合**: ツール呼び出しの結果を会話の流れに自然に統合
+
+### 3. 信頼性の高いエラー処理と型安全性
+
+堅牢なエラー処理と回復メカニズム、および強化された型安全性を実装しています：
+
+- **自動リトライ**: 接続エラーやタイムアウト発生時に指数バックオフ方式でリトライ
+- **状態の復元**: 接続エラー発生時に処理状態を保持し、再接続時に復元
+- **タイムアウト管理**: HTTPレベルでのタイムアウト制御とAbortController/AbortSignalの活用
+- **型安全な設計**: 厳密な型チェックとnull/undefined処理による実行時エラーの防止
+- **イミュータブルなデータフロー**: 変数の再代入を最小限に抑え、予測可能な動作を実現
+
+この改善により、ネットワーク不安定時や長時間実行時の信頼性、およびコードの保守性が大幅に向上しています。
 
 ## 設定方法
 
@@ -238,11 +420,8 @@ Databricksインテグレーションを使用するには、以下の設定が�
 1. **APIベースURL**: Databricksのエンドポイントへの接続先URL
 2. **APIキー**: 認証に使用するDatabricks APIキー
 
-これらは以下のいずれかの場所にある`config.yaml`ファイルで設定できます：
-- `%USERPROFILE%\.continue\config.yaml`
-- `extensions\.continue-debug\config.yaml` (デバッグ時)
+これらは`config.yaml`ファイルで設定できます：
 
-設定例：
 ```yaml
 models:
   - name: "databricks-claude"
@@ -250,61 +429,3 @@ models:
     apiBase: "https://your-databricks-endpoint.cloud.databricks.com/serving-endpoints/claude-3-7-sonnet/invocations"
     apiKey: "dapi_your_api_key_here"
 ```
-
-## 使用方法
-
-Databricksインテグレーションは、Continue拡張機能の他のLLMプロバイダと同様に、`llmFromDescription`関数を使用してインスタンス化できます：
-
-```typescript
-import { llmFromDescription } from 'core/llm/llms';
-
-// 設定に基づいてLLMインスタンスを作成
-const llm = await llmFromDescription(
-  {
-    provider: 'databricks',
-    model: 'claude-3-7-sonnet',
-    apiBase: 'https://your-databricks-endpoint.cloud.databricks.com/serving-endpoints/claude-3-7-sonnet/invocations',
-    apiKey: 'dapi_your_api_key_here'
-  },
-  readFile,
-  uniqueId,
-  ideSettings,
-  logger
-);
-
-// ストリーミングチャットの使用例
-for await (const message of llm.streamChat(messages, signal, options)) {
-  // message.role === "thinking" -> 思考プロセス
-  // message.toolCalls -> ツール呼び出し
-  // message.content -> 通常のテキスト応答
-  console.log(message);
-}
-```
-
-## 開発ガイドライン
-
-Databricksインテグレーションを拡張または修正する際は、以下のガイドラインに従ってください：
-
-1. **モジュール分離の原則**：
-   - 機能ごとに適切なモジュールに実装を追加してください
-   - `Databricks.ts`はコーディネーターとして機能し、詳細な実装は各サブモジュールに委譲します
-   - できる限り、`core/llm/`配下の共通ユーティリティを活用してください
-
-2. **エラー処理**：
-   - すべてのAPI呼び出しに適切なエラー処理を実装してください
-   - 接続エラーとアプリケーションエラーを区別し、適切に対応します
-
-3. **型安全性**：
-   - 可能な限り明示的な型を使用し、`any`型の使用を最小限に抑えてください
-   - `types.ts`に新しい型定義を追加し、適切に活用してください
-   - 型アサーション（`as Type`）を使用して、オブジェクト初期化時のプロパティの型を明確にしてください
-   - 特に後から別の型の値が割り当てられる可能性のあるプロパティには、適切なユニオン型（`Type1 | Type2`）を使用してください
-
-4. **ストリーミング処理**：
-   - ストリーミング処理の状態管理に特に注意してください
-   - 不完全なJSONフラグメントなどのエッジケースを適切に処理してください
-
-5. **共通ユーティリティの活用**：
-   - 可能な限り`core/llm/utils/`の共通ユーティリティを活用し、コードの重複を避けてください
-   - 新しいユーティリティ関数が必要な場合は、独自モジュールに実装する前に共通ユーティリティとしての実装可能性を検討してください
-   - 十分な共通ユーティリティがあれば、Databricks固有のモジュールを削減することも検討してください

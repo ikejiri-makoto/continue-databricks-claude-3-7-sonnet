@@ -1,32 +1,8 @@
-import { ChatMessage } from "../../../index.js";
-import { BaseStreamingError } from "../../utils/errors.js";
+import { ChatMessage, ThinkingChatMessage } from "../../../../index.js";
 
-/**
- * ストリーミングエラーのインターフェース
- * 基本エラー型を拡張して、Databricks固有のプロパティを追加できるようにする
- */
-export interface StreamingError extends BaseStreamingError {
-  // Databricks固有のエラープロパティがあれば追加
-}
-
-/**
- * アシスタントメッセージの型定義
- * ChatMessageを拡張し、アシスタント固有のプロパティを定義
- */
-export type AssistantChatMessage = ChatMessage & {
-  role: "assistant";
-  content: string;
-  toolCalls?: any[];
-};
-
-/**
- * ツール結果メッセージの型定義
- */
-export interface ToolResultMessage {
-  role: 'tool';
-  tool_call_id: string;
-  content: string;
-}
+// 共通型定義への参照を明示的に追加
+import "../../../types/databricks-extensions";
+import "./extension.d.ts";
 
 /**
  * ツール呼び出しの型定義
