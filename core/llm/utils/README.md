@@ -11,6 +11,7 @@ core/llm/utils/
 ├── messageUtils.ts (メッセージ処理)
 ├── sseProcessing.ts (SSE処理)
 ├── streamProcessing.ts (ストリーム処理)
+├── toolUtils.ts     (ツールユーティリティ)
 └── typeUtils.ts     (型安全性ユーティリティ)
 ```
 
@@ -32,11 +33,17 @@ JSON processing utilities that:
 - Offer safe methods for parsing and stringifying JSON
 - Handle edge cases and malformed JSON data
 - Provide type-safe JSON operations for LLM responses
+- Extract valid JSON from mixed content or streaming fragments
+- Process incomplete JSON data in streaming contexts
 
 **Key functions:**
 - `safeStringify(obj: unknown, defaultValue?: string): string` - Converts objects to strings with error handling
 - `isValidJson(text: string): boolean` - Validates if a string is valid JSON
 - `safeJsonParse<T>(text: string, fallback?: T): T` - Safely parses JSON with type information
+- `extractValidJson(text: string): string | null` - Extracts valid JSON from a string with extra content
+- `processJsonFragment(fragment: string): any | null` - Processes partial JSON fragments in streams
+- `deepMergeJson(target: any, source: any): any` - Recursively merges JSON objects with proper handling
+- `extractJsonAndRemainder(text: string): [any, string] | null` - Extracts JSON and returns remaining content
 
 ### `messageUtils.ts`
 Message processing utilities that:
@@ -66,11 +73,29 @@ Stream processing utilities that:
 - Transform chunk-based responses into usable formats
 - Manage stream state and error handling
 - Provide utilities for combining and consuming streamed content
+- Handle partial JSON fragments in streaming contexts
 
 **Key functions:**
 - `processContentDelta(currentContent: string, delta: string): string` - Handles incremental content updates
-- `JsonBufferHelpers` - Utilities for buffering partial JSON fragments in streams
+- `JsonBufferHelpers` - Utilities for buffering and processing partial JSON fragments in streams:
+  - `addToBuffer(newData, currentBuffer, maxBufferSize)` - Adds data to buffer with size limiting
+  - `resetBuffer()` - Resets the JSON buffer
+  - `isBufferComplete(buffer)` - Checks if buffer contains complete valid JSON
+  - `extractValidJsonFromBuffer(buffer)` - Extracts valid JSON from buffer
+  - `extractJsonAndRemainder(buffer)` - Extracts JSON and returns remaining content
+  - `safelyMergeJsonStrings(firstJson, secondJson)` - Safely merges two JSON strings
 - `StreamProcessor` - Base class for provider-specific stream processors
+
+### `toolUtils.ts`
+Tool-related utilities that:
+- Help identify and process tool calls in LLM responses
+- Provide specialized handling for search and other common tools
+- Format tool results for different providers
+
+**Key functions:**
+- `isSearchTool(name: string): boolean` - Identifies if a tool is a search tool
+- `processSearchToolArguments(name: string, args: string, context: string): string` - Processes search tool arguments
+- `formatToolResultsContent(results: any): string` - Formats tool results in standardized format
 
 ### `typeUtils.ts`
 Type safety utilities that:
@@ -83,6 +108,128 @@ Type safety utilities that:
 - `isNonNullIndex(index: number | null): index is number` - Type guard for non-null indices
 - `ensureValidIndex(index: unknown, arrayLength: number): number | null` - Validates array indices
 
+## Enhanced Usage Patterns
+
+The utility modules are designed to be used together to provide comprehensive support for LLM operations. Here are some common usage patterns that combine multiple utilities:
+
+### JSON Processing in Streaming Contexts
+
+```typescript
+import { safeJsonParse, extractValidJson } from "./json";
+import { JsonBufferHelpers } from "./streamProcessing";
+
+// Accumulated buffer for JSON fragments
+let buffer = JsonBufferHelpers.resetBuffer();
+
+// Process incoming fragments
+function processJsonFragment(fragment: string) {
+  // Add new fragment to buffer with size limit
+  buffer = JsonBufferHelpers.addToBuffer(fragment, buffer, 10000);
+  
+  // Check if buffer now contains valid JSON
+  if (JsonBufferHelpers.isBufferComplete(buffer)) {
+    // Extract and process the valid JSON
+    const validJson = extractValidJson(buffer);
+    if (validJson) {
+      // Safely parse with type safety
+      const data = safeJsonParse<ToolCallArguments>(validJson, defaultArgs);
+      processData(data);
+      
+      // Reset buffer after successful processing
+      buffer = JsonBufferHelpers.resetBuffer();
+    }
+  }
+}
+```
+
+### Robust Error Handling with Retry Logic
+
+```typescript
+import { getErrorMessage, isConnectionError } from "./errors";
+import { safeJsonParse } from "./json";
+
+async function callApiWithRetry<T>(
+  apiCall: () => Promise<Response>,
+  maxRetries: number = 3
+): Promise<T> {
+  let retryCount = 0;
+  
+  while (retryCount <= maxRetries) {
+    try {
+      const response = await apiCall();
+      
+      if (!response.ok) {
+        const errorText = await response.text();
+        const errorJson = safeJsonParse<ErrorResponse>(errorText, { error: { message: errorText } });
+        const errorMessage = errorJson.error?.message || errorText;
+        throw new Error(`API error ${response.status}: ${errorMessage}`);
+      }
+      
+      const data = await response.json();
+      return data as T;
+    } catch (error: unknown) {
+      retryCount++;
+      const errorMessage = getErrorMessage(error);
+      
+      if (retryCount <= maxRetries && isConnectionError(error)) {
+        // Exponential backoff
+        const backoffTime = Math.min(1000 * Math.pow(2, retryCount - 1), 30000);
+        console.log(`Retry ${retryCount}/${maxRetries} after ${backoffTime}ms: ${errorMessage}`);
+        await new Promise(resolve => setTimeout(resolve, backoffTime));
+      } else {
+        throw error;
+      }
+    }
+  }
+  
+  throw new Error(`Maximum retries (${maxRetries}) exceeded`);
+}
+```
+
+### Type-Safe Message Processing
+
+```typescript
+import { extractContentAsString, extractQueryContext } from "./messageUtils";
+import { ensureValidIndex } from "./typeUtils";
+
+function processMessages(messages: ChatMessage[]): { 
+  lastUserMessage: string;
+  lastAssistantMessage: string | null;
+  queryContext: string;
+} {
+  // Find indices of last user and assistant messages
+  let lastUserIndex: number | null = null;
+  let lastAssistantIndex: number | null = null;
+  
+  for (let i = messages.length - 1; i >= 0; i--) {
+    if (messages[i].role === "user" && lastUserIndex === null) {
+      lastUserIndex = i;
+    } else if (messages[i].role === "assistant" && lastAssistantIndex === null) {
+      lastAssistantIndex = i;
+    }
+    
+    if (lastUserIndex !== null && lastAssistantIndex !== null) {
+      break;
+    }
+  }
+  
+  // Extract query context from all messages
+  const queryContext = extractQueryContext(messages);
+  
+  // Safely access last user message
+  const lastUserMessage = lastUserIndex !== null 
+    ? extractContentAsString(messages[lastUserIndex].content)
+    : "";
+  
+  // Safely access last assistant message if it exists
+  const lastAssistantMessage = lastAssistantIndex !== null
+    ? extractContentAsString(messages[lastAssistantIndex].content)
+    : null;
+  
+  return { lastUserMessage, lastAssistantMessage, queryContext };
+}
+```
+
 ## Best Practices for Utility Usage
 
 ### Type Safety
@@ -90,7 +237,7 @@ Type safety utilities that:
 When working with null and undefined values that might be used as array indices:
 
 ```typescript
-import { asNumber, ensureValidIndex } from "../utils/typeUtils";
+import { asNumber, ensureValidIndex } from "./typeUtils";
 
 // Best practice for null-safe array access
 if (maybeIndex !== null) {
@@ -107,7 +254,7 @@ if (maybeIndex !== null) {
 Consistent error handling across the codebase:
 
 ```typescript
-import { getErrorMessage, isConnectionError } from "../utils/errors";
+import { getErrorMessage, isConnectionError } from "./errors";
 
 try {
   // API call or other operation
@@ -129,8 +276,8 @@ try {
 For handling JSON in streaming contexts or when parsing potentially malformed JSON:
 
 ```typescript
-import { safeJsonParse, isValidJson } from "../utils/json";
-import { JsonBufferHelpers } from "../utils/streamProcessing";
+import { safeJsonParse, isValidJson, extractValidJson } from "./json";
+import { JsonBufferHelpers } from "./streamProcessing";
 
 // For complete JSON:
 const config = safeJsonParse(jsonText, defaultConfig);
@@ -139,12 +286,27 @@ const config = safeJsonParse(jsonText, defaultConfig);
 let buffer = JsonBufferHelpers.resetBuffer();
 
 // When receiving a fragment:
-buffer = JsonBufferHelpers.addToBuffer(fragment, buffer);
+buffer = JsonBufferHelpers.addToBuffer(fragment, buffer, maxBufferSize);
 
 // Check if buffer is complete JSON:
-if (isValidJson(buffer)) {
-  const data = JSON.parse(buffer);
+if (JsonBufferHelpers.isBufferComplete(buffer)) {
+  const data = safeJsonParse(buffer, defaultValue);
   // Process data
+}
+
+// Extract valid JSON from text with extra content:
+const validJson = extractValidJson(mixedContent);
+if (validJson) {
+  const data = safeJsonParse(validJson, defaultValue);
+  // Process valid JSON portion
+}
+
+// Extract JSON and remainder text:
+const result = JsonBufferHelpers.extractJsonAndRemainder(text);
+if (result) {
+  const [jsonObj, remainder] = result;
+  // Process jsonObj
+  // Handle remainder separately
 }
 ```
 
@@ -161,5 +323,21 @@ To maximize code reuse and maintain clear responsibility boundaries:
 4. **Error Handling Consistency**: Always use error utilities to maintain consistent error handling patterns.
 
 5. **Type Safety**: Leverage type utilities for complex type scenarios, especially with null handling and array indices.
+
+6. **JSON Processing Best Practices**: 
+   - Always use `safeJsonParse` instead of direct `JSON.parse`
+   - Extract valid JSON with `extractValidJson` when dealing with mixed content
+   - Process streaming JSON fragments with `JsonBufferHelpers`
+   - Use proper type annotations with generic parameters
+
+7. **Immutable Data Patterns**:
+   - Avoid reassigning `const` variables; use property updates instead
+   - Create new objects instead of mutating existing ones
+   - Use spread operators and object destructuring for updates
+
+8. **Modular Responsibility**:
+   - Respect the separation of concerns between utility modules
+   - Combine utilities to create higher-level functionality
+   - Keep utility functions focused on a single responsibility
 
 By following these guidelines, we can maintain high code quality with clear module boundaries while minimizing code duplication across the codebase.

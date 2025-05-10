@@ -1,8 +1,7 @@
 import { ChatMessage, ThinkingChatMessage } from "../../../../index.js";
 
-// 共通型定義への参照を明示的に追加
-import "../../../types/databricks-extensions";
-import "./extension.d.ts";
+// 重複インポートを解消し、参照方法を統一
+/// <reference path="./extension.d.ts" />
 
 /**
  * ツール呼び出しの型定義
@@ -47,6 +46,32 @@ export interface StreamingChunk {
   choices?: {
     delta: ResponseDelta;
   }[];
+}
+
+/**
+ * ストリーミング処理の結果型定義
+ */
+export interface StreamingResult {
+  updatedMessage: ChatMessage;
+  updatedToolCalls: ToolCall[];
+  updatedCurrentToolCall: ToolCall | null;
+  updatedCurrentToolCallIndex: number | null;
+  updatedJsonBuffer: string;
+  updatedIsBufferingJson: boolean;
+  thinkingMessage?: ChatMessage;
+  shouldYieldMessage: boolean;
+}
+
+/**
+ * ツール呼び出し処理の結果型定義
+ */
+export interface ToolCallResult {
+  updatedToolCalls: ToolCall[];
+  updatedCurrentToolCall: ToolCall | null;
+  updatedCurrentToolCallIndex: number | null;
+  updatedJsonBuffer: string;
+  updatedIsBufferingJson: boolean;
+  shouldYieldMessage: boolean;
 }
 
 /**

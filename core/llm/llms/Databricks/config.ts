@@ -1,10 +1,14 @@
 import * as fs from "fs";
 import * as path from "path";
 import * as yaml from "js-yaml";
+import { CompletionOptions } from "../../../index.js";
+
+// 定数
+const DEFAULT_TIMEOUT_MS = 300000; // 5分
 
 /**
- * Databricks API設定を読み込むクラス
- * 設定ファイルからAPIのベースURLとAPIキーを読み込む機能を提供
+ * Databricks API設定を管理するクラス
+ * 設定ファイルからの読み込み、検証、タイムアウト処理を担当
  */
 export class DatabricksConfig {
   /**
@@ -92,5 +96,51 @@ export class DatabricksConfig {
     }
     
     return apiBaseUrl;
+  }
+
+  /**
+   * API設定が有効かどうかを検証
+   * @param apiKey APIキー
+   * @param apiBase APIベースURL
+   * @throws エラー - API設定が無効な場合
+   */
+  static validateApiConfig(apiKey: string | undefined, apiBase: string | undefined): void {
+    if (!apiKey || apiKey === "") {
+      throw new Error("Request not sent. Databricks API key is not set in your config.");
+    }
+
+    if (!apiBase) {
+      throw new Error("Request not sent. Could not find Databricks API endpoint URL in your config.");
+    }
+  }
+
+  /**
+   * タイムアウトコントローラを設定
+   * @param signal ユーザー提供のAbortSignal
+   * @param options 補完オプション
+   * @returns タイムアウトコントローラ、タイムアウトID、結合されたシグナル
+   */
+  static setupTimeoutController(
+    signal: AbortSignal, 
+    options: CompletionOptions
+  ): {
+    timeoutController: AbortController;
+    timeoutId: NodeJS.Timeout;
+    combinedSignal: AbortSignal;
+  } {
+    const timeoutController = new AbortController();
+    const timeoutMs = (options as any).requestTimeout 
+      ? (options as any).requestTimeout * 1000 
+      : DEFAULT_TIMEOUT_MS;
+    
+    const timeoutId = setTimeout(() => {
+      console.log(`リクエストタイムアウト（${timeoutMs}ms）に達したため中断します`);
+      timeoutController.abort('Request timeout');
+    }, timeoutMs);
+    
+    // ユーザー提供のシグナルと内部タイムアウトシグナルを結合
+    const combinedSignal = AbortSignal.any([signal, timeoutController.signal]);
+    
+    return { timeoutController, timeoutId, combinedSignal };
   }
 }

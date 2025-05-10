@@ -7,6 +7,7 @@ This directory contains the implementation of various Large Language Model (LLM)
 ```
 core/llm/llms/
 ├── provider implementations (Anthropic.ts, OpenAI.ts, etc.)
+├── provider-specific modules (provider-name/ directories)
 ├── utility files (index.ts, llm.ts, etc.)
 └── type definition files (gemini-types.ts)
 ```
@@ -66,6 +67,7 @@ The directory contains implementations for various LLM providers:
 | `Kindo.ts` | Kindo | Integration with Kindo AI services |
 | `NCompass.ts` | NCompass | Integration with NCompass AI platform |
 | `OpenRouter.ts` | OpenRouter | Service that routes to various LLM providers |
+| `Databricks.ts` | Databricks | Integration with Databricks-hosted models (Claude, etc.) |
 
 ### Self-hosted/Local Model Implementations
 
@@ -104,6 +106,193 @@ The directory contains implementations for various LLM providers:
 | `TransformersJsEmbeddingsProvider.ts` | Provider for embeddings using Transformers.js |
 | `TransformersJsWorkerThread.js` | Worker thread for Transformers.js operations |
 | `stubs/` | Stub implementations for various scenarios |
+
+## Common Patterns and Best Practices
+
+### Modular Implementation Pattern
+
+For more complex LLM providers, follow the modular pattern of implementation:
+
+1. Create a main provider class that extends `BaseLLM` and acts as an orchestrator:
+   ```typescript
+   class ComplexProvider extends BaseLLM {
+     static providerName = "complex-provider";
+     static defaultOptions = {
+       // Default options
+     };
+     
+     // Main methods that delegate to specialized modules
+     protected async _streamComplete(...) {
+       // Coordinate between specialized modules
+     }
+     
+     protected async *_streamChat(...) {
+       // Delegate responsibilities to specialized modules
+     }
+   }
+   ```
+
+2. Create a provider-specific directory with specialized modules:
+   ```
+   Provider/
+   ├── config.ts       (Configuration management)
+   ├── errors.ts       (Error handling and retry logic)
+   ├── helpers.ts      (Common utility functions)
+   ├── messages.ts     (Message formatting and transformation)
+   ├── streaming.ts    (Streaming response processing)
+   ├── toolcalls.ts    (Tool call handling)
+   └── types/          (Type definitions)
+   ```
+
+3. Follow single responsibility principle for each module:
+   - Each module should have a clear, focused responsibility
+   - Prefer small, specialized functions over large multi-purpose ones
+   - Use clear interfaces between modules
+
+4. Use dependency injection pattern for configuration and utilities:
+   ```typescript
+   // ConfigManager handles all configuration logic
+   class ConfigManager {
+     static loadConfig() { /* ... */ }
+     static validateConfig(config) { /* ... */ }
+   }
+   
+   // ErrorHandler manages all error processing
+   class ErrorHandler {
+     static parseErrorResponse(response) { /* ... */ }
+     static handleRetry(error, retryCount) { /* ... */ }
+   }
+   ```
+
+### Common Utility Usage
+
+Utilize the common utility modules from `core/llm/utils/`:
+
+1. Error handling utilities:
+   ```typescript
+   import { getErrorMessage, isConnectionError } from "../../utils/errors";
+   
+   try {
+     // API call
+   } catch (error: unknown) {
+     const errorMessage = getErrorMessage(error);
+     
+     if (isConnectionError(error)) {
+       // Handle connection error with retry
+     } else {
+       // Handle other error types
+     }
+   }
+   ```
+
+2. JSON processing utilities:
+   ```typescript
+   import { safeStringify, safeJsonParse, extractValidJson, deepMergeJson } from "../../utils/json";
+   
+   // Safe JSON serialization
+   const body = safeStringify(requestBody, "{}");
+   
+   // Type-safe JSON parsing with fallback
+   const config = safeJsonParse<ConfigType>(jsonText, defaultConfig);
+   
+   // Extract valid JSON from mixed content
+   const validJson = extractValidJson(mixedContent);
+   if (validJson) {
+     const data = safeJsonParse(validJson, defaultValue);
+     // Process valid JSON
+   }
+   
+   // Deep merge JSON objects
+   const mergedConfig = deepMergeJson(defaultConfig, userConfig);
+   ```
+
+3. Stream processing utilities:
+   ```typescript
+   import { processContentDelta, JsonBufferHelpers } from "../../utils/streamProcessing";
+   
+   // Handle incremental content updates
+   updatedContent = processContentDelta(currentContent, delta);
+   
+   // Buffer JSON fragments in streaming contexts
+   let buffer = JsonBufferHelpers.resetBuffer();
+   buffer = JsonBufferHelpers.addToBuffer(fragment, buffer, maxBufferSize);
+   
+   // Check if buffer contains complete JSON
+   if (JsonBufferHelpers.isBufferComplete(buffer)) {
+     const data = safeJsonParse(buffer, null);
+     if (data !== null) {
+       // Process complete JSON
+       buffer = JsonBufferHelpers.resetBuffer();
+     }
+   }
+   ```
+
+4. Message processing utilities:
+   ```typescript
+   import { extractQueryContext, extractContentAsString } from "../../utils/messageUtils";
+   
+   // Extract query context from conversation
+   const query = extractQueryContext(messages);
+   
+   // Safely extract content as string from various formats
+   const textContent = extractContentAsString(content);
+   ```
+
+### Type Safety
+
+Ensure robust type safety in implementation:
+
+1. Use explicit type annotations:
+   ```typescript
+   function processToolCall(
+     toolCall: ToolCall, 
+     messages: ChatMessage[]
+   ): ProcessedToolCall {
+     // Implementation
+   }
+   ```
+
+2. Create interface types for all complex structures:
+   ```typescript
+   interface StreamingResult {
+     updatedMessage: ChatMessage;
+     updatedToolCalls: ToolCall[];
+     shouldYieldMessage: boolean;
+     // Other properties
+   }
+   ```
+
+3. Properly handle nullable values:
+   ```typescript
+   if (index !== null) {
+     const safeIndex = Number(index);
+     if (!Number.isNaN(safeIndex) && safeIndex >= 0 && safeIndex < array.length) {
+       // Safe to access
+       const item = array[safeIndex];
+     }
+   }
+   ```
+
+4. Use immutable update patterns:
+   ```typescript
+   // Instead of mutating objects directly
+   const updated = {
+     ...original,
+     property: newValue
+   };
+   
+   // Instead of mutating arrays directly
+   const newArray = [...oldArray.slice(0, index), newItem, ...oldArray.slice(index + 1)];
+   ```
+
+5. Distinguish clearly between `undefined` and `null`:
+   ```typescript
+   const value: string | null = maybeUndefined !== undefined 
+     ? maybeUndefined 
+     : null;
+   ```
+
+By following these patterns and best practices, you'll create more maintainable, robust LLM provider implementations that leverage the full power of TypeScript's type system and the common utilities provided by the framework.
 
 ## Usage
 

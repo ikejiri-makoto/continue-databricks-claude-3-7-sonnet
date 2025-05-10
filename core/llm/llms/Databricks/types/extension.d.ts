@@ -1,6 +1,6 @@
 // 型定義の参照方法をトリプルスラッシュディレクティブに変更する
-// 記法その1: コンパイル時にファイルを参照する方法
-/// <reference path="../../../../types/databricks-extensions.d.ts" />
+// 修正: パスを正しく指定
+/// <reference path="../../../types/databricks-extensions.d.ts" />
 
 // 記法その2: バックアップとして内容を完全インライン化
 // 参照が解決できない場合でも型定義が機能するようにする
