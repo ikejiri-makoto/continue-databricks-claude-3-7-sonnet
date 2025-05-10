@@ -13,11 +13,11 @@ export interface StreamingError extends BaseStreamingError {
  * アシスタントメッセージの型定義
  * ChatMessageを拡張し、アシスタント固有のプロパティを定義
  */
-export interface AssistantChatMessage extends ChatMessage {
+export type AssistantChatMessage = ChatMessage & {
   role: "assistant";
   content: string;
   toolCalls?: any[];
-}
+};
 
 /**
  * ツール結果メッセージの型定義
@@ -33,7 +33,7 @@ export interface ToolResultMessage {
  */
 export interface ToolCall {
   id: string;
-  type: "function";
+  type: "function";  // 文字列リテラル型として明示的に定義
   function: {
     name: string;
     arguments: string;

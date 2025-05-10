@@ -50,6 +50,7 @@ export class StreamingProcessor {
       updatedCurrentToolCallIndex: currentToolCallIndex,
       updatedJsonBuffer: jsonBuffer,
       updatedIsBufferingJson: isBufferingJson,
+      thinkingMessage: undefined as ChatMessage | undefined, // 型アサーションで型を明示
       shouldYieldMessage: false
     };
 
@@ -203,7 +204,7 @@ export class StreamingProcessor {
       
       // 新しいツール呼び出しの初期化
       if (!result.updatedToolCalls[index]) {
-        const newToolCall = {
+        const newToolCall: ToolCall = {
           id: toolCallDelta.id || `call_${Date.now()}_${index}`,
           type: "function",
           function: {
