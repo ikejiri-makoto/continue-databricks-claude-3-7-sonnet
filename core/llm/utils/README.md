@@ -22,10 +22,13 @@ Error handling utilities that:
 - Define custom error types for LLM-related operations
 - Provide standardized error handling patterns
 - Help classify and respond to various error conditions from LLM providers
+- Support transient error detection for intelligent retry decisions
 
 **Key functions:**
 - `getErrorMessage(error: unknown): string` - Safely extracts error messages from various error types
 - `isConnectionError(error: unknown): boolean` - Identifies network-related errors for retry decisions
+- `isTransientError(error: unknown): boolean` - Identifies temporary errors that are suitable for retry attempts
+- `BaseStreamingError` - Interface for common error structure
 - `LLMError` - Base class for all LLM-specific errors
 
 ### `json.ts`
@@ -48,6 +51,7 @@ JSON processing utilities that:
 - `extractJsonAndRemainder(text: string): [any, string] | null` - Extracts JSON and returns remaining content
 - `processJsonDelta(currentJson: string, deltaJson: string): {combined: string; complete: boolean; valid: boolean}` - Processes JSON fragments using delta-based approach
 - `repairDuplicatedJsonPattern(jsonStr: string): string` - Detects and repairs duplicated JSON patterns
+- `processToolArgumentsDelta(currentArgs: string, deltaArgs: string): {processedArgs: string; isComplete: boolean}` - Processes tool arguments using delta-based approach for streaming contexts
 
 ### `messageUtils.ts`
 Message processing utilities that:
@@ -84,7 +88,7 @@ Stream processing utilities that:
 - Support delta-based JSON processing for streaming contexts
 
 **Key functions:**
-- `processContentDelta(currentContent: string, delta: string): string` - Handles incremental content updates
+- `processContentDelta(content: string | unknown, currentMessage: ChatMessage): { updatedMessage: ChatMessage, shouldYield: boolean }` - Handles incremental content updates and produces updated messages
 - `JsonBufferHelpers` - Utilities for buffering and processing partial JSON fragments in streams:
   - `addToBuffer(newData, currentBuffer, maxBufferSize)` - Adds data to buffer with size limiting
   - `resetBuffer()` - Resets the JSON buffer
@@ -92,7 +96,9 @@ Stream processing utilities that:
   - `extractValidJsonFromBuffer(buffer)` - Extracts valid JSON from buffer
   - `extractJsonAndRemainder(buffer)` - Extracts JSON and returns remaining content
   - `safelyMergeJsonStrings(firstJson, secondJson)` - Safely merges two JSON strings
-- `StreamProcessor` - Base class for provider-specific stream processors
+- `BaseStreamProcessor` - Base class for provider-specific stream processors with shared functionality:
+  - `processThinking(thinkingData: unknown): ChatMessage` - Processes thinking data into message format
+  - `processContent(contentDelta: string | unknown, currentMessage: ChatMessage): { updatedMessage: ChatMessage, shouldYield: boolean }` - Processes content deltas with standardized approach
 - `JsonDeltaProcessor` - Utilities for processing JSON deltas in streaming contexts:
   - `processJsonDelta(currentJson, deltaJson)` - Processes partial JSON fragments using delta-based approach
   - `isDeltaComplete(delta)` - Checks if JSON delta represents a complete JSON object
@@ -176,15 +182,40 @@ function processDeltaJsonFragment(currentJson: string, deltaJson: string) {
 }
 ```
 
+### Using Stream Processing Utilities for Content Updates
+
+```typescript
+import { processContentDelta } from "./streamProcessing";
+
+function handleContentUpdate(
+  newContent: string,
+  currentMessage: ChatMessage
+): { updatedMessage: ChatMessage, shouldSendToUser: boolean } {
+  // Use common utility to process the content delta
+  const processResult = processContentDelta(newContent, currentMessage);
+  
+  // The utility handles merging content with the existing message
+  const updatedMessage = processResult.updatedMessage;
+  
+  // It also indicates if the message should be yielded to the user
+  const shouldSendToUser = processResult.shouldYield;
+  
+  // Additional provider-specific logic can be added here
+  
+  return { updatedMessage, shouldSendToUser };
+}
+```
+
 ### Robust Error Handling with Retry Logic
 
 ```typescript
-import { getErrorMessage, isConnectionError } from "./errors";
+import { getErrorMessage, isConnectionError, isTransientError } from "./errors";
 import { safeJsonParse } from "./json";
 
 async function callApiWithRetry<T>(
   apiCall: () => Promise<Response>,
-  maxRetries: number = 3
+  maxRetries: number = 3,
+  state?: any
 ): Promise<T> {
   let retryCount = 0;
   
@@ -205,7 +236,8 @@ async function callApiWithRetry<T>(
       retryCount++;
       const errorMessage = getErrorMessage(error);
       
-      if (retryCount <= maxRetries && isConnectionError(error)) {
+      // Only retry if it's a transient error and we haven't exceeded max retries
+      if (retryCount <= maxRetries && isTransientError(error)) {
         // Exponential backoff
         const backoffTime = Math.min(1000 * Math.pow(2, retryCount - 1), 30000);
         console.log(`Retry ${retryCount}/${maxRetries} after ${backoffTime}ms: ${errorMessage}`);
@@ -217,6 +249,35 @@ async function callApiWithRetry<T>(
   }
   
   throw new Error(`Maximum retries (${maxRetries}) exceeded`);
+}
+
+// Generic retry wrapper for any async operation
+async function withRetry<T>(
+  operation: () => Promise<T>,
+  maxRetries: number = 3,
+  state?: any
+): Promise<T> {
+  let retryCount = 0;
+  
+  while (true) {
+    try {
+      return await operation();
+    } catch (error: unknown) {
+      retryCount++;
+      
+      if (retryCount > maxRetries || !isTransientError(error)) {
+        throw error;
+      }
+      
+      // Log retry information
+      console.log(`Retry ${retryCount}/${maxRetries}: ${getErrorMessage(error)}`);
+      
+      // Exponential backoff with jitter
+      const jitter = Math.random() * 0.3 + 0.85; // Random factor between 0.85 and 1.15
+      const backoffTime = Math.min(1000 * Math.pow(2, retryCount - 1) * jitter, 30000);
+      await new Promise(resolve => setTimeout(resolve, backoffTime));
+    }
+  }
 }
 ```
 
@@ -267,30 +328,35 @@ function processMessages(messages: ChatMessage[]): {
 ### Tool Call Processing and Repair
 
 ```typescript
-import { safeJsonParse, extractValidJson, repairDuplicatedJsonPattern } from "./json";
+import { safeJsonParse, extractValidJson, repairDuplicatedJsonPattern, processToolArgumentsDelta } from "./json";
 import { isSearchTool, processSearchToolArguments, formatToolResultsContent } from "./toolUtils";
 
 // Process and repair tool arguments
 function processToolArguments(args: string, toolName: string, messages: ChatMessage[]): string {
+  // Handle empty arguments
+  if (!args || args.trim() === '') {
+    return '{}';
+  }
+  
   // Try to repair broken JSON arguments
   let repairedArgs = args;
   
-  // Check for nested or broken JSON structures
-  if (typeof args === 'string') {
-    // First, check for duplicated JSON patterns and repair them
-    repairedArgs = repairDuplicatedJsonPattern(args);
-    
-    // Extract valid JSON from potentially broken structure
-    const validJson = extractValidJson(repairedArgs);
-    if (validJson) {
-      repairedArgs = validJson;
-    } else {
-      // Try other repair approaches
-      const doublePropertyPattern = /\{\s*"(\w+)"\s*:\s*"(.*?)"\s*\{\s*"\1"\s*:/;
-      const match = args.match(doublePropertyPattern);
-      if (match && match[1] && match[2]) {
-        repairedArgs = `{"${match[1]}": "${match[2]}"}`;
-      }
+  // First, check for duplicated JSON patterns and repair them
+  const repairResult = repairDuplicatedJsonPattern(args);
+  if (repairResult !== args) {
+    repairedArgs = repairResult;
+  }
+  
+  // Extract valid JSON from potentially broken structure
+  const validJson = extractValidJson(repairedArgs);
+  if (validJson) {
+    repairedArgs = validJson;
+  } else {
+    // Try other repair approaches for specific patterns
+    const doublePropertyPattern = /\{\s*"(\w+)"\s*:\s*"(.*?)"\s*\{\s*"\1"\s*:/;
+    const match = args.match(doublePropertyPattern);
+    if (match && match[1] && match[2]) {
+      repairedArgs = `{"${match[1]}": "${match[2]}"}`;
     }
   }
   
@@ -309,6 +375,15 @@ function processToolArguments(args: string, toolName: string, messages: ChatMess
   }
 }
 
+// Process streaming tool arguments
+function processStreamingToolArgs(
+  currentArgs: string,
+  deltaArgs: string,
+  toolName: string
+): { processedArgs: string; isComplete: boolean } {
+  return processToolArgumentsDelta(currentArgs, deltaArgs);
+}
+
 // Create proper tool result blocks
 function createToolResults(toolCalls: ToolCall[]): string {
   // Format tool results in a standardized format
@@ -321,6 +396,100 @@ function createToolResults(toolCalls: ToolCall[]): string {
   return formatToolResultsContent(toolResults);
 }
 ```
+
+## Utilizing Modular Design in Streaming Processors
+
+When implementing streaming processors for different LLM providers, the recommended approach is to use a modular design with small, focused methods:
+
+```typescript
+// Modular approach with focused methods
+class StreamProcessor {
+  // Process a streaming chunk with clear responsibility separation
+  processChunk(chunk: StreamingChunk, currentState: StreamState): ProcessingResult {
+    // First, check for thinking mode (handled by a dedicated method)
+    if (chunk.thinking) {
+      return this.processThinkingChunk(chunk.thinking, currentState);
+    }
+    
+    // Then, handle content delta (handled by a dedicated method)
+    if (chunk.choices?.[0]?.delta?.content) {
+      return this.processContentDelta(
+        chunk.choices[0].delta.content,
+        currentState
+      );
+    }
+    
+    // Finally, handle tool calls (handled by a dedicated method)
+    if (chunk.choices?.[0]?.delta?.tool_calls) {
+      return this.processToolCallDelta(
+        chunk.choices[0].delta.tool_calls,
+        currentState
+      );
+    }
+    
+    // Default return if no processing occurred
+    return { ...currentState, shouldYield: false };
+  }
+  
+  // Dedicated method for processing thinking chunks
+  private processThinkingChunk(
+    thinkingData: ThinkingData,
+    currentState: StreamState
+  ): ProcessingResult {
+    // Implementation focused solely on thinking chunks
+  }
+  
+  // Dedicated method for processing content deltas
+  private processContentDelta(
+    contentDelta: string,
+    currentState: StreamState
+  ): ProcessingResult {
+    // Implementation focused solely on content deltas
+    // Use common utility for standardized processing
+    const result = processContentDelta(contentDelta, currentState.message);
+    return {
+      ...currentState,
+      message: result.updatedMessage,
+      shouldYield: result.shouldYield
+    };
+  }
+  
+  // Dedicated method for processing tool call deltas
+  private processToolCallDelta(
+    toolCallDelta: ToolCallDelta[],
+    currentState: StreamState
+  ): ProcessingResult {
+    // Implementation focused solely on tool call deltas
+  }
+}
+```
+
+## Supporting the Orchestrator Pattern
+
+The utility modules are designed to work well with the orchestrator pattern used in complex LLM providers:
+
+1. **Providing standardized utilities for specialized modules**:
+   - Each utility module offers standardized functions that can be used by specialized provider modules
+   - Error handling utilities for error processing modules
+   - JSON utilities for streaming and tool call modules
+   - Message utilities for message formatting modules
+
+2. **Supporting clear responsibility boundaries**:
+   - Utilities maintain focused responsibilities
+   - Each utility addresses a specific aspect of LLM integration
+   - Provider modules can compose these utilities to create higher-level functionality
+
+3. **Enabling state management across modules**:
+   - Utilities follow immutable patterns for state updates
+   - They provide standardized interfaces for state transitions
+   - Error handling utilities preserve state during recovery
+
+4. **Standardizing common patterns**:
+   - JSON fragment handling follows consistent patterns across providers
+   - Error handling and retry logic is standardized
+   - Stream processing follows established conventions
+
+This approach allows provider implementations to focus on their unique requirements while leveraging shared functionality for common tasks.
 
 ## Best Practices for Utility Usage
 
@@ -346,7 +515,7 @@ if (maybeIndex !== null) {
 Consistent error handling across the codebase:
 
 ```typescript
-import { getErrorMessage, isConnectionError } from "./errors";
+import { getErrorMessage, isConnectionError, isTransientError } from "./errors";
 
 try {
   // API call or other operation
@@ -355,10 +524,10 @@ try {
   const errorMessage = getErrorMessage(error);
   
   // Decide if retry is appropriate
-  if (isConnectionError(error)) {
-    // Handle connection error - perhaps retry
+  if (isTransientError(error)) {
+    // Handle transient error - perhaps retry
   } else {
-    // Handle other errors
+    // Handle permanent errors
   }
 }
 ```
@@ -379,16 +548,15 @@ interface ErrorResult<T> {
 function handleProcessingError<T>(error: unknown, currentState: T): ErrorResult<T> {
   const errorMessage = getErrorMessage(error);
   
-  if (isConnectionError(error) || 
-      (error instanceof DOMException && error.name === 'AbortError')) {
-    // For connection errors, preserve current state
+  if (isTransientError(error)) {
+    // For transient errors, preserve current state
     return {
       success: false,
       error: error instanceof Error ? error : new Error(errorMessage),
       state: { ...currentState }  // Copy current state
     };
   } else {
-    // For other errors, also include state property but use initial values
+    // For permanent errors, also include state property but use initial values
     return {
       success: false,
       error: error instanceof Error ? error : new Error(errorMessage),
@@ -498,5 +666,13 @@ To maximize code reuse and maintain clear responsibility boundaries:
    - Respect the separation of concerns between utility modules
    - Combine utilities to create higher-level functionality
    - Keep utility functions focused on a single responsibility
+   - Break down large methods into smaller ones with clear purposes
+   - Use descriptive names that indicate a method's responsibility
+
+9. **Method Abstraction Levels**:
+   - Maintain consistent abstraction levels within classes and modules
+   - Public methods should operate at a higher abstraction level
+   - Helper methods should handle specific implementation details
+   - Keep methods short and focused on one task
 
 By following these guidelines, we can maintain high code quality with clear module boundaries while minimizing code duplication across the codebase.

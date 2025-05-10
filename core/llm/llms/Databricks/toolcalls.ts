@@ -1,10 +1,10 @@
 import { ChatMessage } from "../../../index.js";
-import { ToolCall, ToolResultMessage } from "./types.js";
+import { ToolCall, ToolResultMessage } from "./types/types.js";
 import { extractContentAsString } from "../../utils/messageUtils.js";
 import { hasToolResultBlocksAtBeginning } from "../../utils/messageUtils.js";
 import { isSearchTool, processSearchToolArguments, formatToolResultsContent } from "../../utils/toolUtils.js";
 import { doesModelSupportTools } from "../../utils/toolUtils.js";
-import { safeJsonParse, extractValidJson, repairDuplicatedJsonPattern, isValidJson } from "../../utils/json.js";
+import { safeJsonParse, extractValidJson, repairDuplicatedJsonPattern, isValidJson, processToolArgumentsDelta } from "../../utils/json.js";
 
 /**
  * ツール呼び出し処理クラス
@@ -205,7 +205,7 @@ export class ToolCallProcessor {
       return '{}';
     }
     
-    // まず、二重化パターンを検出して修復（共通ユーティリティを使用）
+    // 共通ユーティリティ関数を使用して二重化パターンを修復
     const repairedArgs = repairDuplicatedJsonPattern(args);
     if (repairedArgs !== args) {
       return repairedArgs;
@@ -214,7 +214,7 @@ export class ToolCallProcessor {
     // 明らかな重複パターンをチェック
     const repeatedPattern = /\{\s*"\w+"\s*:\s*[^{]*\{\s*"\w+"\s*:/;
     if (repeatedPattern.test(args)) {
-      // JSONの先頭から有効な部分を抽出
+      // 共通ユーティリティを使用して有効なJSONを抽出
       const validJson = extractValidJson(args);
       if (validJson) {
         return validJson;
@@ -235,8 +235,9 @@ export class ToolCallProcessor {
       }
     }
     
-    // ネストされたJSONを検出しようとする
+    // 共通ユーティリティを使用してJSONパースと再生成を試みる
     try {
+      // 型安全なパースを行い、正規化されたJSONを返す
       return JSON.stringify(safeJsonParse(args, {}));
     } catch (e) {
       console.warn(`引数の修復に失敗しました: ${e}`);
@@ -247,6 +248,7 @@ export class ToolCallProcessor {
   /**
    * 複数のツール引数をデルタベースで処理
    * 部分的なJSONを累積し、完全なJSONになるまで処理
+   * 共通ユーティリティを使用
    * 
    * @param toolName ツール名
    * @param jsonBuffer 現在のJSONバッファ
@@ -261,45 +263,39 @@ export class ToolCallProcessor {
     processedArgs: string;
     isComplete: boolean;
   } {
-    // 空のフラグメントは無視
-    if (!newJsonFragment || newJsonFragment.trim() === '') {
-      return { 
-        processedArgs: jsonBuffer, 
-        isComplete: isValidJson(jsonBuffer) 
-      };
-    }
+    // 共通ユーティリティの関数を使用してツール引数のデルタを処理
+    const result = processToolArgumentsDelta(jsonBuffer, newJsonFragment);
     
-    // バッファと新しいフラグメントを結合
-    const combinedBuffer = jsonBuffer + newJsonFragment;
-    
-    // 有効なJSONを抽出
-    const validJson = extractValidJson(combinedBuffer);
-    
-    // 有効なJSONが抽出できた場合
-    if (validJson) {
+    // 完全なJSONになった場合、必要に応じて検索ツール用の特殊処理を行う
+    if (result.isComplete && toolName && isSearchTool(toolName)) {
+      // 引数が空の場合はデフォルト値を設定
+      if (result.processedArgs === "{}" || !result.processedArgs) {
+        return {
+          processedArgs: JSON.stringify({ query: "" }),
+          isComplete: true
+        };
+      }
+      
       try {
-        // 解析してみる
-        const parsedJson = JSON.parse(validJson);
+        // 型安全なパースで引数を処理
+        const args = safeJsonParse<{ query?: string }>(result.processedArgs, { query: "" });
         
-        // 完全なJSONオブジェクトの場合
-        return { 
-          processedArgs: JSON.stringify(parsedJson),
+        // queryプロパティが存在しない場合は追加
+        if (!args.query) {
+          args.query = "";
+        }
+        
+        return {
+          processedArgs: JSON.stringify(args),
           isComplete: true
         };
       } catch (e) {
-        // JSONとして無効な場合（まだ不完全）
-        return { 
-          processedArgs: combinedBuffer,
-          isComplete: false
-        };
+        // エラーが発生した場合は元の結果を返す
+        return result;
       }
     }
     
-    // 有効なJSONが抽出できない場合
-    return { 
-      processedArgs: combinedBuffer,
-      isComplete: false
-    };
+    return result;
   }
 
   /**

@@ -7,6 +7,44 @@ const MIN_BACKOFF_TIME = 2000; // 初期バックオフ時間 (2秒)
 const MAX_BACKOFF_TIME = 30000; // 最大バックオフ時間 (30秒)
 
 /**
+ * ストリーミング状態インターフェース
+ * ストリーミング処理中の状態を表す
+ */
+export interface StreamingState {
+  jsonBuffer: string;
+  isBufferingJson: boolean;
+  toolCalls: any[];
+  currentToolCallIndex: number | null;
+  [key: string]: any; // 追加のプロパティを許可
+}
+
+/**
+ * エラー処理結果インターフェース
+ * エラー処理の結果を表す
+ */
+export interface ErrorHandlingResult {
+  success: boolean;
+  messages: any[];
+  error: Error;
+  state: StreamingState;
+}
+
+/**
+ * エラーレスポンスインターフェース
+ * APIからのエラーレスポンスの形式
+ */
+export interface ErrorResponse {
+  error?: {
+    message?: string;
+    type?: string;
+    code?: string;
+    param?: string;
+  };
+  message?: string;
+  status?: number;
+}
+
+/**
  * Databricks固有のエラー処理を担当するクラス
  */
 export class DatabricksErrorHandler {
@@ -21,14 +59,6 @@ export class DatabricksErrorHandler {
     error: Error;
   }> {
     const errorText = await response.text();
-    
-    // 型を明示的に指定
-    interface ErrorResponse {
-      error?: {
-        message?: string;
-      };
-      message?: string;
-    }
     
     // 共通ユーティリティを使用してJSONパース
     const errorJson = safeJsonParse<ErrorResponse>(errorText, { error: { message: errorText } });
@@ -50,21 +80,33 @@ export class DatabricksErrorHandler {
    * @param retryCount リトライ回数
    * @param error エラー
    * @param state 状態オブジェクト（オプション）
+   * @returns リトライすべきかどうか
    */
   static async handleRetry(
     retryCount: number, 
-    error: Error,
-    state?: any
-  ): Promise<void> {
+    error: unknown,
+    state?: Partial<StreamingState>
+  ): Promise<boolean> {
+    // 最大リトライ回数を超えた場合
+    if (retryCount >= MAX_RETRIES) {
+      console.log(`最大リトライ回数(${MAX_RETRIES})に達しました: ${getErrorMessage(error)}`);
+      return false;
+    }
+    
     // バックオフ時間（指数バックオフ）- 初回は短めに、その後長めに
     const backoffTime = Math.min(MIN_BACKOFF_TIME * Math.pow(2, retryCount - 1), MAX_BACKOFF_TIME);
-    console.log(`リトライ準備中 (${retryCount}/${MAX_RETRIES}): ${error.message || 'Unknown error'}`);
+    const errorMessage = getErrorMessage(error);
+    console.log(`リトライ準備中 (${retryCount}/${MAX_RETRIES}): ${errorMessage}`);
     
     // エラータイプに応じた処理
     if (isConnectionError(error)) {
-      console.log(`接続エラーを検出: ${error.message}. リトライします。`);
+      console.log(`接続エラーを検出: ${errorMessage}. リトライします。`);
     } else if (error instanceof DOMException && error.name === 'AbortError') {
       console.log(`タイムアウトによりリクエストが中止されました。リトライします。`);
+    } else {
+      // リトライすべきでないエラータイプは早期リターン
+      console.log(`リトライ不可能なエラータイプ: ${errorMessage}`);
+      return false;
     }
     
     // 状態が提供されていればその情報をログ出力
@@ -74,6 +116,34 @@ export class DatabricksErrorHandler {
     
     console.log(`${backoffTime}ms後に再試行します...`);
     await new Promise(resolve => setTimeout(resolve, backoffTime));
+    return true;
+  }
+
+  /**
+   * 標準的なリトライ処理を実行する便利なメソッド
+   * @param operation 再試行する操作（関数）
+   * @param state 現在の状態（オプション）
+   * @returns 操作の結果
+   */
+  static async withRetry<T>(
+    operation: () => Promise<T>,
+    state?: Partial<StreamingState>
+  ): Promise<T> {
+    let retryCount = 0;
+    
+    // eslint-disable-next-line no-constant-condition
+    while (true) {
+      try {
+        return await operation();
+      } catch (error: unknown) {
+        retryCount++;
+        const shouldRetry = await this.handleRetry(retryCount, error, state);
+        
+        if (!shouldRetry) {
+          throw error; // リトライ不可または最大回数超過の場合は例外再スロー
+        }
+      }
+    }
   }
 
   /**
@@ -84,18 +154,8 @@ export class DatabricksErrorHandler {
    */
   static handleStreamingError(
     error: unknown,
-    state: {
-      jsonBuffer: string;
-      isBufferingJson: boolean;
-      toolCalls: any[];
-      currentToolCallIndex: number | null;
-    }
-  ): {
-    success: boolean;
-    messages: any[];
-    error: Error;
-    state: any;
-  } {
+    state: StreamingState
+  ): ErrorHandlingResult {
     // エラーの詳細をログに記録
     const errorMessage = getErrorMessage(error);
     console.error(`Error processing streaming response: ${errorMessage}`);
@@ -109,10 +169,7 @@ export class DatabricksErrorHandler {
         messages: [], 
         error: error instanceof Error ? error : new Error(errorMessage),
         state: {
-          jsonBuffer: state.jsonBuffer,
-          isBufferingJson: state.isBufferingJson,
-          toolCalls: state.toolCalls,
-          currentToolCallIndex: state.currentToolCallIndex
+          ...state  // 状態を維持
         }
       };
     }
@@ -129,5 +186,39 @@ export class DatabricksErrorHandler {
         currentToolCallIndex: null
       }
     };
+  }
+
+  /**
+   * エラーが一時的なものかどうかを判定
+   * @param error エラーオブジェクト
+   * @returns 一時的なエラーの場合はtrue
+   */
+  static isTransientError(error: unknown): boolean {
+    // 接続エラーはすべて一時的とみなす
+    if (isConnectionError(error)) {
+      return true;
+    }
+    
+    // DOMException（AbortError）も一時的とみなす
+    if (error instanceof DOMException && error.name === 'AbortError') {
+      return true;
+    }
+    
+    // エラーメッセージに基づく判定
+    const errorMessage = getErrorMessage(error).toLowerCase();
+    const transientErrorPatterns = [
+      'timeout',
+      'timed out',
+      'rate limit',
+      'throttled',
+      'too many requests',
+      'service unavailable',
+      'internal server error',
+      'bad gateway',
+      'gateway timeout',
+      'temporarily unavailable'
+    ];
+    
+    return transientErrorPatterns.some(pattern => errorMessage.includes(pattern));
   }
 }

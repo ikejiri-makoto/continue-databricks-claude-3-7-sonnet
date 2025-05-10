@@ -103,6 +103,9 @@ Comprehensive error handling system:
 - Retry mechanisms with exponential backoff
 - State preservation during retries for streaming operations
 - Connection error recovery with session resumption
+- Type-safe error handling with dedicated interfaces
+- Transient error detection and automatic recovery
+- Generic retry mechanisms with customizable strategies
 
 ## Provider Implementation Patterns
 
@@ -219,6 +222,38 @@ The framework includes several features to enhance Agent functionality:
 7. **JSON Delta Processing**: Enhanced handling of partial JSON in streaming contexts using delta-based approaches
 8. **Parallel Tool Call Control**: Options to control parallel tool call behavior to prevent duplicated JSON structures
 
+## Orchestrator Pattern for Complex Providers
+
+For complex providers like Databricks, the framework recommends using the orchestrator pattern to achieve clear responsibility separation:
+
+1. **Main Provider Class as Orchestrator**:
+   - Acts as a coordinator between specialized modules
+   - Delegates detailed implementation to appropriate modules
+   - Maintains high-level flow control and error handling
+   - Implements BaseLLM interface methods
+
+2. **Specialized Modules with Clear Responsibilities**:
+   - Configuration Management: Handles API settings, validation, timeouts
+   - Error Handling: Processes API errors, implements retry logic
+   - Message Formatting: Converts between standard and provider-specific formats
+   - Streaming: Processes chunked responses and manages streaming state
+   - Tool Calls: Handles tool invocation and result processing
+   - Helper Utilities: Provides shared functionality for other modules
+
+3. **State Management**:
+   - Clear ownership of state between modules
+   - Immutable update patterns for state changes
+   - Preservation of state during error recovery
+   - Type-safe state interfaces
+
+4. **Interface Standardization**:
+   - Well-defined interfaces between modules
+   - Consistent parameter and return types
+   - Clear documentation of module responsibilities
+   - Minimized dependencies between modules
+
+This pattern promotes maintainability, testability, and code reuse while keeping the codebase organized and easy to understand.
+
 ## Best Practices
 
 ### JSON Processing in Streaming Contexts
@@ -268,6 +303,7 @@ Implement consistent error handling with retry mechanisms for network issues:
 ```typescript
 import { getErrorMessage, isConnectionError } from "../utils/errors";
 
+// Basic error handling
 try {
   // API call
 } catch (error: unknown) {
@@ -280,6 +316,56 @@ try {
     // Retry operation
   } else {
     // Handle other error types
+  }
+}
+
+// Advanced error handling with state preservation
+import { ErrorHandlingResult, StreamingState } from "./types";
+
+function handleStreamingError(
+  error: unknown,
+  state: StreamingState
+): ErrorHandlingResult {
+  if (isConnectionError(error) || (error instanceof DOMException && error.name === 'AbortError')) {
+    // Preserve state for retry
+    return { 
+      success: false, 
+      error: error instanceof Error ? error : new Error(getErrorMessage(error)),
+      state: { ...state }  // Keep the current state for recovery
+    };
+  } else {
+    // Reset state for non-recoverable errors
+    return { 
+      success: false, 
+      error: error instanceof Error ? error : new Error(getErrorMessage(error)),
+      state: createInitialState()  // Reset state
+    };
+  }
+}
+
+// Generic retry mechanism
+async function withRetry<T>(
+  operation: () => Promise<T>,
+  maxRetries: number = 3,
+  state?: Partial<StreamingState>
+): Promise<T> {
+  let retryCount = 0;
+  
+  while (true) {
+    try {
+      return await operation();
+    } catch (error: unknown) {
+      retryCount++;
+      
+      if (retryCount > maxRetries || !isTransientError(error)) {
+        throw error;
+      }
+      
+      // Calculate backoff time with exponential strategy
+      const backoffTime = Math.min(1000 * Math.pow(2, retryCount - 1), 30000);
+      console.log(`Retry ${retryCount}/${maxRetries} after ${backoffTime}ms`);
+      await new Promise(resolve => setTimeout(resolve, backoffTime));
+    }
   }
 }
 ```
@@ -316,5 +402,8 @@ For complex providers, follow these principles:
 3. **Clear Interfaces**: Define clear interfaces between modules
 4. **Shared State Management**: Use immutable state patterns for data shared between modules
 5. **Common Utility Usage**: Leverage shared utilities rather than reimplementing functionality
+6. **Method Abstraction Levels**: Maintain consistent abstraction levels within methods and classes
+7. **Error Handling Consistency**: Use standardized error handling approaches throughout the codebase
+8. **Type Safety**: Utilize comprehensive type definitions for all interfaces and data structures
 
 By following these best practices, you can ensure more robust and maintainable code across the LLM framework.

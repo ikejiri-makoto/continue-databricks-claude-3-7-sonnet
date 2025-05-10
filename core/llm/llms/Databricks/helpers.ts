@@ -1,5 +1,7 @@
-import { CompletionOptions } from "../../../index.js";
-import { ToolCall } from "./types/types.js";
+import { ChatMessage, CompletionOptions } from "../../../index.js";
+import { DatabricksCompletionOptions, ToolCall } from "./types/types.js";
+import { safeStringify, safeJsonParse } from "../../utils/json.js";
+import { isSearchTool } from "../../utils/toolUtils.js";
 
 // 定数
 const DEFAULT_MAX_TOKENS = 32000;
@@ -7,16 +9,17 @@ const MIN_MAX_TOKENS = 4096;
 
 /**
  * DatabricksLLM用のヘルパー関数
+ * リクエストパラメータの構築、状態の初期化、非ストリーミングレスポンスの処理などを担当
  */
 export class DatabricksHelpers {
   /**
-   * リクエストパラメータの構築
+   * OpenAI形式のオプションに変換
+   * CompletionOptionsをDatabricksのリクエストパラメータに変換
+   * 
    * @param options 補完オプション
-   * @returns リクエストパラメータ
+   * @returns 変換されたリクエストパラメータ
    */
-  static buildRequestParameters(
-    options: CompletionOptions
-  ): Record<string, any> {
+  static convertArgs(options: DatabricksCompletionOptions): Record<string, any> {
     const modelName = options.model || "databricks-claude-3-7-sonnet";
     
     // max_tokensのデフォルト値または指定値を取得
@@ -38,11 +41,48 @@ export class DatabricksHelpers {
 
     // 空でないstop配列のみを含める
     if (options.stop && Array.isArray(options.stop) && options.stop.length > 0) {
-      finalOptions.stop = options.stop.filter(x => typeof x === 'string' && x.trim() !== "");
+      finalOptions.stop = options.stop.filter((x: string) => typeof x === 'string' && x.trim() !== "");
     }
+
+    // タイムアウト設定はDatabricksエンドポイントでサポートされていないためリクエストボディに含めない
+    // Fetch APIのtimeoutオプションとAbortControllerで処理する
 
     // デバッグログ
     console.log(`Token settings - max_tokens: ${maxTokens}, thinking budget: ${thinkingBudget}`);
+
+    // ツール関連のパラメータがある場合のみ追加
+    if (options.tools && Array.isArray(options.tools) && options.tools.length > 0) {
+      finalOptions.tools = options.tools.map((tool: any) => ({
+        type: "function",
+        function: {
+          name: tool.function.name,
+          description: tool.function.description,
+          parameters: tool.function.parameters,
+        }
+      }));
+
+      // OpenAIのアプローチを取り入れた並列ツール呼び出し制御
+      // JSON破損防止のためparallel_tool_calls=falseを設定
+      finalOptions.parallel_tool_calls = options.parallel_tool_calls ?? false;
+
+      // ツールがあるにもかかわらずQueryパラメータが不足する可能性のある特定のツールを検出
+      const searchTools = options.tools.filter((tool: any) => 
+        isSearchTool(tool.function.name)
+      );
+
+      if (searchTools.length > 0) {
+        console.log(`検索ツールが検出されました: ${searchTools.map((t: any) => t.function.name).join(', ')}`);
+      }
+    }
+
+    if (options.toolChoice) {
+      finalOptions.tool_choice = {
+        type: "function",
+        function: {
+          name: options.toolChoice.function.name
+        }
+      };
+    }
 
     return finalOptions;
   }
@@ -91,5 +131,85 @@ export class DatabricksHelpers {
       // 2行以上の改行がある場合は段落区切りとして扱う
       text.includes("\n\n")
     );
+  }
+
+  /**
+   * オブジェクトを安全に文字列化する
+   * @param obj 文字列化するオブジェクト
+   * @param defaultValue デフォルト値
+   * @returns 文字列化されたオブジェクト
+   */
+  static safeStringify(obj: any, defaultValue: string = ""): string {
+    // 共通ユーティリティの関数を使用
+    return safeStringify(obj, defaultValue);
+  }
+  
+  /**
+   * 非ストリーミングレスポンスを処理
+   * @param response HTTPレスポンス
+   * @returns 処理されたメッセージ
+   */
+  static async processNonStreamingResponse(
+    response: Response
+  ): Promise<ChatMessage> {
+    const data = await response.json();
+    return { 
+      role: "assistant", 
+      content: safeStringify(data.choices[0].message.content, "")
+    };
+  }
+
+  /**
+   * コンテンツデルタの処理
+   * @param newContent 新しいコンテンツ
+   * @param currentContent 現在のコンテンツ
+   * @returns 処理されたコンテンツ
+   */
+  static processContentDelta(newContent: string, currentContent: string): string {
+    return currentContent + newContent;
+  }
+  
+  /**
+   * メッセージが有効なJSON形式か検証
+   * @param message チェックするメッセージ
+   * @returns 有効なJSONの場合はtrue
+   */
+  static isValidJsonMessage(message: string): boolean {
+    try {
+      if (!message.trim().startsWith('{') && !message.trim().startsWith('[')) {
+        return false;
+      }
+      
+      // 共通ユーティリティを使用してJSONの検証
+      return safeJsonParse(message, null) !== null;
+    } catch (e) {
+      return false;
+    }
+  }
+  
+  /**
+   * リクエストボディのログ出力（デバッグ用）
+   * @param requestBody リクエストボディ
+   */
+  static logRequestBody(requestBody: any): void {
+    // 短縮バージョンのリクエストボディを出力（巨大な場合は一部をトリミング）
+    const messages = requestBody.messages || [];
+    
+    const truncatedMessages = messages.map((msg: any) => {
+      if (typeof msg.content === 'string' && msg.content.length > 100) {
+        return {
+          ...msg,
+          content: msg.content.substring(0, 100) + '...'
+        };
+      }
+      return msg;
+    });
+    
+    const truncatedBody = {
+      ...requestBody,
+      messages: truncatedMessages
+    };
+    
+    console.log('Request body (truncated):', JSON.stringify(truncatedBody, null, 2));
   }
 }

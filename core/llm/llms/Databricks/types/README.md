@@ -16,20 +16,47 @@ types/
 **1. `index.ts` - エントリーポイント**
 - 型定義のエントリーポイントとして機能
 - `types.ts`からすべての型定義をエクスポート
+- 明示的に`DatabricksCompletionOptions`型など主要な型をエクスポート
 - 型拡張定義をインポート
+- 型定義の可視性と参照性を向上
 
 **2. `types.ts` - 主要な型定義**
 - Databricks固有のインターフェース定義
+- `DatabricksCompletionOptions`型の定義 - CompletionOptionsを拡張
+- `DatabricksChatMessage`型の定義 - ChatMessageを拡張
 - ツール呼び出し型の定義
 - ストリーミング関連の型定義
 - レスポンス処理の型定義
 - 状態管理のインターフェース
 - JSONデルタ処理関連の型定義
+- エラー処理関連の型定義
+- モジュール間で共有される型の標準化
+- モジュールインターフェース型の定義
 
 **3. `extension.d.ts` - 型拡張定義**
 - コアモジュールの既存型をDatabricks固有の要件で拡張
 - 三重スラッシュ参照ディレクティブによる型参照
 - フォールバックとしてのインライン型定義
+- コアモジュールとの互換性維持
+
+## オーケストレーターパターンをサポートする型定義
+
+各モジュールの明確な責任分担をサポートするために、型定義は以下の役割を果たします:
+
+1. **モジュール間インターフェースの定義**: 
+   - 各モジュールが他のモジュールとやり取りするための型を定義
+   - 一貫した型構造でモジュール間の通信を標準化
+   - 明示的な型定義でモジュールの責任境界を強調
+
+2. **状態管理のサポート**:
+   - ストリーミング状態の型定義を提供
+   - エラー処理結果の型構造を標準化
+   - 状態の永続化と復元の型安全性を確保
+
+3. **共通データ構造の定義**:
+   - ツール呼び出しとレスポンスの標準構造を定義
+   - 処理結果の一貫した型を提供
+   - JSON処理と蓄積の状態追跡を型安全に
 
 ## 主要な型定義
 
@@ -51,10 +78,45 @@ export interface ToolResultMessage {
   role: 'tool';
   tool_call_id: string;
   content: string;
+  toolCallId?: string; // 互換性のために追加
 }
 ```
 
-### 2. ストリーミング関連の型定義
+### 2. Databricks固有の完了オプション型
+
+```typescript
+/**
+ * Databricks固有の完了オプション
+ * 基本のCompletionOptionsを拡張し、Databricks特有のオプションを追加
+ */
+export interface DatabricksCompletionOptions extends CompletionOptions {
+  /**
+   * 並列ツール呼び出しを有効にするかどうか
+   * @default false
+   */
+  parallel_tool_calls?: boolean;
+  
+  /**
+   * リクエストのタイムアウト (秒)
+   * デフォルトは300秒 (5分)
+   */
+  requestTimeout?: number;
+}
+```
+
+### 3. Databricks固有のメッセージ型
+
+```typescript
+/**
+ * 拡張されたChatMessage型（Databricks特有のプロパティを含む）
+ */
+export type DatabricksChatMessage = ChatMessage & {
+  signature?: string;
+  toolCallId?: string;
+};
+```
+
+### 4. ストリーミング関連の型定義
 
 ```typescript
 // Databricksの思考（Thinking）チャンク型定義
@@ -85,7 +147,33 @@ export interface StreamingChunk {
 }
 ```
 
-### 3. JSONデルタ処理の型定義
+### 5. 処理結果とストリーミング状態の型定義
+
+```typescript
+// ストリーミング処理の結果型定義
+export interface StreamingResult {
+  updatedMessage: ChatMessage;
+  updatedToolCalls: ToolCall[];
+  updatedCurrentToolCall: ToolCall | null;
+  updatedCurrentToolCallIndex: number | null;
+  updatedJsonBuffer: string;
+  updatedIsBufferingJson: boolean;
+  thinkingMessage?: ChatMessage;
+  shouldYieldMessage: boolean;
+}
+
+// 永続的なストリーム状態の型定義
+export interface PersistentStreamState {
+  jsonBuffer: string;
+  isBufferingJson: boolean;
+  toolCallsInProgress: ToolCall[];
+  currentToolCallIndex: number | null;
+  contentBuffer: string;
+  lastReconnectTimestamp: number;
+}
+```
+
+### 6. JSONデルタ処理の型定義
 
 ```typescript
 // JSONデルタ処理の結果型定義
@@ -109,43 +197,96 @@ export interface JsonRepairResult {
 }
 ```
 
-### 4. 処理結果の型定義
+### 7. エラー処理関連の型定義
 
 ```typescript
-// ストリーミング処理の結果型定義
-export interface StreamingResult {
-  updatedMessage: ChatMessage;
-  updatedToolCalls: ToolCall[];
-  updatedCurrentToolCall: ToolCall | null;
-  updatedCurrentToolCallIndex: number | null;
-  updatedJsonBuffer: string;
-  updatedIsBufferingJson: boolean;
-  thinkingMessage?: ChatMessage;
-  shouldYieldMessage: boolean;
+// ストリーミング状態インターフェース
+export interface StreamingState {
+  jsonBuffer: string;
+  isBufferingJson: boolean;
+  toolCalls: ToolCall[];
+  currentToolCallIndex: number | null;
+  [key: string]: any; // 追加のプロパティを許可
 }
 
-// ツール呼び出し処理の結果型定義
-export interface ToolCallResult {
-  updatedToolCalls: ToolCall[];
-  updatedCurrentToolCall: ToolCall | null;
-  updatedCurrentToolCallIndex: number | null;
-  updatedJsonBuffer: string;
-  updatedIsBufferingJson: boolean;
-  shouldYieldMessage: boolean;
+// エラー処理結果インターフェース
+export interface ErrorHandlingResult {
+  success: boolean;
+  messages: ChatMessage[];
+  error: Error;
+  state: StreamingState;
+}
+
+// エラーレスポンスインターフェース
+export interface ErrorResponse {
+  error?: {
+    message?: string;
+    type?: string;
+    code?: string;
+    param?: string;
+  };
+  message?: string;
+  status?: number;
 }
 ```
 
-### 5. 状態管理の型定義
+## オーケストレーターパターン用のモジュールインターフェース型
+
+責任分担を明確にするための各モジュールのインターフェース型を追加しました：
 
 ```typescript
-// 永続的なストリーム状態の型定義
-export interface PersistentStreamState {
-  jsonBuffer: string;
-  isBufferingJson: boolean;
-  toolCallsInProgress: ToolCall[];
-  currentToolCallIndex: number | null;
-  contentBuffer: string;
-  lastReconnectTimestamp: number;
+/**
+ * 設定管理モジュールのインターフェース
+ */
+export interface ConfigManagerInterface {
+  getConfig(options?: DatabricksCompletionOptions): DatabricksConfig;
+  normalizeApiUrl(url: string): string;
+  validateApiConfig(apiKey: string | undefined, apiBase: string | undefined): void;
+  setupTimeoutController(signal: AbortSignal, options: DatabricksCompletionOptions): {
+    timeoutController: AbortController;
+    timeoutId: NodeJS.Timeout;
+    combinedSignal: AbortSignal;
+  };
+}
+
+/**
+ * エラー処理モジュールのインターフェース
+ */
+export interface ErrorHandlerInterface {
+  parseErrorResponse(response: Response): Promise<{ error: Error }>;
+  handleRetry(retryCount: number, error: unknown, state?: any): Promise<boolean>;
+  withRetry<T>(operation: () => Promise<T>, state?: any): Promise<T>;
+  handleStreamingError(error: unknown, state: StreamingState): ErrorHandlingResult;
+  isTransientError(error: unknown): boolean;
+}
+
+/**
+ * ストリーミング処理モジュールのインターフェース
+ */
+export interface StreamProcessorInterface {
+  processStreamingResponse(
+    response: Response,
+    messages: ChatMessage[],
+    retryCount: number,
+    alwaysLogThinking: boolean
+  ): Promise<{
+    success: boolean;
+    messages: ChatMessage[];
+    error?: Error;
+    state?: any;
+  }>;
+  
+  processChunk(
+    chunk: StreamingChunk,
+    currentMessage: ChatMessage,
+    toolCalls: ToolCall[],
+    currentToolCall: ToolCall | null,
+    currentToolCallIndex: number | null,
+    jsonBuffer: string,
+    isBufferingJson: boolean,
+    messages: ChatMessage[],
+    isReconnect?: boolean
+  ): StreamingResult;
 }
 ```
 
@@ -202,380 +343,167 @@ interface ThinkingChatMessage extends ChatMessage {
 }
 ```
 
-## JSONデルタ処理のための型安全なアプローチ
+## 最近の改善点
 
-JSONデルタ処理のための型定義を強化し、より堅牢なコードを実現しています：
+### 型定義の整理と明確化
 
-```typescript
-/**
- * JSON断片を処理するための関数シグネチャ
- * 
- * @param currentJson 現在のJSON文字列
- * @param deltaJson 新しいJSONフラグメント
- * @returns 処理結果（結合されたJSON、完全性フラグ、有効性フラグ）
- */
-function processJsonDelta(
-  currentJson: string,
-  deltaJson: string
-): JsonDeltaResult;
+1. **重複定義の統合**
+   - `Databricks/types.ts`と`Databricks/types/types.ts`に分散していた型定義を統合
+   - 後方互換性のため、`types.ts`ファイルを非推奨としてマーク
 
-/**
- * ツール呼び出し引数をデルタベースで処理するための関数シグネチャ
- * 
- * @param toolName ツール名（検索ツールの特別処理に使用）
- * @param currentArgs 現在の引数
- * @param deltaArgs 新しい引数フラグメント
- * @returns 処理結果（処理済み引数、完全性フラグ）
- */
-function processToolArgumentsDelta(
-  toolName: string | undefined,
-  currentArgs: string,
-  deltaArgs: string
-): ToolArgumentsDeltaResult;
+2. **モジュールインターフェース型の追加**
+   - 各モジュールの責任を明確にするインターフェース型を追加
+   - オーケストレーターパターンの実装をサポート
+   - モジュール間の連携を型安全に
 
-/**
- * JSONの二重化パターンを検出して修復するための関数シグネチャ
- * 
- * @param jsonStr 修復する可能性のあるJSON文字列
- * @returns 修復結果（修復されたJSON、修正されたかどうかのフラグ、検出されたパターン）
- */
-function repairDuplicatedJsonPattern(
-  jsonStr: string
-): JsonRepairResult;
-```
+3. **JSDocドキュメントの強化**
+   - すべての型定義に詳細なJSDocコメントを追加
+   - パラメータと戻り値の詳細な説明
+   - 使用例の追加
 
-## 共通ユーティリティとの連携
-
-型定義は共通ユーティリティと密接に連携し、以下の原則に従っています：
-
-### 1. 厳格な型チェック
-
-```typescript
-// nullかundefinedかを明確に区別する型
-function processToolCall(
-  toolCall: ToolCall | null,
-  index: number | null
-): ToolCallResult {
-  // 実装
-}
-```
-
-### 2. 型安全なエラー処理
-
-```typescript
-// エラー処理における型安全性の確保
-try {
-  // API呼び出しやその他の操作
-} catch (error: unknown) {
-  // 型を明示的に絞り込む
-  if (error instanceof Error) {
-    // Errorオブジェクトとして処理
-  } else if (typeof error === 'string') {
-    // 文字列エラーメッセージとして処理
-  } else {
-    // その他の型のエラーを処理
-  }
-}
-
-// 状態を含むエラー処理の一貫性
-// すべてのエラーパターンでstateプロパティを含む一貫した値を返す
-function handleError(error: unknown, state: StreamState): ErrorResult {
-  // 共通のベース結果
-  const baseResult = {
-    success: false,
-    error: error instanceof Error ? error : new Error(String(error))
-  };
-  
-  if (isConnectionError(error)) {
-    // 接続エラーの場合は現在の状態を保持
-    return {
-      ...baseResult,
-      state: { ...state }  // 現在の状態をコピー
-    };
-  } else {
-    // その他のエラーの場合も状態プロパティを含めるが初期化された値を使用
-    return {
-      ...baseResult,
-      state: {            // 初期化された状態
-        buffer: "",
-        isProcessing: false
-      }
-    };
-  }
-}
-```
-
-### 3. 状態管理の型サポート
-
-```typescript
-// ストリーミング状態を型安全に管理
-const initialState: PersistentStreamState = {
-  jsonBuffer: "",
-  isBufferingJson: false,
-  toolCallsInProgress: [],
-  currentToolCallIndex: null,
-  contentBuffer: "",
-  lastReconnectTimestamp: Date.now()
-};
-```
-
-### 4. JSONデルタ処理の型安全な実装
-
-```typescript
-// JSONデルタ処理の型安全な実装
-function processStreamingDelta(
-  chunk: StreamingChunk, 
-  state: PersistentStreamState
-): StreamingResult {
-  // デフォルト結果値の初期化
-  const result: StreamingResult = {
-    updatedMessage: { ...currentMessage },
-    updatedToolCalls: [...state.toolCallsInProgress],
-    updatedCurrentToolCall: null,
-    updatedCurrentToolCallIndex: state.currentToolCallIndex,
-    updatedJsonBuffer: state.jsonBuffer,
-    updatedIsBufferingJson: state.isBufferingJson,
-    shouldYieldMessage: false
-  };
-
-  // デルタにツール呼び出しが含まれている場合
-  if (chunk.choices?.[0]?.delta?.tool_calls) {
-    const toolCallDelta = chunk.choices[0].delta.tool_calls[0];
-    
-    // ツール呼び出しデルタの処理
-    if (toolCallDelta.function?.arguments) {
-      // JSONデルタの処理
-      const argsResult = processToolArgumentsDelta(
-        result.updatedCurrentToolCall?.function.name,
-        result.updatedJsonBuffer,
-        toolCallDelta.function.arguments
-      );
-      
-      // 結果の更新
-      result.updatedJsonBuffer = argsResult.processedArgs;
-      result.updatedIsBufferingJson = !argsResult.isComplete;
-      
-      // JSONが完成した場合
-      if (argsResult.isComplete && result.updatedCurrentToolCall) {
-        result.updatedCurrentToolCall.function.arguments = argsResult.processedArgs;
-        // ツール呼び出し配列を更新
-        if (result.updatedCurrentToolCallIndex !== null) {
-          result.updatedToolCalls[result.updatedCurrentToolCallIndex] = 
-            result.updatedCurrentToolCall;
-        }
-        result.shouldYieldMessage = true;
-      }
-    }
-  }
-  
-  return result;
-}
-```
-
-## 最近の修正と改善点
-
-### 型定義の整理と重複解決
-
-最近の修正では、以下の型関連の問題を解決しました：
-
-1. **ToolCall識別子の重複**: 
-   - Databricks.tsファイルで `ToolCall` 型が2回インポートされていた問題を解決
-   - 型インポートを一元化し、コードの読みやすさと保守性を向上
-
-2. **ToolResultMessage型の追加**:
-   - 不足していた `ToolResultMessage` インターフェースを追加
-   - ツール呼び出し結果を明確に型付けすることで型安全性を強化
-   - ツール結果の形式とプロパティを明示的に定義
-
-3. **isValidJson関数の活用**:
-   - 共通ユーティリティの `isValidJson` 関数を適切にインポートして使用
-   - 標準的なJSON検証ロジックを活用し、コードの一貫性を確保
-
-これらの修正により、以下の利点が得られました：
-- 型安全性の向上と型エラーの削減
-- 明確なモジュール境界の維持
-- 共通ユーティリティの効果的な活用
-- コードの可読性と保守性の改善
+4. **型階層の明確化**
+   - 拡張型と基本型の関係を明確に
+   - インポート/エクスポートパスの整理
+   - 型参照の最適化
 
 ## ベストプラクティス
 
-Databricks型定義を拡張または使用する際は、以下のベストプラクティスに従ってください：
+Databricks型定義を使用する際は、以下のベストプラクティスに従ってください：
 
-### 1. 明示的な型アノテーション
-
-- 関数シグネチャに明示的な型を使用する
-- 戻り値の型を明示的に指定する
-- 複雑なオブジェクトに型アノテーションを追加する
+### 1. 型のインポート方法
 
 ```typescript
-function processStream(
-  chunk: StreamingChunk, 
-  state: PersistentStreamState
-): StreamingResult {
-  // 実装
-}
+// 推奨: types/index.tsからインポート
+import { 
+  DatabricksCompletionOptions, 
+  ToolCall 
+} from "./Databricks/types/index.js";
+
+// 非推奨: 直接types.tsをインポート
+import { ToolCall } from "./Databricks/types.ts"; // このファイルは非推奨
 ```
 
-### 2. NULL安全性の確保
-
-- null可能な値には必ず条件チェックを行う
-- オプショナルプロパティには安全にアクセスする
-- nullとundefinedを明確に区別する
+### 2. モジュールインターフェース型の活用
 
 ```typescript
-// null安全なアクセス
-const toolName = toolCall?.function?.name || "unknown";
+// モジュールインターフェース型を実装
+import { ConfigManagerInterface } from "./types/index.js";
 
-// nullとundefinedの区別
-const index: number | null = value !== undefined 
-  ? Number(value) 
-  : null;
-```
-
-### 3. 型の絞り込み
-
-- 型ガードを使用して複雑な型を絞り込む
-- instanceofやtypeof演算子を活用する
-- カスタム型ガード関数を作成する
-
-```typescript
-// カスタム型ガード関数
-function isThinkingChunk(chunk: unknown): chunk is ThinkingChunk {
-  if (typeof chunk !== 'object' || chunk === null) return false;
-  return 'thinking' in chunk || 'signature' in chunk;
-}
-
-// 型ガードの使用
-if (isThinkingChunk(response)) {
-  // responseはThinkingChunk型として処理可能
-}
-```
-
-### 4. 型拡張の明確な文書化
-
-- 型拡張には常にJSDocコメントを添付する
-- なぜ拡張が必要なのかを説明する
-- デフォルト値や使用例を提供する
-
-```typescript
 /**
- * リクエストのタイムアウト設定オプション
- * 
- * @param seconds タイムアウト時間（秒）
- * @default 300 (5分)
- * @example
- * const options = { requestTimeout: 600 }; // 10分のタイムアウト
+ * 設定管理モジュール
+ * インターフェースを実装することで責任を明確に
  */
-```
-
-### 5. JSONデルタ処理の型安全な実装
-
-- JSONデルタ処理の結果には明示的な型インターフェースを使用する
-- 処理関数は返り値の型を明確に定義する
-- 二重化パターン検出には専用の型を使用する
-
-```typescript
-// JSONデルタ処理の結果型
-interface JsonDeltaResult {
-  combined: string;   // 結合されたJSON
-  complete: boolean;  // 完全なJSONか
-  valid: boolean;     // 有効なJSONか
-}
-
-// 明示的な型を持つ関数実装
-function processJsonDelta(
-  currentJson: string,
-  deltaJson: string
-): JsonDeltaResult {
-  // 実装
-  return {
-    combined: combinedJson,
-    complete: isComplete,
-    valid: isValid
-  };
+export class DatabricksConfig implements ConfigManagerInterface {
+  // インターフェースで定義されたメソッドを実装
+  static getConfig(options?: DatabricksCompletionOptions): DatabricksConfig {
+    // 実装
+  }
+  
+  static normalizeApiUrl(url: string): string {
+    // 実装
+  }
+  
+  // 他のメソッド...
 }
 ```
 
-これらのガイドラインを遵守することで、型安全性が向上し、バグの発生を未然に防止できます。
-
-## 共通ユーティリティの活用強化
-
-型定義の使用時には、以下の共通ユーティリティを活用してください：
-
-### 1. 型安全なJSON処理
+### 3. 型安全なエラー処理
 
 ```typescript
-// jsonユーティリティと型定義の連携
-import { safeJsonParse, processJsonDelta } from "../../../utils/json.js";
-import type { 
-  StreamingChunk, 
-  JsonDeltaResult, 
-  ToolArgumentsDeltaResult 
-} from "../types/index.js";
+import { 
+  ErrorHandlingResult, 
+  StreamingState 
+} from "./types/index.js";
 
-// 型安全なJSONパース
-const chunk = safeJsonParse<StreamingChunk>(jsonText, defaultChunk);
-
-// 型安全なJSONデルタ処理
-const result: JsonDeltaResult = processJsonDelta(currentJson, deltaJson);
-if (result.complete && result.valid) {
-  // 完全で有効なJSONの処理
-}
-```
-
-### 2. エラー処理と型の連携
-
-```typescript
-// エラーユーティリティと型定義の連携
-import { getErrorMessage } from "../../../utils/errors.js";
-import type { PersistentStreamState } from "../types/index.js";
-
-// 型安全なエラー処理
 try {
   // 処理
 } catch (error: unknown) {
-  const state: PersistentStreamState = {
-    // エラー発生時の状態復元
+  // 型安全なエラー処理結果の構築
+  const result: ErrorHandlingResult = {
+    success: false,
+    messages: [],
+    error: error instanceof Error ? error : new Error(getErrorMessage(error)),
+    state: {
+      jsonBuffer: "",
+      isBufferingJson: false,
+      toolCalls: [],
+      currentToolCallIndex: null
+    }
   };
-  console.error(`エラーが発生しました: ${getErrorMessage(error)}`);
 }
 ```
 
-### 3. ストリーム処理と型の連携
+### 4. 共通ユーティリティとの連携
 
 ```typescript
-// ストリーム処理ユーティリティと型定義の連携
-import { processContentDelta } from "../../../utils/streamProcessing.js";
-import type { ResponseDelta } from "../types/index.js";
+import { safeJsonParse } from "../../../utils/json.js";
+import { StreamingChunk } from "./types/index.js";
 
-// 型安全なストリーム処理
-const delta: ResponseDelta = {
-  content: "新しいコンテンツ"
-};
-const updatedContent = processContentDelta(currentContent, delta.content);
+// 型安全なJSONパース
+const chunk = safeJsonParse<StreamingChunk>(jsonText, {
+  choices: [{
+    delta: { content: "" }
+  }]
+});
 ```
 
-### 4. JSONデルタ処理と型の連携
+## モジュール間のインターフェースをサポートする型定義
+
+オーケストレーターパターンの中心となる`Databricks.ts`クラスは、各モジュールを調整する役割を果たします。型定義はこの連携を型安全に実現するために重要な役割を果たします：
 
 ```typescript
-// JSONデルタ処理ユーティリティと型定義の連携
-import { 
-  processJsonDelta, 
-  repairDuplicatedJsonPattern 
-} from "../../../utils/json.js";
-import type { 
-  JsonDeltaResult, 
-  JsonRepairResult 
-} from "../types/index.js";
-
-// 型安全なJSONデルタ処理
-const deltaResult: JsonDeltaResult = processJsonDelta(currentJson, deltaJson);
-
-// 型安全なJSON修復
-const repairResult: JsonRepairResult = repairDuplicatedJsonPattern(malformedJson);
-if (repairResult.wasModified) {
-  console.log(`検出されたパターン: ${repairResult.detectedPattern}`);
+// オーケストレーターのメソッド例
+async processStreamingRequest(
+  messages: ChatMessage[], 
+  signal: AbortSignal, 
+  options: DatabricksCompletionOptions,
+  retryCount: number
+): Promise<{
+  success: boolean;
+  messages: ChatMessage[];
+  error?: Error;
+  state?: StreamingState;
+}> {
+  try {
+    // 各モジュールの責任に応じた処理の委譲
+    
+    // 1. リクエストパラメータの構築をヘルパーモジュールに委譲
+    const args = DatabricksHelpers.convertArgs(options);
+    
+    // 2. メッセージ変換をメッセージ処理モジュールに委譲
+    const formattedMessages = MessageProcessor.convertToOpenAIFormat(
+      messages, MessageProcessor.sanitizeMessages(messages)
+    );
+    
+    // 3. URL正規化を設定管理モジュールに委譲
+    const apiBaseUrl = this.apiBase ? 
+      DatabricksConfig.normalizeApiUrl(this.apiBase) : "";
+    
+    // 4. タイムアウトコントローラ設定を設定管理モジュールに委譲
+    const { timeoutController, timeoutId, combinedSignal } = 
+      DatabricksConfig.setupTimeoutController(signal, options);
+    
+    // 5. APIリクエスト
+    const response = await this.fetch(apiBaseUrl, {
+      // リクエスト設定
+    });
+    
+    // 6. ストリーミングレスポンス処理をストリーミングモジュールに委譲
+    const streamResult = await StreamingProcessor.processStreamingResponse(
+      response, messages, retryCount, this.alwaysLogThinking
+    );
+    
+    // 処理結果を返却
+    return streamResult;
+  } catch (error: unknown) {
+    // 7. エラー結果の構築
+    return { 
+      success: false, 
+      messages: [], 
+      error: error instanceof Error ? error : new Error(getErrorMessage(error)) 
+    };
+  }
 }
 ```
 
-これらの共通ユーティリティを活用することで、型安全性を保ちながらコードの重複を削減できます。
+このように、型定義によってモジュール間のインターフェースが明確に定義され、オーケストレーターパターンの実装がより堅牢になります。

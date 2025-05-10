@@ -302,8 +302,8 @@ export function processJsonDelta(
   
   // 完全なJSONかチェック（JSONオブジェクトの場合は最後の文字が}）
   const isComplete = isValid && 
-    ((validJson.trim().startsWith("{") && validJson.trim().endsWith("}")) ||
-     (validJson.trim().startsWith("[") && validJson.trim().endsWith("]")));
+    ((validJson?.trim().startsWith("{") && validJson?.trim().endsWith("}")) ||
+     (validJson?.trim().startsWith("[") && validJson?.trim().endsWith("]")));
   
   return {
     combined,
@@ -340,6 +340,59 @@ export function repairDuplicatedJsonPattern(jsonStr: string): string {
   }
   
   return jsonStr;
+}
+
+/**
+ * ツール引数をデルタベースで処理
+ * 部分的なJSONフラグメントを累積し、完全なJSONになるまで処理
+ * 
+ * @param toolName ツール名（検索ツールの特別処理に使用）
+ * @param currentArgs 現在の引数文字列
+ * @param deltaArgs 新しい引数フラグメント
+ * @returns 処理結果オブジェクト
+ */
+export function processToolArgumentsDelta(
+  currentArgs: string,
+  deltaArgs: string
+): { processedArgs: string; isComplete: boolean } {
+  // 空のフラグメントは無視
+  if (!deltaArgs || deltaArgs.trim() === '') {
+    return { 
+      processedArgs: currentArgs, 
+      isComplete: isValidJson(currentArgs) 
+    };
+  }
+  
+  // JSONデルタ処理を使用
+  const result = processJsonDelta(currentArgs, deltaArgs);
+  
+  // 完全なJSONかどうかをチェック
+  if (result.complete && result.valid) {
+    // 有効なJSONを抽出
+    const validJson = extractValidJson(result.combined);
+    if (validJson) {
+      try {
+        // JSONとして解析してみる
+        const parsed = JSON.parse(validJson);
+        return {
+          processedArgs: JSON.stringify(parsed),
+          isComplete: true
+        };
+      } catch (e) {
+        // 解析エラーの場合は不完全とみなす
+        return {
+          processedArgs: result.combined,
+          isComplete: false
+        };
+      }
+    }
+  }
+  
+  // まだ完全なJSONではない場合
+  return {
+    processedArgs: result.combined,
+    isComplete: false
+  };
 }
 
 /**

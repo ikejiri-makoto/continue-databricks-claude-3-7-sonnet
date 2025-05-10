@@ -1,110 +1,17 @@
-import { ChatMessage } from "../../../index.js";
-import { BaseStreamingError } from "../../utils/errors.js";
-
 /**
- * ストリーミングエラーのインターフェース
- * 基本エラー型を拡張して、Databricks固有のプロパティを追加できるようにする
+ * @deprecated このモジュールは非推奨です。代わりに types/index.ts をインポートしてください。
+ * すべての型定義は types/types.ts に移動されました。
+ * このファイルは後方互換性のためにのみ残されています。
+ * 
+ * 例:
+ * ```typescript
+ * // 変更前
+ * import { ToolCall } from "./types.ts";
+ * 
+ * // 変更後
+ * import { ToolCall } from "./types/index.ts";
+ * ```
  */
-export interface StreamingError extends BaseStreamingError {
-  // Databricks固有のエラープロパティがあれば追加
-}
 
-/**
- * アシスタントメッセージの型定義
- * ChatMessageを拡張し、アシスタント固有のプロパティを定義
- */
-export type AssistantChatMessage = ChatMessage & {
-  role: "assistant";
-  content: string;
-  toolCalls?: any[];
-};
-
-/**
- * ツール結果メッセージの型定義
- */
-export interface ToolResultMessage {
-  role: 'tool';
-  tool_call_id: string;
-  content: string;
-}
-
-/**
- * ツール呼び出しの型定義
- */
-export interface ToolCall {
-  id: string;
-  type: "function";  // 文字列リテラル型として明示的に定義
-  function: {
-    name: string;
-    arguments: string;
-  };
-}
-
-/**
- * Databricksの思考（Thinking）チャンク型定義
- */
-export interface ThinkingChunk {
-  thinking?: string | object;
-  signature?: string;
-}
-
-/**
- * Databricksレスポンスデルタの型定義
- */
-export interface ResponseDelta {
-  content?: string;
-  tool_calls?: {
-    index: number;
-    id?: string;
-    function?: {
-      name?: string;
-      arguments?: string;
-    }
-  }[];
-}
-
-/**
- * ストリーミングチャンクの型定義
- */
-export interface StreamingChunk {
-  thinking?: ThinkingChunk;
-  choices?: {
-    delta: ResponseDelta;
-  }[];
-}
-
-/**
- * 永続的なストリーム状態の型定義
- * ストリーミング中断時にも状態を維持するために使用
- */
-export interface PersistentStreamState {
-  /**
-   * 未完成のJSONをバッファするための文字列
-   */
-  jsonBuffer: string;
-  
-  /**
-   * JSONバッファリング中かどうかを示すフラグ
-   */
-  isBufferingJson: boolean;
-  
-  /**
-   * 処理中のツール呼び出し配列
-   */
-  toolCallsInProgress: ToolCall[];
-  
-  /**
-   * 現在処理中のツール呼び出しインデックス
-   */
-  currentToolCallIndex: number | null;
-  
-  /**
-   * 部分的なコンテンツをバッファするための文字列
-   */
-  contentBuffer: string;
-  
-  /**
-   * 最後の再接続タイムスタンプ
-   */
-  lastReconnectTimestamp: number;
-}
+// すべての型定義を types/ ディレクトリからインポートして再エクスポート
+export * from "./types/index.js";

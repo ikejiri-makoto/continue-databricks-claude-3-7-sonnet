@@ -48,30 +48,56 @@ core/
 - 高レベルのエラー処理
 - 責任を適切なモジュールに委譲
 - 並列ツール呼び出し制御の設定管理
+- 各モジュール間の通信を調整
+- 全体的なフローの制御と実行順序の管理
+- トップレベルのAPI実装（_streamChat、_streamComplete）
+- ストリーミング処理のライフサイクル管理
 
 **2. `config.ts` - 設定管理**
 - API設定の読み込みと検証
 - URLの正規化
 - タイムアウト設定の処理
 - 設定の検証ロジック
+- 設定ファイルからの値の読み取り
+- 環境設定の一元管理
+- APIエンドポイントの正規化と検証
+- タイムアウトコントローラの設定と管理
 
 **3. `errors.ts` - エラー処理**
 - Databricks固有のエラー処理
 - エラーレスポンスのパース
 - リトライロジックの実装
 - 接続エラーとタイムアウトの管理
+- 状態保持リトライメカニズムの提供
+- 一時的エラーの検出と自動回復
+- 型安全なエラー処理インターフェース
+- 汎用的なリトライユーティリティの提供
+- リトライ戦略の設定と実行
+- エラー統計の収集と分析
 
 **4. `helpers.ts` - ヘルパー関数**
 - リクエストパラメータの構築
 - ストリーミング状態の初期化
 - 共通定数と初期値の管理
 - ユーティリティ関数
+- OpenAI互換形式への変換
+- 非ストリーミングレスポンスの処理
+- JSONの有効性検証
+- コンテンツデルタの処理
+- リクエストボディのログ出力
+- テキストブロックの終了判定
 
 **5. `messages.ts` - メッセージ変換**
 - 標準メッセージフォーマットの変換
 - Claude 3.7 Sonnet固有のメッセージ処理
 - システムメッセージとユーザーメッセージの処理
 - 思考プロセスメッセージの統合
+- Databricks固有のメッセージ前処理
+- 複合コンテンツ（テキスト+画像）の処理
+- メッセージのフォーマット変換（Continue → OpenAI形式）
+- メッセージのサニタイズと標準化
+- 日本語コンテンツの検出と特別処理
+- 空のメッセージの処理と検証
 
 **6. `streaming.ts` - ストリーム処理**
 - ストリーミングレスポンスの処理
@@ -79,8 +105,15 @@ core/
 - JSONフラグメントの累積処理
 - ツール呼び出しのストリーミング処理
 - 接続エラーからの回復
-- Anthropic風のJSONデルタベース処理の実装
+- 共通ユーティリティを使用したJSONデルタベース処理
 - 部分的なJSONの効率的な処理
+- モジュール化されたメソッドによる責任の明確な分離
+- `JsonBufferHelpers`を活用した標準的なバッファ管理
+- 明確な状態管理と再接続メカニズム
+- 共通の`processContentDelta`や`processJsonDelta`を活用した一貫した処理
+- 状態の永続化と復元
+- 再接続時の処理
+- 最終ストリーム処理とクリーンアップ
 
 **7. `toolcalls.ts` - ツールコール処理**
 - ツール呼び出しの処理と標準化
@@ -88,44 +121,88 @@ core/
 - ツール結果の統合
 - 検索ツールの特別処理
 - ツール呼び出し後のメッセージ前処理
-- JSONデルタベースによるツール引数の段階的処理
+- 共通ユーティリティを使用したJSONデルタベースツール引数処理
 - 二重化されたJSONパターンの検出と修復
+- ツール呼び出しと結果の前後処理
+- ツール引数のデルタ処理と累積
+- ダミーのツール結果生成
+- モデルのツールサポート検証
+- ツール呼び出し引数の修復と正規化
 
 **8. `types/` - 型定義**
 - 厳密な型インターフェースの定義
 - 型安全なコードのサポート
 - 共通型定義の拡張
 - JSON処理関連の型定義強化
+- エラー処理関連の型定義
+- 型の一貫性と相互運用性の確保
+- モジュール間の型インターフェースの標準化
+- 型アサーションとガードの提供
+- 標準ライブラリ型の拡張
+- 型安全なエラー処理のサポート
 
-## 最近の型定義関連の改善
+## 最近の改善点
 
-最近のアップデートで、型定義に関する以下の問題を解決し、全体的な型安全性と保守性を向上させました：
+最近のリファクタリングで、以下の改善を実施しました：
 
-### 1. 型定義の重複問題の解決
+### 1. 共通ユーティリティの活用強化
 
-- **ToolCall識別子の重複を解消**: Databricks.tsファイルで複数回インポートされていた`ToolCall`型の問題を解決
-- **型インポートの整理**: 複数のインポート文を統合し、コードの可読性を向上
-- **明確な依存関係**: 型定義の依存関係を明確化し、インポート順序を最適化
+- **JSON処理機能の統合**: 重複していたJSON処理ロジックを共通ユーティリティに統合
+- **JSONデルタ処理の一元化**: `processJsonDelta`関数と`processToolArgumentsDelta`関数を共通ユーティリティに移動し、全モジュールで活用
+- **重複実装の解消**: 特にJSONフラグメント処理の重複実装を解消し、バグ発生リスクを低減
+- **標準化されたエラー処理**: 共通のエラー処理パターンを活用
 
-### 2. 不足していた型定義の追加
+### 2. ストリーム処理の改善
 
-- **ToolResultMessage型の実装**: ツール呼び出し結果を表現するインターフェースを適切に定義
-- **明示的な型プロパティ**: role、tool_call_id、contentなどの必須プロパティを明確に定義
-- **型安全性の強化**: ツール呼び出し関連の処理全体で完全な型チェックを実現
+- **責任の明確な分離**: 大きなメソッドを目的が明確な小さなメソッドに分割し、コードの可読性と保守性を向上
+- **メソッドの抽象化レベル統一**: 各メソッドが単一の責任を持つように再構成し、一貫性のあるコード構造を実現
+- **バッファ管理の標準化**: `JsonBufferHelpers.resetBuffer()`や`JsonBufferHelpers.addToBuffer()`など共通ユーティリティを活用し、バッファ管理ロジックを標準化
+- **コンテンツ処理の改善**: `processContentDelta`共通ユーティリティを活用して、メッセージコンテンツの処理を標準化
+- **状態管理の明確化**: 状態変更のパターンを統一し、一貫した方法で状態を更新するよう改善
+- **エラー処理のインライン化**: エラー処理を適切な場所に配置し、エラーメッセージを明確化
+- **ツール引数処理の簡素化**: 複雑な条件分岐を専用メソッドに抽出し、コードの流れを明確化
+- **JSONデルタ処理の標準化**: ツール引数のJSONデルタ処理を一貫した方法で行うよう改善
 
-### 3. 共通ユーティリティの活用
+### 3. オーケストレーターパターンの強化
 
-- **isValidJson関数の適切な使用**: JSONの妥当性検証に共通ユーティリティを活用
-- **標準パターンの採用**: 共通の処理パターンを活用してコードの一貫性を確保
-- **重複の排除**: 機能の再実装を避け、既存のユーティリティを最大限に活用
+- **Databricks.tsの責任の明確化**: メインクラスを純粋なオーケストレーターとして機能させ、実装の詳細を適切なモジュールに委譲
+- **モジュール間の依存関係の最小化**: 各モジュールが特定の責任を持ち、他のモジュールへの依存を最小限に抑制
+- **インターフェースの標準化**: 各モジュール間の通信に一貫したインターフェースを使用
+- **処理フローの簡素化**: 複雑な条件分岐やネストされたコールバックを排除し、直線的な処理フローを実現
+- **状態の共有と更新の明確化**: モジュール間での状態の共有と更新の方法を標準化
+- **エラー処理の一元化**: エラー処理の責任を`DatabricksErrorHandler`クラスに集中
+- **設定管理の一元化**: 設定管理の責任を`DatabricksConfig`クラスに集中
 
-## 共通ユーティリティの活用強化
+### 4. 型定義の整理
+
+- **型定義階層の明確化**: `databricks-extensions.d.ts`を中心とした型定義階層を確立
+- **インターフェースの一貫性**: `ToolCall`や`ToolResultMessage`などの主要インターフェースを整理
+- **重複定義の解消**: 複数の場所に分散していた型定義を一元化
+- **型参照の適切化**: `extension.d.ts`から適切な参照パスを設定
+
+### 5. 並列ツール呼び出し制御の強化
+
+- **OpenAIスタイルの制御オプション**: `parallel_tool_calls`オプションによる並列ツール呼び出し制御
+- **型定義拡張**: LLMOptionsとCompletionOptionsに新しいパラメータを追加
+- **Databricksリクエストへの反映**: リクエストパラメータに適切に設定を反映
+
+### 6. エラー処理の改善
+
+- **一貫したエラーハンドリング**: 統一されたエラー処理パターンを適用
+- **型安全なエラー状態**: エラー発生時の状態管理を型安全に実装
+- **適切なエラーメッセージ**: より具体的で有用なエラーメッセージを提供
+- **再接続状態の保持**: 接続エラー発生時に状態を保持し、再接続時に復元する仕組みを強化
+- **一時的エラー検出**: 一時的なエラーを自動的に検出してリトライする機能を追加
+- **統一されたリトライロジック**: ジェネリックな`withRetry<T>`メソッドによる標準化されたリトライ処理
+- **エラーインターフェースの強化**: `ErrorHandlingResult`や`StreamingState`などの型定義を導入
+
+## 共通ユーティリティの活用
 
 各モジュールで共通ユーティリティを最大限に活用することで、コードの重複を削減し、品質を向上させています：
 
 ### 1. JSON処理ユーティリティ
 
-`json.ts`の強力な関数を活用して、JSON処理の安全性と堅牢性を向上：
+`json.ts`の機能を活用してJSON処理の安全性と堅牢性を向上：
 
 ```typescript
 // 安全なJSONパース
@@ -138,9 +215,6 @@ if (validJson) {
   // 有効なJSONのみを処理
 }
 
-// JSONオブジェクトのディープマージ
-const mergedConfig = deepMergeJson(defaultConfig, userConfig);
-
 // JSONデルタ処理
 const jsonDelta = processJsonDelta(currentJson, deltaJson);
 if (jsonDelta.complete) {
@@ -149,8 +223,8 @@ if (jsonDelta.complete) {
   // バッファリングを継続
 }
 
-// 二重化されたJSONパターンの修復
-const repairedJson = repairDuplicatedJsonPattern(malformedJson);
+// ツール引数のデルタ処理
+const toolArgsDelta = processToolArgumentsDelta(jsonBuffer, toolCallDelta.function.arguments);
 ```
 
 ### 2. エラー処理ユーティリティ
@@ -165,11 +239,23 @@ try {
   const errorMessage = getErrorMessage(error);
   
   // リトライが適切かどうかを判断
-  if (isConnectionError(error)) {
-    // 接続エラーの処理 - リトライの実施など
+  if (isTransientError(error)) {
+    // 一時的なエラーを処理 - リトライを実施
   } else {
     // その他のエラー処理
   }
+}
+
+// 汎用的なリトライラッパー
+async function operation() {
+  return await DatabricksErrorHandler.withRetry(
+    async () => {
+      // リトライ可能な操作
+      const response = await fetch(url, options);
+      return processResponse(response);
+    },
+    state // 現在の状態（オプション）
+  );
 }
 ```
 
@@ -190,342 +276,64 @@ if (JsonBufferHelpers.isBufferComplete(buffer)) {
   // データ処理
 }
 
-// JSONデルタベース処理:
-const result = processJsonDelta(currentJson, deltaJson);
-if (result.complete && result.valid) {
-  // 完全なJSONとして処理
-  const data = safeJsonParse(result.combined, defaultValue);
-  // 処理完了
-} else {
-  // さらにフラグメントを累積
-  currentJson = result.combined;
-}
+// コンテンツデルタの処理:
+const processResult = processContentDelta(newContent, currentMessage);
+updatedMessage = processResult.updatedMessage;
+shouldYield = processResult.shouldYield;
 ```
 
-### 4. メッセージユーティリティ
+## モジュール間のインターフェースと連携
 
-`messageUtils.ts`のメッセージ処理ユーティリティを活用：
-
-```typescript
-// コンテキストを会話から抽出
-const queryContext = extractQueryContext(messages);
-
-// コンテンツを文字列として安全に抽出
-const contentString = extractContentAsString(content);
-
-// メッセージをAPI用にクリーニング
-const cleanMessages = sanitizeMessages(messages);
-```
-
-## 型安全性の強化
-
-TypeScriptの型安全性を最大限に活用するための一貫したパターンを導入しています：
-
-### 1. 明示的な型アノテーション
+各モジュールは明確に定義されたインターフェースを通じて連携します。
 
 ```typescript
-// 関数シグネチャに明示的な型を使用
-function processToolCallArguments(
-  toolName: string,
-  currentArgs: string,
-  newArgs: string,
-  messages: ChatMessage[]
-): string {
-  // 実装
-}
-
-// 戻り値や変数にも明示的な型を使用
-const result: StreamingResult = {
-  updatedMessage: { ...currentMessage },
-  updatedToolCalls: [...toolCalls],
-  // 他のプロパティ
-};
-```
-
-### 2. nullとundefinedの区別
-
-```typescript
-// undefinedとnullの明確な区別
-const error: Error | null = result.error !== undefined 
-  ? result.error 
-  : null;
-
-// オプショナルプロパティへの安全なアクセス
-const errorMessage = 
-  (errorJson.error && errorJson.error.message) || 
-  errorJson.message || 
-  defaultMessage;
-```
-
-### 3. 配列アクセスの安全性
-
-```typescript
-// 配列アクセスの完全な安全性確保
-if (index !== null) {
-  const numericIndex = Number(index);
+// Databricks.ts（オーケストレーター）
+protected async *_streamChat(messages: ChatMessage[], signal: AbortSignal, options: DatabricksCompletionOptions): AsyncGenerator<ChatMessage> {
+  // 設定の検証を設定管理モジュールに委譲
+  DatabricksConfig.validateApiConfig(this.apiKey, this.apiBase);
   
-  if (!Number.isNaN(numericIndex) && numericIndex >= 0 && numericIndex < array.length) {
-    // インデックスが有効な場合のみアクセス
-    array[numericIndex] = value;
-  } else {
-    console.warn(`無効なインデックス: ${index}`);
-  }
-}
-```
-
-### 4. イミュータブルなデータパターン
-
-```typescript
-// 変数の再代入を避け、新しいオブジェクトを作成
-const original = { value: 1, other: 2 };
-
-// 不変パターン - 元のオブジェクトを変更しない
-const updated = {
-  ...original,
-  value: original.value + 1
-};
-
-// 配列の不変更新
-const newArray = [...oldArray.slice(0, index), newItem, ...oldArray.slice(index + 1)];
-```
-
-## 機能と特徴
-
-### 1. Claude 3.7 Sonnetとの完全統合
-
-Databricksホステッドの最新のClaude 3.7 Sonnetモデルと完全に統合しています：
-
-- **思考プロセスの表示**: モデルの思考過程をリアルタイムで表示
-- **ストリーミングレスポンス**: 回答が生成されるにつれてリアルタイムで表示
-- **長いコンテキスト**: 最大200,000トークンの長いコンテキストウィンドウをサポート
-- **日本語サポート**: 「水平思考」と「ステップバイステップ」などの日本語指示に対応
-
-### 2. 堅牢なツール呼び出し機能
-
-Continue拡張機能のツール呼び出し機能を強化しています：
-
-- **検索ツールの強化**: 検索クエリが常に適切に設定されるよう特別処理を実装
-- **引数処理の改善**: JSONフラグメントを適切に処理し、完全なJSONになるまでバッファリング
-- **ツール結果の統合**: ツール呼び出しの結果を会話の流れに自然に統合
-- **ツール引数の修復**: 壊れたJSON引数を自動的に検出して修復
-- **メッセージ前処理の強化**: ツール呼び出しと結果の整合性を保つための前処理機能
-- **JSONデルタベース処理**: Anthropicスタイルのデルタベースでの部分的なJSONの処理
-- **並列ツール呼び出し制御**: OpenAIスタイルの並列ツール呼び出し制御で重複問題を防止
-
-### 3. 信頼性の高いエラー処理と回復メカニズム
-
-- **自動リトライ**: 接続エラーやタイムアウト発生時に指数バックオフ方式でリトライ
-- **状態の復元**: 接続エラー発生時に処理状態を保持し、再接続時に復元
-- **状態の一貫性**: すべてのエラーパターンで一貫した状態プロパティを返し、型安全性を確保
-- **タイムアウト管理**: HTTPレベルでのタイムアウト制御とAbortController/AbortSignalの活用
-- **型安全な設計**: 厳密な型チェックとnull/undefined処理による実行時エラーの防止
-- **イミュータブルなデータフロー**: 変数の再代入を最小限に抑え、予測可能な動作を実現
-
-### 4. 堅牢なJSONストリーミング処理
-
-ストリーミングJSONの処理において高い信頼性を提供します：
-
-- **JSONの境界認識**: 完全なJSONオブジェクトの開始と終了を正確に識別
-- **余分なデータの処理**: JSONの後に余分なデータがある場合でも適切に処理
-- **部分的なJSONの累積**: ストリーミングで受信する断片的なJSONを適切に累積
-- **エラー回復メカニズム**: JSONパースエラーが発生した場合のフォールバック処理
-- **JSONデータの修復**: 壊れたJSON形式を自動的に検出して修復するメカニズム
-- **JSON二重化パターンの検出と修復**: {"filepath": "app.py"}{"filepath": "app.py"} のような重複パターンを検出して修復
-- **デルタベースのJSON処理**: Anthropicスタイルの部分的なJSON処理による堅牢な実装
-
-### 5. Agentプログラミング機能のサポート
-
-Continue拡張機能のAgentプログラミング機能を強化しています：
-
-- **ツール結果の自動補完**: ツール呼び出し後のメッセージに必要なツール結果ブロックを自動的に挿入
-- **ツール引数の修復**: 特に `builtin_create_new_file` などのファイル操作に関する引数の修復を強化
-- **入れ子構造の検出**: 複雑な入れ子構造のJSONを検出して修復するメカニズム
-- **メッセージ前処理パイプライン**: API呼び出し前にメッセージの整合性を確保するための前処理
-
-## 改修内容
-
-最新の改修では、以下の機能と改善が実装されました：
-
-### 1. 型定義の改善とエラー修正
-
-- **型定義の重複問題の解決**: Databricks.tsファイルでの`ToolCall`型の重複インポートを解消
-- **型インポートの整理**: インポート文を整理して型参照を明確化
-- **ToolResultMessage型の追加**: 不足していたツール結果メッセージの型を追加し、型安全性を向上
-- **isValidJsonの活用**: 共通ユーティリティ関数を正しくインポートして活用
-
-### 2. OpenAIスタイルの並列ツール呼び出し制御
-
-ツール呼び出し処理で二重化されたJSONを防止するために、OpenAIの実装からインスピレーションを得た`parallel_tool_calls = false`設定を追加しました。これにより、ツール引数が重複する問題（例: `{"filepath": "app.py"}{"filepath": "app.py"}`）を防ぎます。
-
-```typescript
-// Databricks.ts の convertArgs メソッドに追加
-if (options.tools && Array.isArray(options.tools) && options.tools.length > 0) {
-  // ツール定義を設定
-  finalOptions.tools = options.tools.map(tool => ({
-    type: "function",
-    function: {
-      name: tool.function.name,
-      description: tool.function.description,
-      parameters: tool.function.parameters,
-    }
-  }));
-
-  // OpenAIのアプローチを取り入れた並列ツール呼び出し制御
-  finalOptions.parallel_tool_calls = false;
+  // メッセージの前処理をツール処理モジュールに委譲
+  const processedMessages = ToolCallProcessor.preprocessToolCallsAndResults(messages);
   
-  // その他の処理...
-}
-```
-
-### 3. AnthropicスタイルのデルタベースのJSON処理
-
-Anthropicの実装から着想を得た、部分的なJSONフラグメントを扱うための強力な機能を実装しました。これにより、ストリーミング中のJSONが断片的に届いても適切に処理できます。
-
-```typescript
-// json.ts に追加した新しい関数
-export function processJsonDelta(
-  currentJson: string,
-  deltaJson: string
-): { combined: string; complete: boolean; valid: boolean } {
-  // 現在のJSONとデルタを結合
-  const combined = currentJson + deltaJson;
-  
-  // 有効なJSONかチェック
-  const validJson = extractValidJson(combined);
-  const isValid = !!validJson;
-  
-  // 完全なJSONかチェック
-  const isComplete = isValid && 
-    ((validJson.trim().startsWith("{") && validJson.trim().endsWith("}")) ||
-     (validJson.trim().startsWith("[") && validJson.trim().endsWith("]")));
-  
-  return {
-    combined,
-    complete: isComplete,
-    valid: isValid
-  };
-}
-```
-
-### 4. JSONのパターン検出と修復機能
-
-JSONの二重化パターンを検出して修復するための新しいユーティリティ関数を実装しました：
-
-```typescript
-export function repairDuplicatedJsonPattern(jsonStr: string): string {
-  if (!jsonStr || typeof jsonStr !== 'string') {
-    return jsonStr;
-  }
-  
-  // 二重化パターンを検出する正規表現
-  const duplicatePattern = /\{\s*"(\w+)"\s*:\s*"([^"]+)"\s*\}\s*\{\s*"\1"\s*:/g;
-  
-  if (duplicatePattern.test(jsonStr)) {
-    // 有効なJSONを抽出
-    const validJson = extractValidJson(jsonStr);
-    if (validJson) {
-      return validJson;
-    }
-    
-    // 特定のパターンに対する修復
-    return jsonStr.replace(duplicatePattern, '{$1": "$2"}');
-  }
-  
-  return jsonStr;
-}
-```
-
-### 5. ツール呼び出し引数のデルタベース処理
-
-ToolCallProcessorに、部分的なツール引数を処理する新しいメソッドを追加しました：
-
-```typescript
-static processToolArgumentsDelta(
-  toolName: string | undefined,
-  jsonBuffer: string,
-  newJsonFragment: string
-): { 
-  processedArgs: string;
-  isComplete: boolean;
-} {
-  // JSONデルタの処理
-  const result = processJsonDelta(jsonBuffer, newJsonFragment);
-  
-  // JSONの完全性をチェック
-  if (result.complete && result.valid) {
-    // 完全なJSONの処理と修復
-    const validJson = extractValidJson(result.combined);
-    if (validJson) {
-      // 必要に応じて修復
-      const repairedJson = repairDuplicatedJsonPattern(validJson);
+  // リトライループ
+  while (retryCount <= MAX_RETRIES) {
+    try {
+      // リクエスト処理を実行
+      const result = await this.processStreamingRequest(processedMessages, signal, options, retryCount);
       
-      // ツール名に基づいた特殊処理
-      if (toolName && isSearchTool(toolName)) {
-        // 検索ツールの特別処理
-        return {
-          processedArgs: processSearchToolArguments(toolName, "", repairedJson),
-          isComplete: true
-        };
+      // 結果を返す（正常終了）
+      if (result.success) {
+        for (const message of result.messages) {
+          yield message;
+        }
+        break;
+      } else {
+        // エラー処理とリトライをエラーハンドラモジュールに委譲
+        retryCount++;
+        const errorToPass = result.error || new Error("Unknown error");
+        await DatabricksErrorHandler.handleRetry(retryCount, errorToPass, result.state);
       }
-      
-      return {
-        processedArgs: repairedJson,
-        isComplete: true
-      };
+    } catch (error) {
+      // 予期しないエラーの処理もエラーハンドラモジュールに委譲
+      retryCount++;
+      await DatabricksErrorHandler.handleRetry(retryCount, error);
     }
   }
-  
-  // まだ完全なJSONではない場合
-  return {
-    processedArgs: result.combined,
-    isComplete: false
-  };
 }
 ```
 
-## 開発ガイドライン
+## 今後の展望
 
-Databricksインテグレーションを拡張または修正する際は、以下のガイドラインに従ってください：
+さらなる改善のための計画としては以下があります：
 
-### 1. モジュール分離の原則
-
-- **単一責任の原則**: 各モジュールは明確に定義された単一の責任を持つべき
-- **関心の分離**: 異なる機能領域を別々のモジュールに分離する
-- **オーケストレーションパターン**: `Databricks.ts`はオーケストレーターとして機能し、詳細は専門モジュールに委譲する
-- **小さなメソッド**: 大きな関数を小さな専門化された関数に分割する
-
-### 2. 共通ユーティリティの活用
-
-- **車輪の再発明を避ける**: 新しいコードを書く前に、既存の共通ユーティリティを確認する
-- **標準パターンの活用**: 特にJSON処理、エラー処理、型安全性のための共通パターンを使用する
-- **提供者固有のロジックの分離**: 共通ユーティリティは提供者に依存しないようにし、提供者固有のロジックは専用モジュールに配置する
-
-### 3. 型安全性の確保
-
-- **null可能な値の処理**: null可能な値には必ず条件チェックを行う
-- **配列インデックスの検証**: 配列へのアクセス前に境界チェックを行う
-- **型アサーションの最小化**: 型アサーションは最小限に抑え、必要な場合はコメントで理由を説明する
-- **型の絞り込み**: 複雑な条件分岐では適切な型絞り込みパターンを使用する
-- **イミュータブルな設計**: 変数の再代入を避け、イミュータブルな更新パターンを使用する
-
-### 4. エラー処理とリカバリー
-
-- **一貫したエラー処理**: 共通のエラー処理パターンを使用する
-- **詳細なエラーメッセージ**: エラーメッセージには具体的な情報を含める
-- **段階的なリカバリー**: リカバリー可能なエラーには段階的なリカバリー戦略を実装する
-- **状態の保持と復元**: ストリーミング中断時には状態を保持し、再接続時に復元する
-
-### 5. JSON処理のベストプラクティス
-
-- **安全なJSONパース**: 直接的な`JSON.parse`の代わりに`safeJsonParse`を使用する
-- **有効なJSON抽出**: 混合コンテンツからJSONを抽出する場合は`extractValidJson`を使用する
-- **JSONバッファリング**: ストリーミングJSONフラグメントは`JsonBufferHelpers`で処理する
-- **サイズ制限**: JSONバッファには最大サイズ制限を設ける
-- **JSON修復**: `repairToolArguments`などの修復機能を活用して壊れたJSONを修復する
-- **デルタベース処理**: JSONフラグメントの処理には`processJsonDelta`を使用する
-- **パターン検出**: JSONの二重化パターンは`repairDuplicatedJsonPattern`で修復する
-
-これらのガイドラインを遵守することで、コードの品質、可読性、保守性が向上し、バグの発生リスクを低減できます。
+1. **テストカバレッジの向上**: 単体テストと統合テストのカバレッジを向上させる
+2. **パフォーマンス最適化**: JSON処理とストリーミング処理のパフォーマンスをさらに最適化
+3. **エラー回復の強化**: 接続エラーからの回復メカニズムをさらに強化
+4. **ドキュメントの充実**: より詳細な実装ドキュメントと使用例の提供
+5. **メトリクス収集**: リトライ統計やエラーパターンを収集して分析するための仕組みを追加
+6. **リトライ戦略のカスタマイズ**: 異なるエラータイプに対して異なるリトライ戦略を適用できる仕組みを追加
+7. **並列処理の最適化**: ツール呼び出しの並列処理パフォーマンスを最適化
+8. **メモリ使用量の最適化**: 大規模なJSONオブジェクトの処理時のメモリ使用を最適化
 
 ## 設定方法
 
@@ -543,7 +351,3 @@ models:
     apiBase: "https://your-databricks-endpoint.cloud.databricks.com/serving-endpoints/claude-3-7-sonnet/invocations"
     apiKey: "dapi_your_api_key_here"
 ```
-
-## Databricks LLM Types
-
-`types/` ディレクトリには、Databricks Claude 3.7 Sonnetインテグレーションで使用される型定義が含まれています。型定義は、コード全体の型安全性を確保し、開発時のエラー検出を強化するために重要な役割を果たします。詳細は、`types/README.md`を参照してください。
