@@ -233,7 +233,22 @@ private async processStreamingRequest(
 
 ## 最近の改善点
 
-### 1. 共通ユーティリティの活用強化 (2025年5月)
+### 1. API互換性の改善 (2025年5月)
+
+- **parallel_tool_callsパラメータの対応改善**: Databricksエンドポイントがサポートしていない`parallel_tool_calls`パラメータを自動的に除外するよう改善
+- **APIエラー「Extra inputs are not permitted」の解消**: リクエストからDatabricksが対応していないパラメータを完全に除外し、400エラーを防止
+- **デフォルト設定の最適化**: `parallelToolCalls: false`をデフォルト設定に追加し、オプションが指定されない場合でも安全に動作するよう対応
+- **型定義の整合性維持**: サポートされていないパラメータを型定義と実装の両方で一貫して扱うよう改善
+
+### 2. 型安全性の向上 (2025年5月)
+
+- **DatabricksLLMOptions型の導入**: LLMOptions型を拡張した専用型を導入し、型安全性を向上
+- **型キャストの排除**: `as any`などの型キャストを使わずに、適切な型を使用
+- **コンパイルエラーの解消**: TypeScriptコンパイル時のプロパティに関するエラーを解消
+- **JSDocドキュメントの充実**: 型定義に詳細な説明と使用例を追加
+- **インターフェース実装パターンの採用**: 明示的なインターフェース定義とその実装による責任境界の明確化
+
+### 3. 共通ユーティリティの活用強化 (2025年5月)
 
 - **JSON処理機能の統合**: 重複していたJSON処理ロジックを共通ユーティリティに統合
 - **JSONデルタ処理の一元化**: `processJsonDelta`関数と`processToolArgumentsDelta`関数を共通ユーティリティに移動し、全モジュールで活用
@@ -242,7 +257,7 @@ private async processStreamingRequest(
 - **型不一致の修正**: ツール呼び出し処理における`tool_call_id`と`toolCallId`の不一致を修正し、型安全性を向上
 - **共通ツール修復ユーティリティの活用**: `repairToolArguments`共通関数を積極的に使用し、コードの重複を削減
 
-### 2. ストリーム処理の改善
+### 4. ストリーム処理の改善
 
 - **責任の明確な分離**: 大きなメソッドを目的が明確な小さなメソッドに分割し、コードの可読性と保守性を向上
 - **メソッドの抽象化レベル統一**: 各メソッドが単一の責任を持つように再構成し、一貫性のあるコード構造を実現
@@ -253,7 +268,7 @@ private async processStreamingRequest(
 - **ツール引数処理の簡素化**: 複雑な条件分岐を専用メソッドに抽出し、コードの流れを明確化
 - **JSONデルタ処理の標準化**: ツール引数のJSONデルタ処理を一貫した方法で行うよう改善
 
-### 3. オーケストレーターパターンの強化
+### 5. オーケストレーターパターンの強化
 
 - **Databricks.tsの責任の明確化**: メインクラスを純粋なオーケストレーターとして機能させ、実装の詳細を適切なモジュールに委譲
 - **モジュール間の依存関係の最小化**: 各モジュールが特定の責任を持ち、他のモジュールへの依存を最小限に抑制
@@ -264,7 +279,7 @@ private async processStreamingRequest(
 - **設定管理の一元化**: 設定管理の責任を`DatabricksConfig`クラスに集中
 - **インターフェース実装による責任明確化**: `ToolCallProcessorInterface`など各モジュールにインターフェースを実装し、責任境界を明示
 
-### 4. `ToolCallProcessor`クラスの改善 (2025年5月)
+### 6. `ToolCallProcessor`クラスの改善 (2025年5月)
 
 - **インターフェース実装の強化**: `ToolCallProcessorInterface`インターフェースを完全に実装
 - **インスタンスメソッドの追加**: 静的メソッドを保持しつつ、インスタンスメソッドもサポート
@@ -272,33 +287,6 @@ private async processStreamingRequest(
 - **共通ユーティリティの活用**: `toolUtils.js`の`repairToolArguments`関数を活用したコード重複の削減
 - **デリゲーションパターンの適用**: インスタンスメソッドから静的メソッドへの委譲でコード再利用を最大化
 - **型安全性の向上**: インターフェース実装による型安全なコード構造の実現
-
-### 5. 型定義の整理
-
-- **型定義階層の明確化**: `databricks-extensions.d.ts`を中心とした型定義階層を確立
-- **インターフェースの一貫性**: `ToolCall`や`ToolResultMessage`などの主要インターフェースを整理
-- **重複定義の解消**: 複数の場所に分散していた型定義を一元化
-- **型参照の適切化**: `extension.d.ts`から適切な参照パスを設定
-- **モジュールインターフェース型の導入**: 各モジュールの責任を明確にするインターフェース型を追加
-- **型安全なエラー処理**: エラー処理に関連する型定義を強化
-- **JSDocコメントの充実**: すべての型定義に詳細な説明を追加
-- **型の相互運用性向上**: モジュール間で一貫した型定義を使用
-
-### 6. 並列ツール呼び出し制御の強化
-
-- **OpenAIスタイルの制御オプション**: `parallel_tool_calls`オプションによる並列ツール呼び出し制御
-- **型定義拡張**: LLMOptionsとCompletionOptionsに新しいパラメータを追加
-- **Databricksリクエストへの反映**: リクエストパラメータに適切に設定を反映
-
-### 7. エラー処理の改善
-
-- **一貫したエラーハンドリング**: 統一されたエラー処理パターンを適用
-- **型安全なエラー状態**: エラー発生時の状態管理を型安全に実装
-- **適切なエラーメッセージ**: より具体的で有用なエラーメッセージを提供
-- **再接続状態の保持**: 接続エラー発生時に状態を保持し、再接続時に復元する仕組みを強化
-- **一時的エラー検出**: 一時的なエラーを自動的に検出してリトライする機能を追加
-- **統一されたリトライロジック**: ジェネリックな`withRetry<T>`メソッドによる標準化されたリトライ処理
-- **エラーインターフェースの強化**: `ErrorHandlingResult`や`StreamingState`などの型定義を導入
 
 ## 共通ユーティリティの活用
 
@@ -381,87 +369,6 @@ static repairToolArguments(args: string): string {
   }
 }
 ```
-
-## インターフェース実装による責任境界の明確化
-
-`ToolCallProcessor`クラスは`ToolCallProcessorInterface`インターフェースを実装し、責任境界を明確にしています：
-
-```typescript
-/**
- * ツール呼び出し処理クラス
- * Databricks上のClaude 3.7 Sonnetからのツール呼び出しを処理するメソッドを提供
- * ToolCallProcessorInterfaceを実装して責任を明確化
- */
-export class ToolCallProcessor implements ToolCallProcessorInterface {
-  // インスタンスメソッドとしてインターフェースメソッドを実装
-  preprocessToolCallsAndResults(messages: ChatMessage[]): ChatMessage[] {
-    return ToolCallProcessor.preprocessToolCallsAndResults(messages);
-  }
-  
-  processToolArguments(args: string, toolName: string, messages: ChatMessage[]): string {
-    return ToolCallProcessor.processToolArguments(args, toolName, messages);
-  }
-  
-  processToolCall(
-    toolCall: ToolCall | null,
-    currentToolCallIndex: number | null,
-    jsonBuffer: string,
-    isBufferingJson: boolean,
-    toolCallDelta: any,
-    toolCalls: ToolCall[]
-  ): ToolCallResult {
-    return ToolCallProcessor.processToolCall(
-      toolCall,
-      currentToolCallIndex,
-      jsonBuffer,
-      isBufferingJson,
-      toolCallDelta,
-      toolCalls
-    );
-  }
-
-  // 静的メソッドはそのまま残す - 共通の実装として使用
-  static preprocessToolCallsAndResults(messages: ChatMessage[]): ChatMessage[] {
-    // 実装...
-  }
-  
-  static processToolArguments(args: string, toolName: string, messages: ChatMessage[]): string {
-    // 実装...
-  }
-  
-  static processToolCall(
-    toolCall: ToolCall | null,
-    currentToolCallIndex: number | null,
-    jsonBuffer: string,
-    isBufferingJson: boolean,
-    toolCallDelta: any,
-    toolCalls: ToolCall[]
-  ): ToolCallResult {
-    // 実装...
-  }
-}
-```
-
-このアプローチでは：
-1. インターフェースが要求するメソッドをインスタンスメソッドとして実装
-2. 実際の処理ロジックは静的メソッドとして維持
-3. インスタンスメソッドは単に静的メソッドに委譲
-4. 静的メソッドは共通実装として他のモジュールからも利用可能
-5. コードの再利用性と型安全性を両立
-
-## 今後の展望
-
-さらなる改善のための計画としては以下があります：
-
-1. **テストカバレッジの向上**: 単体テストと統合テストのカバレッジを向上させる
-2. **パフォーマンス最適化**: JSON処理とストリーミング処理のパフォーマンスをさらに最適化
-3. **エラー回復の強化**: 接続エラーからの回復メカニズムをさらに強化
-4. **ドキュメントの充実**: より詳細な実装ドキュメントと使用例の提供
-5. **メトリクス収集**: リトライ統計やエラーパターンを収集して分析するための仕組みを追加
-6. **リトライ戦略のカスタマイズ**: 異なるエラータイプに対して異なるリトライ戦略を適用できる仕組みを追加
-7. **並列処理の最適化**: ツール呼び出しの並列処理パフォーマンスを最適化
-8. **メモリ使用量の最適化**: 大規模なJSONオブジェクトの処理時のメモリ使用を最適化
-9. **追加のJSONパターン検出**: より多様なJSON破損パターンを検出・修復する機能の追加
 
 ## 設定方法
 

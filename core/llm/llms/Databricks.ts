@@ -1,6 +1,7 @@
 import { ChatMessage, LLMOptions, ThinkingChatMessage } from "../../index.js";
 import { renderChatMessage } from "../../util/messageContent.js";
 import { BaseLLM } from "../index.js";
+import { DatabricksLLMOptions } from "./Databricks/types/types.js";
 
 // 共通ユーティリティのインポート
 import { getErrorMessage } from "../utils/errors.js";
@@ -32,7 +33,7 @@ import {
  */
 class Databricks extends BaseLLM {
   static providerName = "databricks";
-  static defaultOptions: Partial<LLMOptions> = {
+  static defaultOptions: Partial<DatabricksLLMOptions> = {
     model: "databricks-claude-3-7-sonnet",
     contextLength: 200_000,
     completionOptions: {
@@ -42,7 +43,9 @@ class Databricks extends BaseLLM {
     },
     capabilities: {
       tools: true
-    }
+    },
+    // parallel_tool_callsパラメータはDatabricksではサポートされていないので無効化
+    parallelToolCalls: false
   };
 
   // ログを常に表示するかどうかの設定
@@ -195,6 +198,14 @@ class Databricks extends BaseLLM {
 
       // タイムアウトコントローラの設定を設定管理モジュールに委譲
       const { timeoutController, timeoutId, combinedSignal } = DatabricksConfig.setupTimeoutController(signal, options);
+
+      // リクエストパラメータが正しいか確認
+      // 特にDatabricksエンドポイントがサポートしないパラメータの有無を確認
+      if ((requestBody as any).parallel_tool_calls !== undefined) {
+        console.warn('parallel_tool_callsパラメータがリクエストに含まれています。Databricksはこのパラメータをサポートしていません。');
+        // parallel_tool_callsパラメータを安全に除外
+        delete (requestBody as any).parallel_tool_calls;
+      }
 
       // DatabricksのエンドポイントにOpenAI形式でリクエスト
       const response = await this.fetch(apiBaseUrl, {

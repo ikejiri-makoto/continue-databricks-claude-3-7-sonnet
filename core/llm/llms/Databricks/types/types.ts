@@ -1,4 +1,22 @@
-import { ChatMessage, ThinkingChatMessage, CompletionOptions } from "../../../../index.js";
+import { ChatMessage, ThinkingChatMessage, CompletionOptions, LLMOptions } from "../../../../index.js";
+
+/**
+ * LLMOptions拡張型（コア型にマージするのではなく、独自に拡張）
+ */
+export interface DatabricksLLMOptions extends LLMOptions {
+  /**
+   * 思考プロセスを常にログに表示するかどうかの設定
+   * trueの場合は常に表示、falseの場合は開発モードのみ表示
+   */
+  thinkingProcess?: boolean;
+  
+  /**
+   * 並列ツール呼び出しを許可するかどうか
+   * falseの場合、一度に1つのツール呼び出しのみを処理する
+   * OpenAIスタイルの並列制御に基づく
+   */
+  parallelToolCalls?: boolean;
+}
 import { BaseStreamingError } from "../../../utils/errors.js";
 
 /// <reference path="./extension.d.ts" />
@@ -9,16 +27,13 @@ import { BaseStreamingError } from "../../../utils/errors.js";
  */
 export interface DatabricksCompletionOptions extends CompletionOptions {
   /**
-   * 並列ツール呼び出しを有効にするかどうか
-   * @default false
-   */
-  parallel_tool_calls?: boolean;
-  
-  /**
    * リクエストのタイムアウト (秒)
    * デフォルトは300秒 (5分)
    */
   requestTimeout?: number;
+  
+  // 注意: parallel_tool_callsパラメータはDatabricksエンドポイントでサポートされていないため、
+  // 型定義からも除外し、エラーを防止
 }
 
 /**

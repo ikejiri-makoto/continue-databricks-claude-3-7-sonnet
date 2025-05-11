@@ -20,6 +20,7 @@ export class DatabricksHelpers {
    * @returns 変換されたリクエストパラメータ
    */
   static convertArgs(options: DatabricksCompletionOptions): Record<string, any> {
+    // モデル名の設定（デフォルト値またはユーザー指定値）
     const modelName = options.model || "databricks-claude-3-7-sonnet";
     
     // max_tokensのデフォルト値または指定値を取得
@@ -61,9 +62,9 @@ export class DatabricksHelpers {
         }
       }));
 
-      // OpenAIのアプローチを取り入れた並列ツール呼び出し制御
-      // JSON破損防止のためparallel_tool_calls=falseを設定
-      finalOptions.parallel_tool_calls = options.parallel_tool_calls ?? false;
+      // parallel_tool_callsパラメータはDatabricksのエンドポイントでサポートされていないため、
+      // このパラメータは含めない（含めるとBad Requestエラーが発生する）
+      // 注：parallel_tool_calls関連のパラメータは完全に除外
 
       // ツールがあるにもかかわらずQueryパラメータが不足する可能性のある特定のツールを検出
       const searchTools = options.tools.filter((tool: any) => 
@@ -83,6 +84,9 @@ export class DatabricksHelpers {
         }
       };
     }
+
+    // Databricksがサポートしないその他のパラメータを除外
+    // (明示的に定義されたfinalOptionsのプロパティのみが含まれる)
 
     return finalOptions;
   }

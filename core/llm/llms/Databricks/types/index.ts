@@ -10,6 +10,7 @@ export * from "./types";
 
 // 最も重要な型は明示的にエクスポート（IDE補完のために）
 export type { 
+  DatabricksLLMOptions,
   DatabricksCompletionOptions, 
   ToolCall, 
   ToolResultMessage,
