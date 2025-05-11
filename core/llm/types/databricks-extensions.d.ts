@@ -6,6 +6,27 @@ import { LLMOptions, CompletionOptions } from "../index";
 
 // Add Databricks-specific options
 declare module "../index" {
+  // ChatMessage型の拡張でツール呼び出し関連プロパティを追加
+  interface ChatMessage {
+    /**
+     * ツール呼び出しの結果に関連付けられたツール呼び出しID
+     * ツール結果メッセージ（role: "tool"）で使用される
+     */
+    toolCallId?: string;
+    
+    /**
+     * 思考メッセージの署名情報
+     * 思考プロセス（role: "thinking"）で使用される
+     */
+    signature?: string;
+    
+    /**
+     * 編集済み思考データ
+     * 思考プロセスの非公開部分
+     */
+    redactedThinking?: any;
+  }
+
   interface LLMOptions {
     /**
      * Whether to always log thinking process

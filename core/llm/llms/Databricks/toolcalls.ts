@@ -1,5 +1,10 @@
 import { ChatMessage } from "../../../index.js";
-import { ToolCall, ToolResultMessage, ToolCallProcessorInterface, ToolCallResult } from "./types/index.js";
+import { 
+  ToolCall, 
+  ToolResultMessage, 
+  ToolCallProcessorInterface, 
+  ToolCallResult 
+} from "./types/index.js";
 import { 
   extractContentAsString,
   hasToolResultBlocksAtBeginning,

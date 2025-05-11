@@ -1,9 +1,9 @@
-import { ChatMessage, ThinkingChatMessage } from "../../../index.js";
-import { ThinkingChunk, StreamingChunk, ResponseDelta, ToolCall, PersistentStreamState } from "./types/types.js";
+import { ChatMessage, ThinkingChatMessage, ToolCallDelta as CoreToolCallDelta } from "../../../index.js";
+import { ThinkingChunk, StreamingChunk, ResponseDelta, ToolCall, PersistentStreamState, ToolCallDelta } from "./types/types.js";
 import "./types/extension.d.ts";
 
 // 共通ユーティリティのインポート
-import { getErrorMessage } from "../../utils/errors.js";
+import { getErrorMessage, isConnectionError } from "../../utils/errors.js";
 import { 
   safeStringify, 
   isValidJson, 
@@ -12,13 +12,13 @@ import {
   processJsonDelta, 
   processToolArgumentsDelta, 
   repairDuplicatedJsonPattern,
-  tryFixBrokenBooleanJson 
+  tryFixBrokenBooleanJson
 } from "../../utils/json.js";
+import { repairToolArguments } from "../../utils/toolUtils.js";
 import { extractQueryContext, extractContentAsString } from "../../utils/messageUtils.js";
 import { processContentDelta, JsonBufferHelpers } from "../../utils/streamProcessing.js";
-import { isSearchTool, processSearchToolArguments, repairToolArguments } from "../../utils/toolUtils.js";
+import { isSearchTool, processSearchToolArguments } from "../../utils/toolUtils.js";
 import { streamSse } from "../../stream.js";
-import { processSSEStream } from "../../utils/sseProcessing.js";
 
 // 独自モジュールをインポート
 import { ToolCallProcessor } from "./toolcalls.js";
@@ -28,6 +28,8 @@ const MAX_STATE_AGE_MS = 5 * 60 * 1000; // 5分
 const THINKING_LOG_INTERVAL = 10; // 10チャンクごとにログ出力
 const BUFFER_SIZE_THRESHOLD = 100; // 100文字以上でバッファ出力
 const MAX_JSON_BUFFER_SIZE = 10000; // 最大JSONバッファサイズ
+const MAX_LOOP_DETECTION_COUNT = 10; // 無限ループ検出のためのカウンター閾値
+const MIN_UPDATE_INTERVAL_MS = 100; // 最小更新間隔（ミリ秒）
 
 // 検索ツール引数の型定義
 interface QueryArgs {
@@ -68,7 +70,7 @@ interface StreamingResponseResult {
 }
 
 export class StreamingProcessor {
-  // ストリーミング状態を保持する静的変数
+  // ストリーム状態を保持する静的変数
   private static persistentState: PersistentStreamState = {
     jsonBuffer: "",
     isBufferingJson: false,
@@ -77,6 +79,33 @@ export class StreamingProcessor {
     contentBuffer: "",
     lastReconnectTimestamp: 0
   };
+  
+  // 状態更新のループ検出用カウンター
+  private static stateUpdateCounter = 0;
+  private static lastStateUpdateTime = 0;
+
+  /**
+   * ツール呼び出しを出力用に処理するヘルパー関数
+   * ToolCall型とToolCallDelta型の互換性問題を解決します
+   * 
+   * @param toolCalls 処理するツール呼び出し配列
+   * @returns 処理済みのツール呼び出し配列または未定義
+   */
+  private static processToolCallsForOutput(toolCalls: ToolCall[] | undefined): CoreToolCallDelta[] | undefined {
+    if (!toolCalls || toolCalls.length === 0) {
+      return undefined;
+    }
+
+    // すべてのツール呼び出しが適切なtypeプロパティを持っていることを確認
+    // 明示的に"function"を指定し、コアの型と互換性を持たせる
+    const processedToolCalls = toolCalls.map(call => ({
+      ...call,
+      type: "function" as const  // "function"リテラル型として明示
+    }));
+    
+    // CoreToolCallDelta[]型として返す
+    return processedToolCalls as unknown as CoreToolCallDelta[];
+  }
 
   /**
    * 永続的なストリーム状態を取得
@@ -91,12 +120,46 @@ export class StreamingProcessor {
    * @param newState 新しい永続的ストリーム状態
    */
   static updatePersistentState(newState: Partial<PersistentStreamState>): void {
-    this.persistentState = {
-      ...this.persistentState,
-      ...newState,
-      lastReconnectTimestamp: newState.lastReconnectTimestamp || Date.now()
-    };
-    console.log(`永続的ストリーム状態を更新しました: JSON(${this.persistentState.jsonBuffer.length}バイト), バッファリング(${this.persistentState.isBufferingJson}), ツール呼び出し(${this.persistentState.toolCallsInProgress.length}件)`);
+    // 現在時刻を取得
+    const now = Date.now();
+    
+    // 更新間隔をチェック - 短すぎる間隔での更新を防止
+    if (now - this.lastStateUpdateTime < MIN_UPDATE_INTERVAL_MS) {
+      this.stateUpdateCounter++;
+      
+      // 無限ループを検出
+      if (this.stateUpdateCounter > MAX_LOOP_DETECTION_COUNT) {
+        console.warn("警告: 状態更新の無限ループを検出しました。状態をリセットします。");
+        this.resetPersistentState();
+        this.stateUpdateCounter = 0;
+        return;
+      }
+    } else {
+      // 十分な間隔が空いた場合はカウンターをリセット
+      this.stateUpdateCounter = 0;
+      this.lastStateUpdateTime = now;
+    }
+    
+    try {
+      // JSONバッファサイズのチェック - 過大なバッファを防止
+      if (newState.jsonBuffer && newState.jsonBuffer.length > MAX_JSON_BUFFER_SIZE) {
+        console.warn(`JSONバッファサイズが大きすぎます (${newState.jsonBuffer.length} バイト)。バッファを切り詰めます。`);
+        newState.jsonBuffer = newState.jsonBuffer.substring(0, MAX_JSON_BUFFER_SIZE);
+      }
+      
+      // 状態を更新
+      this.persistentState = {
+        ...this.persistentState,
+        ...newState,
+        lastReconnectTimestamp: newState.lastReconnectTimestamp || Date.now()
+      };
+      
+      console.log(`永続的ストリーム状態を更新しました: JSON(${this.persistentState.jsonBuffer?.length || 0}バイト), バッファリング(${this.persistentState.isBufferingJson}), ツール呼び出し(${this.persistentState.toolCallsInProgress?.length || 0}件)`);
+    } catch (error) {
+      // エラーが発生した場合は状態をリセット
+      console.error(`状態更新中にエラーが発生しました: ${getErrorMessage(error)}`);
+      this.resetPersistentState();
+    }
   }
 
   /**
@@ -111,6 +174,8 @@ export class StreamingProcessor {
       contentBuffer: "",
       lastReconnectTimestamp: 0
     };
+    this.stateUpdateCounter = 0;
+    this.lastStateUpdateTime = 0;
     console.log("永続的ストリーム状態をリセットしました");
   }
 
@@ -147,6 +212,11 @@ export class StreamingProcessor {
     thinkingMessage?: ChatMessage;
     shouldYieldMessage: boolean;
   } {
+    // チャンクデータをログ出力（開発モードのみ）
+    if (process.env.NODE_ENV === 'development') {
+      console.log(`処理チャンク: ${safeStringify(chunk, "<不明なチャンク>")}`);
+    }
+    
     // 再接続時は永続的な状態を適用
     if (isReconnect) {
       const state = this.getPersistentState();
@@ -154,7 +224,7 @@ export class StreamingProcessor {
       isBufferingJson = state.isBufferingJson || isBufferingJson;
       
       // ツール呼び出しの状態を復元（存在する場合のみ）
-      if (state.toolCallsInProgress.length > 0) {
+      if (state.toolCallsInProgress && Array.isArray(state.toolCallsInProgress) && state.toolCallsInProgress.length > 0) {
         toolCalls = [...state.toolCallsInProgress];
         
         if (state.currentToolCallIndex !== null && 
@@ -164,7 +234,7 @@ export class StreamingProcessor {
         }
       }
       
-      console.log(`再接続処理: JSON(${jsonBuffer.length}バイト), バッファリング(${isBufferingJson}), ツール呼び出し(${toolCalls.length}件)`);
+      console.log(`再接続処理: JSON(${jsonBuffer?.length || 0}バイト), バッファリング(${isBufferingJson}), ツール呼び出し(${toolCalls?.length || 0}件)`);
     }
 
     // デフォルトの戻り値
@@ -178,6 +248,12 @@ export class StreamingProcessor {
       thinkingMessage: undefined as ChatMessage | undefined, // 型アサーションで型を明示
       shouldYieldMessage: false
     };
+
+    // チャンクデータがない場合は早期リターン
+    if (!chunk) {
+      console.warn("空のチャンクを受信しました。スキップします。");
+      return result;
+    }
 
     // thinking（思考）モードの処理
     if (chunk.thinking) {
@@ -195,46 +271,58 @@ export class StreamingProcessor {
       const { updatedMessage, shouldYield } = this.processBufferedContent(
         newContent,
         currentMessage,
-        this.persistentState.contentBuffer
+        this.persistentState.contentBuffer || ""
       );
       
       result.updatedMessage = updatedMessage;
       result.shouldYieldMessage = shouldYield;
       
       // 状態を更新
-      this.updatePersistentState({
-        contentBuffer: shouldYield ? "" : this.persistentState.contentBuffer + newContent
-      });
+      if (shouldYield) {
+        // バッファをリセット
+        this.updatePersistentState({
+          contentBuffer: ""
+        });
+      } else {
+        this.updatePersistentState({
+          contentBuffer: (this.persistentState.contentBuffer || "") + newContent
+        });
+      }
       
       return result;
     }
 
     // ツールコールの処理
     if (chunk.choices?.[0]?.delta?.tool_calls && chunk.choices[0].delta.tool_calls.length > 0) {
-      const processResult = this.processToolCallDelta(
-        chunk.choices[0].delta,
-        toolCalls,
-        currentToolCall,
-        currentToolCallIndex,
-        jsonBuffer,
-        isBufferingJson,
-        messages
-      );
+      try {
+        const processResult = this.processToolCallDelta(
+          chunk.choices[0].delta,
+          toolCalls,
+          currentToolCall,
+          currentToolCallIndex,
+          jsonBuffer,
+          isBufferingJson,
+          messages
+        );
 
-      result.updatedToolCalls = processResult.updatedToolCalls;
-      result.updatedCurrentToolCall = processResult.updatedCurrentToolCall;
-      result.updatedCurrentToolCallIndex = processResult.updatedCurrentToolCallIndex;
-      result.updatedJsonBuffer = processResult.updatedJsonBuffer;
-      result.updatedIsBufferingJson = processResult.updatedIsBufferingJson;
-      result.shouldYieldMessage = processResult.shouldYieldMessage;
-      
-      // 永続的な状態を更新
-      this.updatePersistentState({
-        jsonBuffer: processResult.updatedJsonBuffer,
-        isBufferingJson: processResult.updatedIsBufferingJson,
-        toolCallsInProgress: processResult.updatedToolCalls,
-        currentToolCallIndex: processResult.updatedCurrentToolCallIndex
-      });
+        result.updatedToolCalls = processResult.updatedToolCalls;
+        result.updatedCurrentToolCall = processResult.updatedCurrentToolCall;
+        result.updatedCurrentToolCallIndex = processResult.updatedCurrentToolCallIndex;
+        result.updatedJsonBuffer = processResult.updatedJsonBuffer;
+        result.updatedIsBufferingJson = processResult.updatedIsBufferingJson;
+        result.shouldYieldMessage = processResult.shouldYieldMessage;
+        
+        // 永続的な状態を更新
+        this.updatePersistentState({
+          jsonBuffer: processResult.updatedJsonBuffer,
+          isBufferingJson: processResult.updatedIsBufferingJson,
+          toolCallsInProgress: processResult.updatedToolCalls,
+          currentToolCallIndex: processResult.updatedCurrentToolCallIndex
+        });
+      } catch (error) {
+        console.error(`ツール呼び出し処理中にエラーが発生しました: ${getErrorMessage(error)}`);
+        // エラーが発生しても処理を継続（結果はそのまま返す）
+      }
       
       return result;
     }
@@ -254,7 +342,18 @@ export class StreamingProcessor {
     currentMessage: ChatMessage,
     contentBuffer: string
   ): { updatedMessage: ChatMessage; shouldYield: boolean } {
-    const combinedContent = contentBuffer + newContent;
+    // 引数の安全性チェック
+    const safeNewContent = newContent || "";
+    const safeContentBuffer = contentBuffer || "";
+    const combinedContent = safeContentBuffer + safeNewContent;
+    
+    // 空のバッファの場合は早期リターン
+    if (!combinedContent) {
+      return {
+        updatedMessage: currentMessage,
+        shouldYield: false
+      };
+    }
     
     // 文や段落の区切りを検出
     const isSentenceOrParagraphEnd = this.isTextBlockEnd(combinedContent);
@@ -283,6 +382,8 @@ export class StreamingProcessor {
    * @returns テキストブロックの終了かどうか
    */
   private static isTextBlockEnd(text: string): boolean {
+    if (!text) return false;
+    
     return (
       text.endsWith(".") || 
       text.endsWith("。") || 
@@ -309,15 +410,12 @@ export class StreamingProcessor {
     shouldAppend: boolean
   ): string {
     if (!shouldAppend) {
-      return typeof currentMessage.content === "string" ? currentMessage.content : "";
+      return extractContentAsString(currentMessage.content);
     }
     
     // 既存のコンテンツにバッファの内容を追加
-    if (typeof currentMessage.content === "string") {
-      return currentMessage.content + combinedContent;
-    } else {
-      return combinedContent;
-    }
+    const currentContent = extractContentAsString(currentMessage.content);
+    return currentContent + combinedContent;
   }
 
   /**
@@ -337,7 +435,6 @@ export class StreamingProcessor {
     // 署名情報を抽出
     const signature = thinkingChunk.signature || undefined;
     
-    // 署名情報があるかどうかでメッセージ形式を変える
     // 思考メッセージを返す
     const thinkingMessage: ThinkingChatMessage = {
       role: "thinking",
@@ -364,7 +461,7 @@ export class StreamingProcessor {
         ? thinkingMessage.content.substring(0, 200) + '...' 
         : thinkingMessage.content;
       
-      console.log('[思考プロセス]', truncatedThinking);
+      console.log('[思考プロセス]', typeof truncatedThinking === 'string' ? truncatedThinking : safeStringify(truncatedThinking, "<思考データ>"));
     }
   }
 
@@ -393,7 +490,7 @@ export class StreamingProcessor {
       updatedToolCalls: [...toolCalls],
       updatedCurrentToolCall: currentToolCall,
       updatedCurrentToolCallIndex: currentToolCallIndex,
-      updatedJsonBuffer: jsonBuffer,
+      updatedJsonBuffer: jsonBuffer || "",
       updatedIsBufferingJson: isBufferingJson,
       shouldYieldMessage: false
     };
@@ -415,34 +512,28 @@ export class StreamingProcessor {
     
     // 新しいツール呼び出しの開始または別のインデックスへの切り替え
     if (result.updatedCurrentToolCallIndex !== index) {
-      // ここで新しいオブジェクトを生成し、変数に割り当てる（constに再代入しない）
-      const updatedResultAfterIndexChange = this.handleToolCallIndexChange(
+      // ツール呼び出しインデックスの変更を処理
+      const indexChangeResult = this.handleToolCallIndexChange(
         result, 
         index, 
         messages
       );
-      // 元のresultオブジェクトのプロパティを更新
-      result.updatedToolCalls = updatedResultAfterIndexChange.updatedToolCalls;
-      result.updatedCurrentToolCall = updatedResultAfterIndexChange.updatedCurrentToolCall;
-      result.updatedCurrentToolCallIndex = updatedResultAfterIndexChange.updatedCurrentToolCallIndex;
-      result.updatedJsonBuffer = updatedResultAfterIndexChange.updatedJsonBuffer;
-      result.updatedIsBufferingJson = updatedResultAfterIndexChange.updatedIsBufferingJson;
+      
+      // 結果を更新
+      Object.assign(result, indexChangeResult);
     }
     
     // 関数名の更新
     if (toolCallDelta.function?.name && result.updatedCurrentToolCall) {
-      // ここで新しいオブジェクトを生成し、変数に割り当てる（constに再代入しない）
-      const updatedResultAfterFunctionName = this.updateToolCallFunctionName(
+      // 関数名の更新を処理
+      const nameUpdateResult = this.updateToolCallFunctionName(
         result,
         toolCallDelta.function.name,
         messages
       );
-      // 元のresultオブジェクトのプロパティを更新
-      result.updatedToolCalls = updatedResultAfterFunctionName.updatedToolCalls;
-      result.updatedCurrentToolCall = updatedResultAfterFunctionName.updatedCurrentToolCall;
-      result.updatedCurrentToolCallIndex = updatedResultAfterFunctionName.updatedCurrentToolCallIndex;
-      result.updatedJsonBuffer = updatedResultAfterFunctionName.updatedJsonBuffer;
-      result.updatedIsBufferingJson = updatedResultAfterFunctionName.updatedIsBufferingJson;
+      
+      // 結果を更新
+      Object.assign(result, nameUpdateResult);
     }
     
     // 関数引数の更新
@@ -455,29 +546,31 @@ export class StreamingProcessor {
               toolCallDelta.function.arguments.trim().startsWith('{') || 
               toolCallDelta.function.arguments.trim().startsWith('[')) {
             
-            // 強化されたJSON処理: 共通ユーティリティのprocessToolArgumentsDeltaを使用
+            // 共通ユーティリティのprocessJsonDeltaを使用
             try {
-              // ツール引数のデルタを処理
-              const toolArgsDelta = processToolArgumentsDelta(
+              const deltaResult = processJsonDelta(
                 result.updatedJsonBuffer, 
                 toolCallDelta.function.arguments
               );
               
-              result.updatedJsonBuffer = toolArgsDelta.processedArgs;
+              result.updatedJsonBuffer = deltaResult.combined;
               
               // JSONが完成したかチェック
-              if (toolArgsDelta.isComplete) {
+              if (deltaResult.complete && deltaResult.valid) {
+                // 共通ユーティリティのrepairToolArgumentsを使用してJSONを修復
+                const repairedJson = repairToolArguments(result.updatedJsonBuffer);
+                
                 // 検索ツールの場合は特別処理
                 if (result.updatedCurrentToolCall && isSearchTool(result.updatedCurrentToolCall.function.name)) {
                   result.updatedCurrentToolCall.function.arguments = processSearchToolArguments(
                     result.updatedCurrentToolCall.function.name,
                     "",
-                    result.updatedJsonBuffer,
+                    repairedJson,
                     messages
                   );
                 } else {
                   // 通常のツールの場合は直接引数を設定
-                  result.updatedCurrentToolCall.function.arguments = result.updatedJsonBuffer;
+                  result.updatedCurrentToolCall.function.arguments = repairedJson;
                 }
                 
                 // バッファをリセット
@@ -498,60 +591,58 @@ export class StreamingProcessor {
               console.warn(`現在のバッファ: ${result.updatedJsonBuffer}`);
               console.warn(`受信したデルタ: ${toolCallDelta.function.arguments}`);
               
-              // エラーが発生しても処理を継続
-              // 代わりに従来のアプローチを試す
+              // 従来のアプローチを試す
               result.updatedJsonBuffer += toolCallDelta.function.arguments;
               result.updatedIsBufferingJson = true;
+              
+              // バッファサイズをチェック - 過大なバッファを防止
+              if (result.updatedJsonBuffer.length > MAX_JSON_BUFFER_SIZE) {
+                console.warn(`JSONバッファサイズが大きすぎます (${result.updatedJsonBuffer.length} バイト)。バッファを切り詰めます。`);
+                result.updatedJsonBuffer = result.updatedJsonBuffer.substring(0, MAX_JSON_BUFFER_SIZE);
+              }
+              
               return result;
             }
           } else {
+            // JSONフラグメント以外の処理
+            
             // 共通ユーティリティのrepairToolArgumentsを使用して引数を修復
             let repairedArguments = repairToolArguments(toolCallDelta.function.arguments);
             
-            // エラーメッセージのデバッグログ（実際のエラーを伝えずにデバッグに役立てる）
+            // エラーメッセージのデバッグログ
             if (repairedArguments !== toolCallDelta.function.arguments) {
               console.log(`ツール引数を修復しました: ${toolCallDelta.function.arguments} -> ${repairedArguments}`);
             }
             
             // 標準的な引数更新処理
-            const updatedResultAfterArguments = this.updateToolCallArguments(
+            const argsUpdateResult = this.updateToolCallArguments(
               result,
               repairedArguments,
               messages
             );
             
-            // 元のresultオブジェクトのプロパティを更新
-            result.updatedToolCalls = updatedResultAfterArguments.updatedToolCalls;
-            result.updatedCurrentToolCall = updatedResultAfterArguments.updatedCurrentToolCall;
-            result.updatedCurrentToolCallIndex = updatedResultAfterArguments.updatedCurrentToolCallIndex;
-            result.updatedJsonBuffer = updatedResultAfterArguments.updatedJsonBuffer;
-            result.updatedIsBufferingJson = updatedResultAfterArguments.updatedIsBufferingJson;
-            result.shouldYieldMessage = updatedResultAfterArguments.shouldYieldMessage;
+            // 結果を更新
+            Object.assign(result, argsUpdateResult);
           }
         }
       } catch (e) {
-        // エラーが発生した場合は、元の処理を実行
-        console.warn(`ツール引数の修復中にエラーが発生しました: ${getErrorMessage(e)}`);
+        // エラーが発生した場合は、最も単純な処理を実行
+        console.warn(`ツール引数の処理中にエラーが発生しました: ${getErrorMessage(e)}`);
         
-        const updatedResultAfterArguments = this.updateToolCallArguments(
-          result,
-          toolCallDelta.function.arguments,
-          messages
-        );
-        
-        // 元のresultオブジェクトのプロパティを更新
-        result.updatedToolCalls = updatedResultAfterArguments.updatedToolCalls;
-        result.updatedCurrentToolCall = updatedResultAfterArguments.updatedCurrentToolCall;
-        result.updatedCurrentToolCallIndex = updatedResultAfterArguments.updatedCurrentToolCallIndex;
-        result.updatedJsonBuffer = updatedResultAfterArguments.updatedJsonBuffer;
-        result.updatedIsBufferingJson = updatedResultAfterArguments.updatedIsBufferingJson;
-        result.shouldYieldMessage = updatedResultAfterArguments.shouldYieldMessage;
+        // エラーをログに記録して処理を継続
+        if (result.updatedCurrentToolCall) {
+          if (result.updatedCurrentToolCall.function.arguments) {
+            result.updatedCurrentToolCall.function.arguments += String(toolCallDelta.function.arguments || "");
+          } else {
+            result.updatedCurrentToolCall.function.arguments = String(toolCallDelta.function.arguments || "");
+          }
+        }
       }
     }
     
     // ツール呼び出しが有効なものだけフィルタリング
-    const validToolCalls = result.updatedToolCalls.filter(Boolean);
-    result.shouldYieldMessage = validToolCalls.length > 0;
+    result.updatedToolCalls = result.updatedToolCalls.filter(Boolean);
+    result.shouldYieldMessage = result.updatedToolCalls.length > 0;
     
     return result;
   }
@@ -568,6 +659,12 @@ export class StreamingProcessor {
     newIndex: number,
     messages: ChatMessage[]
   ): ToolCallResult {
+    // 引数の安全性チェック
+    if (newIndex < 0) {
+      console.warn(`無効なツール呼び出しインデックスを受信しました: ${newIndex}`);
+      return result;
+    }
+    
     // 新しい結果オブジェクトを作成
     const newResult = { ...result };
     
@@ -600,7 +697,7 @@ export class StreamingProcessor {
       }
       
       // バッファをリセット
-      newResult.updatedJsonBuffer = JsonBufferHelpers.resetBuffer();
+      newResult.updatedJsonBuffer = "";
       newResult.updatedIsBufferingJson = false;
     }
     
@@ -609,7 +706,14 @@ export class StreamingProcessor {
     
     // ツール呼び出し配列の拡張（必要に応じて）
     while (newResult.updatedToolCalls.length <= newIndex) {
-      newResult.updatedToolCalls.push(null as unknown as ToolCall);
+      newResult.updatedToolCalls.push({
+        id: `call_${Date.now()}_${newResult.updatedToolCalls.length}`,
+        type: "function",
+        function: {
+          name: "",
+          arguments: ""
+        }
+      });
     }
     
     // 新しいツール呼び出しの初期化
@@ -643,6 +747,11 @@ export class StreamingProcessor {
     functionName: string,
     messages: ChatMessage[]
   ): ToolCallResult {
+    // 引数の安全性チェック
+    if (!functionName) {
+      return result;
+    }
+    
     // 新しい結果オブジェクトを作成
     const newResult = { ...result };
     
@@ -674,6 +783,11 @@ export class StreamingProcessor {
     args: string | any,
     messages: ChatMessage[]
   ): ToolCallResult {
+    // 引数の安全性チェック
+    if (args === undefined || args === null) {
+      return result;
+    }
+    
     // 新しい結果オブジェクトを作成
     const newResult = { ...result };
     
@@ -709,6 +823,11 @@ export class StreamingProcessor {
     newArgs: string,
     messages: ChatMessage[]
   ): ToolCallResult {
+    // 引数の安全性チェック
+    if (!newArgs) {
+      return result;
+    }
+    
     // 新しい結果オブジェクトを作成
     const newResult = { ...result };
     
@@ -728,7 +847,9 @@ export class StreamingProcessor {
         // 既に有効なqueryプロパティがある場合は更新をスキップ
         if (existingArgs && existingArgs.query && typeof existingArgs.query === "string" && 
             existingArgs.query.trim() !== "") {
-          console.log(`検索ツールの引数が既に存在するため、更新をスキップ: ${JSON.stringify(existingArgs)}`);
+          if (process.env.NODE_ENV === 'development') {
+            console.log(`検索ツールの引数が既に存在するため、更新をスキップ: ${safeStringify(existingArgs, "{}")}`);
+          }
           return newResult;
         }
       } catch (e) {
@@ -766,6 +887,11 @@ export class StreamingProcessor {
     newArgs: string,
     messages: ChatMessage[]
   ): ToolCallResult {
+    // 引数の安全性チェック
+    if (!newArgs) {
+      return result;
+    }
+    
     // 新しい結果オブジェクトを作成
     const newResult = { ...result };
     
@@ -785,9 +911,11 @@ export class StreamingProcessor {
           // 完全なJSONオブジェクトを受信した場合
           if (newResult.updatedIsBufferingJson) {
             // バッファリング中だった場合はリセット
-            newResult.updatedJsonBuffer = JsonBufferHelpers.resetBuffer();
+            newResult.updatedJsonBuffer = "";
             newResult.updatedIsBufferingJson = false;
-            console.log(`JSONバッファをリセット: 完全なJSONを受信`);
+            if (process.env.NODE_ENV === 'development') {
+              console.log(`JSONバッファをリセット: 完全なJSONを受信`);
+            }
           }
           
           // パース済みJSONを引数に適用
@@ -815,6 +943,11 @@ export class StreamingProcessor {
     parsedJson: any,
     messages: ChatMessage[]
   ): ToolCallResult {
+    // 引数の安全性チェック
+    if (!parsedJson) {
+      return result;
+    }
+    
     // 新しい結果オブジェクトを作成
     const newResult = { ...result };
     
@@ -862,6 +995,11 @@ export class StreamingProcessor {
     newArgs: string,
     messages: ChatMessage[]
   ): ToolCallResult {
+    // 引数の安全性チェック
+    if (!newArgs) {
+      return result;
+    }
+    
     // 新しい結果オブジェクトを作成
     const newResult = { ...result };
     
@@ -875,7 +1013,7 @@ export class StreamingProcessor {
       newResult.updatedIsBufferingJson = true;
       
       // 既存のバッファが有効なJSONを含むか確認
-      if (isValidJson(newResult.updatedJsonBuffer)) {
+      if (newResult.updatedJsonBuffer && isValidJson(newResult.updatedJsonBuffer)) {
         // 既に有効なJSONがあれば、それを適用して新しいバッファを開始
         try {
           const parsedBuffer = safeJsonParse(newResult.updatedJsonBuffer, {});
@@ -900,12 +1038,14 @@ export class StreamingProcessor {
         // 既存のバッファに追加
         newResult.updatedJsonBuffer = JsonBufferHelpers.addToBuffer(
           newArgs, 
-          newResult.updatedJsonBuffer,
+          newResult.updatedJsonBuffer || "",
           MAX_JSON_BUFFER_SIZE
         );
       }
       
-      console.log(`JSONバッファ更新: ${newResult.updatedJsonBuffer}`);
+      if (process.env.NODE_ENV === 'development') {
+        console.log(`JSONバッファ更新: ${newResult.updatedJsonBuffer}`);
+      }
       
       // 更新されたバッファが有効なJSONになったかチェック
       const validJson = extractValidJson(newResult.updatedJsonBuffer);
@@ -913,13 +1053,15 @@ export class StreamingProcessor {
         try {
           const parsedJson = safeJsonParse(validJson, null);
           if (parsedJson !== null) {
-            console.log(`バッファがJSONとして完成: ${validJson}`);
+            if (process.env.NODE_ENV === 'development') {
+              console.log(`バッファがJSONとして完成: ${validJson}`);
+            }
             
             // パース済みJSONを引数に適用
             const updatedJsonResult = this.applyParsedJsonToArguments(newResult, parsedJson, messages);
             
             // バッファをリセット
-            updatedJsonResult.updatedJsonBuffer = JsonBufferHelpers.resetBuffer();
+            updatedJsonResult.updatedJsonBuffer = "";
             updatedJsonResult.updatedIsBufferingJson = false;
             
             return updatedJsonResult;
@@ -1037,6 +1179,10 @@ export class StreamingProcessor {
     toolCalls: ToolCall[],
     messages: ChatMessage[]
   ): ToolCall[] {
+    if (!toolCalls || !Array.isArray(toolCalls)) {
+      return [];
+    }
+    
     return toolCalls.map(tool => {
       if (tool && isSearchTool(tool.function.name) && 
           (!tool.function.arguments || tool.function.arguments === "{}")) {
@@ -1065,7 +1211,7 @@ export class StreamingProcessor {
     const state = this.getPersistentState();
     
     // 最後の再接続から一定時間（5分以上）経過している場合は状態をリセット
-    const stateAge = Date.now() - state.lastReconnectTimestamp;
+    const stateAge = Date.now() - (state.lastReconnectTimestamp || 0);
     
     if (stateAge > MAX_STATE_AGE_MS) {
       console.log(`状態が古すぎるためリセットします (${Math.round(stateAge / 1000)}秒経過)`);
@@ -1073,7 +1219,7 @@ export class StreamingProcessor {
       
       return {
         restoredMessage: currentMessage,
-        restoredToolCalls: toolCalls,
+        restoredToolCalls: toolCalls || [],
         restoredCurrentToolCall: currentToolCall,
         restoredCurrentToolCallIndex: currentToolCallIndex,
         restoredJsonBuffer: "",
@@ -1084,22 +1230,23 @@ export class StreamingProcessor {
     // 永続的な状態を適用
     this.updatePersistentState({ lastReconnectTimestamp: Date.now() });
     
-    console.log(`接続エラーからの回復処理を実行: JSON(${state.jsonBuffer.length}バイト), バッファリング(${state.isBufferingJson}), ツール呼び出し(${state.toolCallsInProgress.length}件)`);
+    console.log(`接続エラーからの回復処理を実行: JSON(${state.jsonBuffer?.length || 0}バイト), バッファリング(${state.isBufferingJson || false}), ツール呼び出し(${state.toolCallsInProgress?.length || 0}件)`);
     
     return {
       restoredMessage: currentMessage,
-      restoredToolCalls: state.toolCallsInProgress.length > 0 ? [...state.toolCallsInProgress] : toolCalls,
+      restoredToolCalls: state.toolCallsInProgress && state.toolCallsInProgress.length > 0 ? 
+                        [...state.toolCallsInProgress] : 
+                        toolCalls || [],
       restoredCurrentToolCall: state.currentToolCallIndex !== null && 
+                              state.toolCallsInProgress && 
                               state.toolCallsInProgress.length > state.currentToolCallIndex ? 
                               state.toolCallsInProgress[state.currentToolCallIndex] : 
                               currentToolCall,
       restoredCurrentToolCallIndex: state.currentToolCallIndex !== null ? state.currentToolCallIndex : currentToolCallIndex,
-      restoredJsonBuffer: state.jsonBuffer,
-      restoredIsBufferingJson: state.isBufferingJson
+      restoredJsonBuffer: state.jsonBuffer || "",
+      restoredIsBufferingJson: state.isBufferingJson || false
     };
   }
-
-  // 共通ユーティリティのtryFixBrokenBooleanJsonを使用
 
   /**
    * ストリーミングレスポンスの処理
@@ -1142,15 +1289,19 @@ export class StreamingProcessor {
     
     const responseMessages: ChatMessage[] = [];
     let lastYieldedMessageContent = "";
+    let chunkCount = 0;
     
     try {
-      // コンテンツタイプをチェックして処理方法を決定
-      const contentType = response.headers.get('content-type');
+      // ストリーム処理開始時に状態カウンターをリセット
+      this.stateUpdateCounter = 0;
       
       // SSEストリームを処理
-      // 共通ユーティリティのstreamSseを使用して互換性を確保
+      // 共通ユーティリティのstreamSseを使用してクロスプラットフォーム互換性を確保
       for await (const data of streamSse(response)) {
         try {
+          // チャンク数をカウント
+          chunkCount++;
+          
           // チャンクを処理
           const result = this.processChunk(
             data,
@@ -1188,16 +1339,21 @@ export class StreamingProcessor {
               const messageToYield: ChatMessage = {
                 role: "assistant",
                 content: currentMessage.content,
-                toolCalls: toolCalls.length > 0 ? toolCalls : undefined
+                toolCalls: this.processToolCallsForOutput(toolCalls)
               };
               
               responseMessages.push(messageToYield);
               lastYieldedMessageContent = currentContentAsString;
             }
           }
+          
+          // 定期的に永続状態をチェック - 無限ループ防止
+          if (chunkCount % 20 === 0) {
+            // 安全のためにカウンターをリセット
+            this.stateUpdateCounter = 0;
+          }
         } catch (err) {
           console.warn(`チャンクの処理中にエラーが発生しました: ${getErrorMessage(err)}`);
-          console.warn(`問題のあるデータ: ${JSON.stringify(data)}`);
           // エラーがあっても処理を継続
         }
       }
@@ -1220,11 +1376,12 @@ export class StreamingProcessor {
       toolCalls = this.ensureSearchToolArguments(toolCalls, messages);
       
       // 最終結果をyield
-      if (toolCalls.length > 0 || extractContentAsString(currentMessage.content) !== lastYieldedMessageContent) {
+      const finalMessageContent = extractContentAsString(currentMessage.content);
+      if (toolCalls.length > 0 || finalMessageContent !== lastYieldedMessageContent) {
         const finalMessage: ChatMessage = {
           role: "assistant",
           content: currentMessage.content,
-          toolCalls: toolCalls.length > 0 ? toolCalls : undefined
+          toolCalls: this.processToolCallsForOutput(toolCalls)
         };
         
         responseMessages.push(finalMessage);
@@ -1237,6 +1394,22 @@ export class StreamingProcessor {
     } catch (error) {
       // エラーが発生した場合は状態を保持して返す
       console.error(`ストリーミング処理エラー: ${getErrorMessage(error)}`);
+      
+      if (isConnectionError(error)) {
+        console.log("接続エラーを検出しました - 再接続時に状態を復元します");
+        
+        // 状態を更新
+        this.updatePersistentState({
+          jsonBuffer,
+          isBufferingJson,
+          toolCallsInProgress: toolCalls,
+          currentToolCallIndex,
+          lastReconnectTimestamp: Date.now()
+        });
+      } else {
+        // 接続エラー以外の場合は状態をリセット
+        this.resetPersistentState();
+      }
       
       return { 
         success: false, 

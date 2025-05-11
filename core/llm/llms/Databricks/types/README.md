@@ -11,12 +11,39 @@
 ```
 types/
 ├── index.ts         # すべての型定義のエントリーポイント
+├── types.ts         # 詳細な型定義の実装
 └── extension.d.ts   # 型拡張定義
 ```
 
 ## 主要な型定義
 
 ### `index.ts`
+
+このファイルは、すべての型定義のエントリーポイントとして機能し、他のモジュールが使用する型をエクスポートします：
+
+```typescript
+// 型定義をインポートしてエクスポート
+export * from "./types";
+
+// 明示的なエクスポート（IDE補完のため）
+export type { 
+  DatabricksLLMOptions,
+  DatabricksCompletionOptions, 
+  ToolCall, 
+  ToolResultMessage,
+  DatabricksChatMessage,
+  StreamingChunk,
+  PersistentStreamState,
+  StreamingResult,
+  ToolCallProcessorInterface,
+  ToolCallResult,
+  ToolCallDelta,
+  ErrorHandlingResult,
+  StreamingState
+} from "./types";
+```
+
+### `types.ts`
 
 このファイルには、Databricks統合の主要な型定義が含まれています：
 
@@ -79,6 +106,42 @@ export interface ToolCallResult {
 }
 ```
 
+#### ツール関連の型
+
+```typescript
+/**
+ * ツール呼び出し型
+ */
+export interface ToolCall {
+  id: string;
+  type: string;  // 常に"function"に固定すべき
+  function: {
+    name: string;
+    arguments: string;
+  };
+}
+
+/**
+ * ツール呼び出しデルタ型（ストリーミング用）
+ */
+export interface ToolCallDelta {
+  index: number;
+  id?: string;
+  type?: string;  // 常に"function"に固定すべき
+  function?: {
+    name?: string;
+    arguments?: string;
+  };
+}
+
+/**
+ * ツール呼び出しプロセッサインターフェース
+ */
+export interface ToolCallProcessorInterface {
+  preprocessToolCallsAndResults(messages: ChatMessage[]): ChatMessage[];
+}
+```
+
 ### `extension.d.ts`
 
 このファイルは、コア型定義を拡張してDatabricks固有の要件に対応します：
@@ -103,11 +166,70 @@ declare module "../../../../index.js" {
 }
 ```
 
+## 2025年5月に追加された型定義
+
+2025年5月の更新で、以下の新しい型定義が追加されました：
+
+### `DatabricksChatMessage`型
+
+```typescript
+/**
+ * Databricksチャットメッセージ型
+ * チャットメッセージのフォーマットを定義
+ */
+export interface DatabricksChatMessage {
+  role: string;
+  content: string | any[];
+  name?: string;
+  toolCalls?: ToolCall[];
+}
+```
+
+### `StreamingResult`型
+
+```typescript
+/**
+ * ストリーミング結果型
+ * コンテンツデルタ処理の結果を表す
+ */
+export interface StreamingResult {
+  updatedMessage: ChatMessage;
+  shouldYield: boolean;
+}
+```
+
+## 型互換性の問題と解決策
+
+### ToolCall と ToolCallDelta の互換性
+
+ツール呼び出しデータの処理時に、`ToolCall[]`型と`ToolCallDelta[]`型の間の互換性問題が発生することがあります。この問題を解決するには、型変換ヘルパー関数を使用します：
+
+```typescript
+/**
+ * ツール呼び出しを出力用に処理するヘルパー関数
+ * ToolCall型とToolCallDelta型の互換性問題を解決します
+ */
+function processToolCallsForOutput(toolCalls: ToolCall[] | undefined): ToolCall[] | undefined {
+  if (!toolCalls || toolCalls.length === 0) {
+    return undefined;
+  }
+
+  // すべてのツール呼び出しが適切なtypeプロパティを持っていることを確認
+  return toolCalls.map(call => ({
+    ...call,
+    type: "function" // typeプロパティを明示的に"function"に設定して型互換性を確保
+  }));
+}
+
+// 使用例
+toolCalls: toolCalls.length > 0 ? processToolCallsForOutput(toolCalls) : undefined
+```
+
 ## 型安全性の強化ポイント
 
 ### 1. メッセージコンテンツ型の適切な処理
 
-`MessageContent`型は`string`または`MessagePart[]`のユニオン型であり、これがTypeScriptエラーの原因でした。この問題を解決するために、`streaming.ts`での型安全な処理方法を実装しました：
+`MessageContent`型は`string`または`MessagePart[]`のユニオン型であり、これがTypeScriptエラーの原因でした。この問題を解決するために、`extractContentAsString`ユーティリティを使用します：
 
 ```typescript
 // streaming.tsでの型エラー：
@@ -138,8 +260,8 @@ if (currentContentAsString !== lastYieldedMessageContent) {
  * 以前は暗黙的な型付けだったものを明示的に型付け
  */
 export interface ToolCallResult {
-  updatedToolCalls: any[];
-  updatedCurrentToolCall: any | null;
+  updatedToolCalls: ToolCall[];
+  updatedCurrentToolCall: ToolCall | null;
   updatedCurrentToolCallIndex: number | null;
   updatedJsonBuffer: string;
   updatedIsBufferingJson: boolean;
@@ -156,58 +278,40 @@ export interface ToolCallResult {
 ```typescript
 /**
  * 永続的なストリーム状態を表す型
- * 再接続を可能にするためにストリーミング中の状態を追跡
+ * 再接続を可能にするためのストリーミング中の状態を追跡
  */
 export interface StreamingState {
   jsonBuffer: string;
   isBufferingJson: boolean;
-  toolCallsInProgress: any[];
+  toolCallsInProgress: ToolCall[];
   currentToolCallIndex: number | null;
   contentBuffer: string;
   lastReconnectTimestamp: number;
 }
 ```
 
+### 4. リクエストボディ型の改善
+
+`requestBody.model`へのアクセスによる型エラーを解決するため、リクエストボディ構築時の型安全なアプローチを導入しました：
+
+```typescript
+// リクエストボディを構築（型安全な方法）
+const requestBody = {
+  ...args,  // 既に型チェック済みのパラメータ
+  messages: formattedMessages,
+  system: systemMessage
+};
+
+// モデル情報はargsから取得して型安全性を確保
+const modelForLogging = args.model || options.model || this.model;
+console.log(`Databricksリクエスト: モデル=${modelForLogging}`);
+```
+
 ## 型安全性のベストプラクティス
 
 Databricks統合で採用している型安全性向上のためのベストプラクティス：
 
-### 1. MessageContent型の適切な処理
-
-`MessageContent`がユニオン型（`string | MessagePart[]`）であるため、適切に処理する必要があります：
-
-```typescript
-// MessageContent型の安全な処理例
-function processContent(
-  contentDelta: string | unknown,
-  currentMessage: ChatMessage
-): { 
-  updatedMessage: ChatMessage; 
-  shouldYield: boolean;
-} {
-  // 文字列として抽出
-  const delta = typeof contentDelta === "string" ? 
-    contentDelta : extractContentAsString(contentDelta);
-  
-  // 現在のコンテンツに追加
-  let content: string;
-  if (typeof currentMessage.content === "string") {
-    content = currentMessage.content + delta;
-  } else {
-    content = extractContentAsString(currentMessage.content) + delta;
-  }
-  
-  return {
-    updatedMessage: {
-      ...currentMessage,
-      content: content
-    },
-    shouldYield: delta.trim() !== ""
-  };
-}
-```
-
-### 2. 明示的なインターフェース定義
+### 1. 明示的なインターフェース定義
 
 複雑なオブジェクト構造には、インライン型定義ではなく明示的なインターフェースを定義します：
 
@@ -228,7 +332,7 @@ function processStreamingResponse(
 }
 ```
 
-### 3. Null/Undefinedの安全な処理
+### 2. Null/Undefinedの安全な処理
 
 Nullやundefinedの可能性がある値を安全に処理します：
 
@@ -243,7 +347,7 @@ if (currentToolCallIndex !== null &&
 }
 ```
 
-### 4. 戻り値型の明示的な宣言
+### 3. 戻り値型の明示的な宣言
 
 関数やメソッドには明示的な戻り値型を宣言します：
 
@@ -251,7 +355,7 @@ if (currentToolCallIndex !== null &&
 // 戻り値型の明示的な宣言
 static processToolCallDelta(
   toolCallDelta: any,
-  toolCalls: any[],
+  toolCalls: ToolCall[],
   currentToolCallIndex: number | null,
   jsonBuffer: string,
   isBufferingJson: boolean,
@@ -283,46 +387,75 @@ thinking?: {
 
 ### 3. ツール引数処理の型安全性向上
 
-ツール引数処理のフローをより型安全にするための明示的なインターフェース定義を導入しました：
-
-```typescript
-// ツール引数処理の結果を表す明示的なインターフェース定義
-export interface ToolCallResult {
-  updatedToolCalls: any[];
-  updatedCurrentToolCall: any | null;
-  updatedCurrentToolCallIndex: number | null;
-  updatedJsonBuffer: string;
-  updatedIsBufferingJson: boolean;
-  shouldYieldMessage: boolean;
-}
-```
+ツール引数処理のフローをより型安全にするための明示的なインターフェース定義を導入し、コンパイルエラーを防止しました。
 
 ### 4. ストリーミングレスポンス処理の型安全性向上
 
-ストリーミングレスポンス処理の結果型を明示的に定義し、エラー処理と状態管理を改善しました：
-
-```typescript
-// ストリーミングレスポンス処理の結果型
-export interface StreamingResponseResult {
-  success: boolean;             // 成功フラグ
-  messages: ChatMessage[];      // 処理されたメッセージ
-  error?: Error;                // エラー（存在する場合）
-  state?: StreamingState;       // 再接続用の状態
-}
-```
+ストリーミングレスポンス処理の結果型を明示的に定義し、エラー処理と状態管理を改善しました。
 
 ### 5. インデックス処理の型安全性向上
 
-配列インデックスのnull安全性を向上させ、境界外アクセスを防止するための型安全な処理を実装しました：
+配列インデックスのnull安全性を向上させ、境界外アクセスを防止するための型安全な処理を実装しました。
+
+## 型エラーのトラブルシューティング
+
+### 1. `Property 'model' does not exist on type '{ messages: any[]; system: string; }'`
+
+このエラーは、`requestBody`オブジェクトの型定義が不十分な場合に発生します。解決方法：
 
 ```typescript
-// インデックスの型安全な処理
-if (updatedCurrentToolCallIndex !== null && 
-    updatedCurrentToolCallIndex >= 0 && 
-    updatedCurrentToolCallIndex < updatedToolCalls.length) {
-  const currentCall = updatedToolCalls[updatedCurrentToolCallIndex];
-  // 安全に処理...
+// 問題のあるコード
+console.log(`モデル: ${requestBody.model}`); // エラー
+
+// 修正方法
+const modelName = args.model || options.model || this.model;
+console.log(`モデル: ${modelName}`); // 安全
+```
+
+### 2. `Module has no exported member 'DatabricksChatMessage'`
+
+このエラーは、必要な型が正しくエクスポートされていない場合に発生します。解決方法：
+
+1. `types.ts`ファイルに型を追加
+2. `index.ts`ファイルで明示的にエクスポート
+3. インポート側で正しいパスからインポート
+
+```typescript
+// types.ts
+export interface DatabricksChatMessage {
+  role: string;
+  content: string | any[];
+  name?: string;
+  toolCalls?: ToolCall[];
 }
+
+// index.ts
+export type { DatabricksChatMessage } from "./types";
+
+// 使用側
+import { DatabricksChatMessage } from "./types/index.js";
+```
+
+### 3. `Type 'ToolCall[] | undefined' is not assignable to type 'ToolCallDelta[] | undefined'`
+
+このエラーは、`ToolCall`型と`ToolCallDelta`型の間に互換性がない場合に発生します。解決方法：
+
+```typescript
+// 型変換ヘルパー関数を使用
+function processToolCallsForOutput(toolCalls: ToolCall[] | undefined): ToolCallDelta[] | undefined {
+  if (!toolCalls || toolCalls.length === 0) {
+    return undefined;
+  }
+
+  // 型変換を明示的に行う
+  return toolCalls.map(call => ({
+    ...call,
+    type: "function" // "function"に固定
+  })) as ToolCallDelta[];
+}
+
+// 使用例
+toolCalls: processToolCallsForOutput(toolCalls)
 ```
 
 このような型強化により、コードの安全性と保守性が大幅に向上しました。型システムを効果的に活用することで、多くのバグを未然に防ぎ、コードの自己文書化機能を強化しています。

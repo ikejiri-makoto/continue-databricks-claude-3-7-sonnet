@@ -1,0 +1,39 @@
+NODE_ENV development
+{"level":"info","message":"Loading config.yaml from {\"uriType\":\"file\",\"filePath\":\"C:\\\\continue-databricks-claude-3-7-sonnet\\\\extensions\\\\.continue-debug\\\\config.yaml\"} with root path ."}
+{"level":"info","message":"Loading config.yaml from {\"uriType\":\"file\",\"filePath\":\"C:\\\\continue-databricks-claude-3-7-sonnet\\\\extensions\\\\.continue-debug\\\\config.yaml\"} with root path ."}
+Setting up Claude 3.7 thinking mode: type=enabled, budget=64000
+Token settings - max_tokens: 128000, thinking budget: 64000
+Adding tool configuration - tool count: 11
+ツール情報[0]: {"name":"builtin_read_file","type":"function","params_count":1}
+ツール情報[1]: {"name":"builtin_edit_existing_file","type":"function","params_count":2}
+ツール情報[2]: {"name":"builtin_create_new_file","type":"function","params_count":2}
+ツール情報[3]: {"name":"builtin_run_terminal_command","type":"function","params_count":2}
+ツール情報[4]: {"name":"builtin_grep_search","type":"function","params_count":1}
+ツール情報[5]: {"name":"builtin_file_glob_search","type":"function","params_count":1}
+ツール情報[6]: {"name":"builtin_search_web","type":"function","params_count":1}
+ツール情報[7]: {"name":"builtin_view_diff","type":"function","params_count":0}
+ツール情報[8]: {"name":"builtin_read_currently_open_file","type":"function","params_count":0}
+ツール情報[9]: {"name":"builtin_ls","type":"function","params_count":2}
+ツール情報[10]: {"name":"builtin_create_rule_block","type":"function","params_count":3}
+注意: Databricksエンドポイントはparallel_tool_callsパラメータをサポートしていません
+Search tools detected: builtin_grep_search, builtin_file_glob_search, builtin_search_web
+Claude 3.7 Sonnet model detected - applying special configuration
+APIベースURL修正: 末尾のスラッシュを削除しました - https://adb-1981899174914086.6.azuredatabricks.net/serving-endpoints/databricks-claude-3-7-sonnet/invocations
+Databricksエンドポイント: https://adb-1981899174914086.6.azuredatabricks.net/serving-endpoints/databricks-claude-3-7-sonnet/invocations
+Databricksリクエスト: エンドポイント=https://adb-1981899174914086.6.azuredatabricks.net/serving-endpoints/databricks-claude-3-7-sonnet/invocations
+Databricksリクエスト: モデル=databricks-claude-3-7-sonnet
+Databricksリクエスト: メッセージ数=1
+Databricksリクエスト: ツール数=11
+Databricksリクエスト: ツール名=builtin_read_file, builtin_edit_existing_file, builtin_create_new_file, builtin_run_terminal_command, builtin_grep_search, builtin_file_glob_search, builtin_search_web, builtin_view_diff, builtin_read_currently_open_file, builtin_ls, builtin_create_rule_block
+ツール[0]: {"name":"builtin_read_file","description":"Use this tool if you need to v..."}
+ツール[1]: {"name":"builtin_edit_existing_file","description":"Use this tool to edit an exist..."}
+ツール[2]: {"name":"builtin_create_new_file","description":"Create a new file. Only use th..."}
+ツール[3]: {"name":"builtin_run_terminal_command","description":"Run a terminal command in the ..."}
+ツール[4]: {"name":"builtin_grep_search","description":"Perform a search over the repo..."}
+ツール[5]: {"name":"builtin_file_glob_search","description":"Search for files in the projec..."}
+ツール[6]: {"name":"builtin_search_web","description":"Performs a web search, returni..."}
+ツール[7]: {"name":"builtin_view_diff","description":"View the current diff of worki..."}
+ツール[8]: {"name":"builtin_read_currently_open_file","description":"Read the currently open file i..."}
+ツール[9]: {"name":"builtin_ls","description":"List files and folders in a gi..."}
+ツール[10]: {"name":"builtin_create_rule_block","description":"Creates a persistent rule for ..."}
+永続的ストリーム状態を更新しました: JSON(0バイト), バッファリング(false), ツール呼び出し(0件)

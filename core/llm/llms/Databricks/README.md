@@ -15,8 +15,68 @@
 3. **安全なアクセス**: `requestBody`オブジェクトの代わりに、正しく型定義された`args`オブジェクトからツール情報を取得するように修正
 4. **詳細なログ出力**: ツール関連の処理について詳細なログを出力し、デバッグを容易に
 5. **エラー検知と処理**: 特殊なエラーパターンを検出し、適切に対処するためのエラーハンドリングを強化
+6. **安全値の確認と削除**: リクエスト送信前に最終確認を行い、`parallel_tool_calls`パラメータが設定されている場合は自動的に削除
+7. **多重防御**: `convertArgs()`内のチェックとリクエストボディ構築時の再チェックによる多重防御
 
 これらの対策により、Databricksエンドポイントとのツール呼び出し機能の互換性が向上し、エラーを防止しています。
+
+### デバッグとロギングのベストプラクティス
+
+**重要**: Databricksモジュールのデバッグ時に`[object Object]`が表示される問題を防止するため、以下のベストプラクティスに従ってください：
+
+1. **オブジェクトのログ出力時は必ず文字列化する**:
+   ```typescript
+   // 悪い例 - [object Object]と表示される
+   console.log(`ツール情報:`, tool);
+   
+   // 良い例 - プロパティが適切に表示される
+   import { safeStringify } from "../../utils/json.js";
+   console.log(`ツール情報:`, safeStringify(tool, "<invalid>"));
+   ```
+
+2. **オブジェクトプロパティへの安全なアクセス**:
+   ```typescript
+   // 悪い例 - プロパティが存在しない場合にエラー
+   const toolName = tool.function.name;
+   
+   // 良い例 - オプショナルチェイニングでnullセーフに
+   const toolName = tool?.function?.name || "<unnamed>";
+   ```
+
+3. **デバッグログの例外処理**:
+   ```typescript
+   // デバッグ時の例外処理
+   try {
+     // ツール名などのログ出力処理
+     const toolNames = args.tools
+       .map((t: any) => t?.function?.name || 'unnamed')
+       .join(', ');
+     console.log(`ツール名: ${toolNames}`);
+   } catch (e) {
+     console.log(`ログ出力中にエラー: ${getErrorMessage(e)}`);
+   }
+   ```
+
+4. **リクエストボディのログ出力改善**:
+   ```typescript
+   // リクエストボディの安全なログ出力
+   const truncatedBody = {
+     model: requestBody.model,
+     tools_count: requestBody.tools?.length || 0,
+     messages_count: requestBody.messages?.length || 0
+   };
+   console.log('リクエスト概要:', safeStringify(truncatedBody, "{}"));
+   ```
+
+5. **開発モードの詳細ログ**:
+   ```typescript
+   // 開発モードでのみ詳細ログを出力
+   if (process.env.NODE_ENV === 'development') {
+     // 詳細情報のログ出力
+   }
+   ```
+
+これらのベストプラクティスにより、デバッグ中に`[object Object]`が表示される問題を防止し、より有用な情報がログに出力されるようになります。
 
 ## モジュール間の関係と連携
 
@@ -237,8 +297,27 @@ private async processStreamingRequest(
     // ツール関連のログを追加（argsから直接取得して型安全に）
     if (args.tools && Array.isArray(args.tools)) {
       console.log(`Databricksリクエスト: ツール数=${args.tools.length}`);
-      const toolNames = args.tools.map((t: any) => t.function.name).join(', ');
-      console.log(`Databricksリクエスト: ツール名=${toolNames}`);
+      try {
+        // ツール名を安全に取得して結合
+        const toolNames = args.tools
+          .map((t: any) => t?.function?.name || 'unnamed')
+          .join(', ');
+        console.log(`Databricksリクエスト: ツール名=${toolNames}`);
+        
+        // 開発モードでより詳細なツール情報をログ出力
+        if (process.env.NODE_ENV === 'development') {
+          args.tools.forEach((tool: any, index: number) => {
+            const toolInfo = {
+              name: tool?.function?.name || 'unnamed',
+              description: tool?.function?.description ? 
+                `${tool.function.description.substring(0, 30)}...` : 'no description'
+            };
+            console.log(`ツール[${index}]: ${JSON.stringify(toolInfo)}`);
+          });
+        }
+      } catch (e) {
+        console.log(`ツール情報のログ出力中にエラー: ${getErrorMessage(e)}`);
+      }
     }
     
     // タイムアウトコントローラ設定を設定管理モジュールに委譲
@@ -619,6 +698,16 @@ Property 'tools' does not exist on type '{ messages: any[]; system: string; }'
 // デバッグログを有効にする（config.yamlに追加）
 debug: true
 ```
+
+### `[object Object]`が表示される場合
+
+コンソールログに`[object Object]`が表示される場合は、オブジェクトを適切に文字列化する処理が必要です：
+
+1. `safeStringify`関数を使用してオブジェクトをログ出力
+2. オブジェクトのプロパティに安全にアクセスするためのチェックを追加
+3. ログ出力周りにtry-catch処理を追加
+
+詳細は「デバッグとロギングのベストプラクティス」セクションを参照してください。
 
 ### `combinedSignal`の順序エラーが発生した場合
 

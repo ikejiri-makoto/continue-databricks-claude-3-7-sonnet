@@ -112,6 +112,7 @@ Tool-related utilities that:
 - Format tool results for different providers
 - Standardize tool result formats between providers
 - Process tool arguments with support for delta-based JSON
+- Repair malformed JSON in tool arguments
 
 **Key functions:**
 - `isSearchTool(name: string): boolean` - Identifies if a tool is a search tool
@@ -246,6 +247,26 @@ function processToolArguments(jsonBuffer: string, newFragment: string): {
       complete: false
     };
   }
+}
+```
+
+### Tool Argument Repair
+
+```typescript
+// IMPORTANT: Always use repairToolArguments from toolUtils.js, not json.js
+import { repairToolArguments } from "../../utils/toolUtils.js";
+
+// Process and repair tool arguments
+function processToolArguments(args: string): string {
+  // Handle empty arguments
+  if (!args || args.trim() === '') {
+    return '{}';
+  }
+  
+  // Use repairToolArguments utility to fix malformed JSON
+  const repairedArgs = repairToolArguments(args);
+  
+  return repairedArgs;
 }
 ```
 
@@ -496,6 +517,22 @@ The utility modules are designed to work well with the orchestrator pattern used
 This approach allows provider implementations to focus on their unique requirements while leveraging shared functionality for common tasks.
 
 ## Recent Improvements
+
+### Utility Function Relocations (May 2025)
+
+Key function relocations to better organize utilities by responsibility:
+
+- `repairToolArguments` function has been moved from `json.js` to `toolUtils.js` to better align with its purpose
+  - All provider modules should import this function from `toolUtils.js` not `json.js`
+  - This improves code organization and ensures tool-related utilities are in the appropriate module
+
+```typescript
+// CORRECT import path for repairToolArguments
+import { repairToolArguments } from "../../utils/toolUtils.js";
+
+// INCORRECT import path (no longer valid)
+// import { repairToolArguments } from "../../utils/json.js"; 
+```
 
 ### Streaming Response Handling (May 2025)
 
@@ -890,7 +927,7 @@ To maximize code reuse and maintain clear responsibility boundaries:
 11. **Imports Checklist - Critical Functions**: 
     - Always check that you've imported all necessary functions, especially:
     - `processJsonDelta` for handling streaming JSON
-    - `repairToolArguments` for fixing tool call JSON
+    - `repairToolArguments` for fixing tool call JSON (from toolUtils.js, not json.js)
     - `processToolArgumentsDelta` for streaming tool call processing
     - `getErrorMessage` for error handling
     - `extractContentAsString` for handling message content properly

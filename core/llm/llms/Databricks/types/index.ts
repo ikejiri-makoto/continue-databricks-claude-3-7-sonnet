@@ -17,7 +17,12 @@ export type {
   DatabricksChatMessage,
   StreamingChunk,
   PersistentStreamState,
-  StreamingResult
+  StreamingResult,
+  ToolCallProcessorInterface,
+  ToolCallResult,
+  ToolCallDelta,
+  ErrorHandlingResult,
+  StreamingState
 } from "./types";
 
 // 型拡張定義をインポート（実際にエクスポートはしない）

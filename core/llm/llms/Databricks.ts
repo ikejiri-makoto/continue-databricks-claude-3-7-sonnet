@@ -46,7 +46,9 @@ class Databricks extends BaseLLM {
     capabilities: {
       tools: true
     }
-    // parallel_tool_callsパラメータはDatabricksではサポートされていないため削除
+    // DatabricksエンドポイントがOpenAIと互換性があるが、
+    // parallel_tool_callsパラメータはDatabricksエンドポイントでサポートされていないため、
+    // このパラメータを設定すると「不明なフィールド」エラーが発生する
   };
 
   // ログを常に表示するかどうかの設定
@@ -66,6 +68,9 @@ class Databricks extends BaseLLM {
     // 思考プロセスを常にログに表示するかどうかの設定を読み込む
     // 設定が明示的にfalseでなければtrueに設定（デフォルトで有効）
     this.alwaysLogThinking = (options as any).thinkingProcess !== false;
+    
+    // インスタンス生成時に注意喚起のログを表示
+    console.log("Databricksプロバイダーを初期化しました: parallel_tool_callsパラメータはサポートされていません");
   }
 
   /**
@@ -209,14 +214,36 @@ class Databricks extends BaseLLM {
       
       // デバッグログ - リクエスト詳細を常に記録
       console.log(`Databricksリクエスト: エンドポイント=${apiEndpoint}`);
-      console.log(`Databricksリクエスト: モデル=${options.model || this.model}`);
+      
+      // モデル情報をargsから取得して型安全性を確保（requestBodyからではなく）
+      const modelForLogging = args.model || options.model || this.model;
+      console.log(`Databricksリクエスト: モデル=${modelForLogging}`);
       console.log(`Databricksリクエスト: メッセージ数=${formattedMessages.length}`);
 
       // ツール関連のログを追加（argsから直接取得して型安全性を確保）
       if (args.tools && Array.isArray(args.tools)) {
         console.log(`Databricksリクエスト: ツール数=${args.tools.length}`);
-        const toolNames = args.tools.map((t: any) => t.function.name).join(', ');
-        console.log(`Databricksリクエスト: ツール名=${toolNames}`);
+        try {
+          // ツール名を安全に取得して結合
+          const toolNames = args.tools
+            .map((t: any) => t?.function?.name || 'unnamed')
+            .join(', ');
+          console.log(`Databricksリクエスト: ツール名=${toolNames}`);
+          
+          // 開発モードでより詳細なツール情報をログ出力
+          if (process.env.NODE_ENV === 'development') {
+            args.tools.forEach((tool: any, index: number) => {
+              const toolInfo = {
+                name: tool?.function?.name || 'unnamed',
+                description: tool?.function?.description ? 
+                  `${tool.function.description.substring(0, 30)}...` : 'no description'
+              };
+              console.log(`ツール[${index}]: ${safeStringify(toolInfo, "{}")}`);
+            });
+          }
+        } catch (e) {
+          console.log(`ツール情報のログ出力中にエラー: ${getErrorMessage(e)}`);
+        }
       }
 
       // タイムアウトコントローラの設定を設定管理モジュールに委譲
@@ -232,9 +259,24 @@ class Databricks extends BaseLLM {
       };
       
       // 最終チェック: parallel_tool_callsが含まれていないことを確認
-      if ((requestBody as any).parallel_tool_calls) {
+      if ((requestBody as any).parallel_tool_calls !== undefined) {
         console.warn("最終チェック: parallel_tool_callsパラメータが検出されました。削除します。");
         delete (requestBody as any).parallel_tool_calls;
+      }
+      
+      // リクエストボディのログ出力(開発モード時のみ詳細を表示)
+      if (process.env.NODE_ENV === 'development') {
+        DatabricksHelpers.logRequestBody(requestBody);
+      } else {
+        // 通常モードでは簡易ログのみ表示
+        const requestSummary = {
+          model: modelForLogging,
+          has_tools: !!args.tools,
+          tools_count: args.tools?.length || 0,
+          messages_count: requestBody.messages?.length || 0,
+          system_message: !!systemMessage
+        };
+        console.log("リクエスト概要:", safeStringify(requestSummary, "{}"));
       }
 
       // DatabricksのエンドポイントにOpenAI形式でリクエスト
