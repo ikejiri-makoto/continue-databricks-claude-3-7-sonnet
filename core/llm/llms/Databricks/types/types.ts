@@ -10,12 +10,8 @@ export interface DatabricksLLMOptions extends LLMOptions {
    */
   thinkingProcess?: boolean;
   
-  /**
-   * 並列ツール呼び出しを許可するかどうか
-   * falseの場合、一度に1つのツール呼び出しのみを処理する
-   * OpenAIスタイルの並列制御に基づく
-   */
-  parallelToolCalls?: boolean;
+  // parallel_tool_callsパラメータはDatabricksエンドポイントでサポートされていないため削除
+  // このパラメータが存在するとAPIエラーを引き起こす可能性があります
 }
 import { BaseStreamingError } from "../../../utils/errors.js";
 
@@ -49,8 +45,9 @@ export interface DatabricksCompletionOptions extends CompletionOptions {
     budget_tokens?: number;
   };
   
-  // 注意: parallel_tool_callsパラメータはDatabricksエンドポイントでサポートされていないため、
-  // 型定義からも除外し、エラーを防止
+  // 注意: parallel_tool_callsパラメータはDatabricksエンドポイントでサポートされていません
+  // このパラメータを含めるとエラーが発生する可能性があるため、意図的に型から除外しています
+  // OpenAI互換インターフェースとの相違点として留意してください
 }
 
 /**
@@ -390,8 +387,7 @@ export interface DatabricksConfig {
   apiKey: string;
   /** タイムアウト（秒） */
   timeout: number;
-  /** 並列ツール呼び出しを許可するかどうか */
-  parallelToolCalls: boolean;
+  // 注：parallel_tool_callsプロパティも削除 - サポートされていないパラメータ
   /** その他の設定プロパティを許可 */
   [key: string]: any;
 }

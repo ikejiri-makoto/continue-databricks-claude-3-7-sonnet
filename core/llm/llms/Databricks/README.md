@@ -2,6 +2,22 @@
 
 このディレクトリには、Continue VS Code拡張機能からDatabricksのLLMサービス（特にClaude 3.7 Sonnet）に接続するための実装が含まれています。Databricksホステッドモデルへのアクセスを可能にし、コードの補完、説明、リファクタリングなどの機能をContinue拡張機能内で提供します。
 
+## Databricks固有の制限事項
+
+### parallel_tool_callsパラメータについて
+
+**重要**: Databricksのエンドポイントは`parallel_tool_calls`パラメータをサポートしていません。このパラメータは、他のプロバイダー（OpenAI等）ではツール呼び出しを並列に処理するために使用されますが、Databricksエンドポイントではこのパラメータを認識せず、エラーの原因となる可能性があります。
+
+この問題に対して、以下の対策を実装しています：
+
+1. **型定義レベルでの除外**: `DatabricksCompletionOptions`インターフェースと`DatabricksLLMOptions`インターフェースからこのパラメータを意図的に除外し、型安全性を確保
+2. **パラメータ設定の回避**: `DatabricksHelpers.convertArgs()`メソッドでこのパラメータを設定しないよう修正
+3. **安全なアクセス**: `requestBody`オブジェクトの代わりに、正しく型定義された`args`オブジェクトからツール情報を取得するように修正
+4. **詳細なログ出力**: ツール関連の処理について詳細なログを出力し、デバッグを容易に
+5. **エラー検知と処理**: 特殊なエラーパターンを検出し、適切に対処するためのエラーハンドリングを強化
+
+これらの対策により、Databricksエンドポイントとのツール呼び出し機能の互換性が向上し、エラーを防止しています。
+
 ## モジュール間の関係と連携
 
 Databricksインテグレーションは、メインの`Databricks.ts`クラスと、`Databricks/`ディレクトリ内の複数の特化したモジュールから構成されています。モジュール化された設計により、責任を明確に分離し、共通ユーティリティを最大限に活用しています。
@@ -45,7 +61,7 @@ core/
 - リクエストのルーティング
 - 高レベルのエラー処理
 - 責任を適切なモジュールに委譲
-- 並列ツール呼び出し制御の設定管理
+- ツール呼び出し制御の設定管理
 - 各モジュール間の通信を調整
 - 全体的なフローの制御と実行順序の管理
 - トップレベルのAPI実装（_streamChat、_streamComplete）
@@ -218,6 +234,13 @@ private async processStreamingRequest(
     // デバッグログ - 常にリクエスト詳細を記録
     console.log(`Databricksリクエスト: エンドポイント=${apiEndpoint}`);
     
+    // ツール関連のログを追加（argsから直接取得して型安全に）
+    if (args.tools && Array.isArray(args.tools)) {
+      console.log(`Databricksリクエスト: ツール数=${args.tools.length}`);
+      const toolNames = args.tools.map((t: any) => t.function.name).join(', ');
+      console.log(`Databricksリクエスト: ツール名=${toolNames}`);
+    }
+    
     // タイムアウトコントローラ設定を設定管理モジュールに委譲
     const { timeoutController, timeoutId, combinedSignal } = 
       DatabricksConfig.setupTimeoutController(signal, options);
@@ -260,7 +283,20 @@ private async processStreamingRequest(
 
 ## 2025年5月の主要な改善点
 
-### 1. API URL問題の根本的解決
+### 1. parallel_tool_callsパラメータの完全除去と型安全性の向上
+
+Databricksエンドポイントが`parallel_tool_calls`パラメータをサポートしていないため、このパラメータを型レベルから完全に除外し、コードの安全性を向上させました：
+
+1. **型定義からの除外**: `DatabricksLLMOptions`および`DatabricksCompletionOptions`インターフェースからパラメータを削除し、明示的なコメントを追加
+2. **パラメータ設定停止**: `DatabricksHelpers.convertArgs()`メソッドでこのパラメータを設定しないよう修正
+3. **安全なアクセス**: `requestBody`オブジェクトの代わりに`args`オブジェクトから直接ツール情報を取得するよう修正し、型エラーを回避
+4. **デフォルトオプションの更新**: `Databricks.ts`のデフォルトオプションからも関連プロパティを削除
+5. **詳細なログ出力の追加**: ツール関連のログ出力を強化し、問題の早期発見を可能に
+6. **リクエスト前の検証強化**: マップの型階層全体で整合性を確保
+
+これらの改修により、Databricksのエンドポイントに対するツール呼び出し機能が安定して動作するようになりました。
+
+### 2. API URL問題の根本的解決
 
 Databricks統合の最も重要な改善点は、APIリクエストが常に正しいDatabricksエンドポイントに送信されるよう保証する仕組みを実装したことです。以前は一部のコードパスでAnthropicのAPIエンドポイント（`https://api.anthropic.com/v1/messages`）に誤ってリクエストが送信されていました。
 
@@ -315,7 +351,7 @@ static getFullApiEndpoint(apiBase: string | undefined): string {
 }
 ```
 
-### 2. メッセージコンテンツ型の厳密な型安全性
+### 3. メッセージコンテンツ型の厳密な型安全性
 
 `MessageContent`型が`string`または`MessagePart[]`のユニオン型であることに起因する型エラーを解消するため、`extractContentAsString`共通ユーティリティ関数を徹底的に活用するようにしました。これにより型安全性が向上し、コードの堅牢性が高まりました。
 
@@ -336,7 +372,7 @@ if (currentContentAsString !== lastYieldedMessageContent) {
 }
 ```
 
-### 3. `thinking`プロパティの型定義と処理の改善
+### 4. `thinking`プロパティの型定義と処理の改善
 
 Claude 3.7 Sonnetで重要な`thinking`プロパティの型定義が欠けていたことによるコンパイルエラーを解決しました。以下の改善を行いました：
 
@@ -414,7 +450,7 @@ if (isClaude37) {
 
 これらの変更により、TypeScriptコンパイルエラーが解消され、`thinking`プロパティの処理が型安全になりました。
 
-### 4. システムメッセージ処理の専用機能
+### 5. システムメッセージ処理の専用機能
 
 システムメッセージを適切にDatabricksエンドポイントに渡せるよう、専用の処理メソッドを実装しました。これによりClaude 3.7 Sonnetのシステムプロンプト機能を最大限に活用できるようになりました。
 
@@ -448,7 +484,7 @@ static processSystemMessage(messages: ChatMessage[]): string {
 }
 ```
 
-### 5. JSON処理の強化とツール呼び出し機能の改善
+### 6. JSON処理の強化とツール呼び出し機能の改善
 
 ストリーミング応答内のJSONフラグメントを処理する方法を改善し、`processJsonDelta`共通ユーティリティ関数を使用して部分的なJSONの累積と解析を正しく処理できるようにしました。また、ツール呼び出し引数の修復にも`repairToolArguments`共通ユーティリティを活用しています。
 
@@ -474,7 +510,7 @@ if (result.complete && result.valid) {
 }
 ```
 
-### 6. Claude 3.7モデル自動検出と専用設定
+### 7. Claude 3.7モデル自動検出と専用設定
 
 モデル名からClaude 3.7を自動検出し、適切な設定を適用する機能を追加しました。特に思考モード（thinking）の設定が確実に行われるようになりました。
 
@@ -495,30 +531,6 @@ if (isClaude37) {
   console.log("Claude 3.7 Sonnetモデルを検出しました - 特殊設定を適用します");
   // Claude 3.7モデルは思考処理で特に温度設定1.0を要求する
   finalOptions.temperature = 1;
-}
-```
-
-### 7. ツール呼び出し並列処理の制御
-
-Databricksエンドポイントが並列ツール呼び出しを適切に処理できるよう、`parallel_tool_calls: false`パラメータを常に設定し、ツール呼び出しが確実に正しく処理されるようになりました。
-
-```typescript
-// ツール関連のパラメータがある場合のみ追加
-if (options.tools && Array.isArray(options.tools) && options.tools.length > 0) {
-  console.log("ツール設定を追加します - ツール数:", options.tools.length);
-  
-  finalOptions.tools = options.tools.map((tool: any) => ({
-    type: "function",
-    function: {
-      name: tool.function.name,
-      description: tool.function.description,
-      parameters: tool.function.parameters,
-    }
-  }));
-
-  // parallel_tool_callsパラメータは無効化（常にfalse）
-  // Databricksエンドポイントが適切に処理できるようにするため
-  finalOptions.parallel_tool_calls = false;
 }
 ```
 
@@ -585,6 +597,56 @@ models:
 
 この設定により、Claude 3.7 Sonnetがより詳細な思考過程を表示し、より質の高い応答を生成できるようになります。
 
+## トラブルシューティング
+
+### parallel_tool_callsエラーが発生した場合
+
+エラーログに以下のようなエラーメッセージが表示される場合：
+
+```
+Property 'tools' does not exist on type '{ messages: any[]; system: string; }'
+```
+
+以下のことを確認してください：
+
+1. 最新バージョンのコードを使用しているか（2025年5月以降の更新が反映されているか）
+2. `Databricks.ts`ファイルで`requestBody.tools`の代わりに`args.tools`を使用しているか
+3. `DatabricksHelpers.convertArgs()`メソッドで`parallel_tool_calls`パラメータが設定されていないか
+
+これらの問題が解決しない場合は、詳細なデバッグログを有効にして問題を特定してください：
+
+```typescript
+// デバッグログを有効にする（config.yamlに追加）
+debug: true
+```
+
+### `combinedSignal`の順序エラーが発生した場合
+
+以下のようなエラーメッセージが表示される場合：
+
+```
+Block-scoped variable 'combinedSignal' used before its declaration
+```
+
+`processStreamingRequest()`メソッド内で、`combinedSignal`変数の宣言と使用の順序が正しいことを確認してください。常に`DatabricksConfig.setupTimeoutController()`を呼び出した後に変数を使用してください。
+
+## オーケストレーターパターンの利点
+
+Databricksの実装では、オーケストレーターパターンを採用することで以下の利点を実現しています：
+
+1. **責任の明確な分離**: 各モジュールが特定の責任領域に集中し、コードの理解と保守が容易になる
+2. **再利用性の向上**: 共通の機能を共有し、モジュール間で重複コードを減らす
+3. **テスト容易性**: 各モジュールを独立してテスト可能
+4. **拡張性の向上**: 新機能や変更が必要な場合、影響するモジュールのみを修正すれば良い
+5. **エラー処理の一元化**: 標準化されたエラー処理アプローチを適用
+6. **型安全性の強化**: 明確なインターフェース定義による型チェックの強化
+7. **依存関係の明示**: モジュール間の関係が明示的になり、変更の影響範囲が把握しやすい
+8. **機能の組み合わせ容易性**: 異なるモジュールの機能を組み合わせて新機能を容易に構築可能
+9. **ドキュメント性の向上**: コード構造自体がドキュメントとして機能し、システムの理解を助ける
+10. **並行開発の促進**: 複数の開発者が異なるモジュールを同時に開発可能
+
+このアプローチはDatabricksの実装だけでなく、他の複雑なLLMプロバイダー統合にも適用でき、コアLLMフレームワーク全体の設計原則として採用されています。
+
 ## 今後の改善計画
 
 1. **パフォーマンス最適化**: リクエスト処理とレスポンスパースのパフォーマンスをさらに最適化
@@ -594,5 +656,8 @@ models:
 5. **並列処理の改善**: 複数のリクエスト間でのリソース共有の最適化
 6. **エラーハンドリングの拡充**: より詳細なエラー分析と自動回復機能の強化
 7. **ドキュメント整備**: ユーザー向けドキュメントとコード内コメントの充実
+8. **新機能のサポート**: 将来のClaude 3.7/3.8拡張機能への対応
+9. **パフォーマンスメトリクスの収集**: 詳細なパフォーマンス測定と最適化のためのメトリクス収集
+10. **自動テスト拡充**: より包括的な自動テストによる品質保証
 
 このモジュール化されたアーキテクチャにより、拡張機能の安定性と保守性が大幅に向上し、将来のAPI変更にも容易に対応できるようになりました。2025年5月の改善で、特にURLルーティングの問題が解消され、型安全性と共通ユーティリティの活用が大きく進みました。

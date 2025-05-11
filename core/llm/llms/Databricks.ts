@@ -45,9 +45,8 @@ class Databricks extends BaseLLM {
     },
     capabilities: {
       tools: true
-    },
-    // parallel_tool_callsパラメータはDatabricksではサポートされていないので無効化
-    parallelToolCalls: false
+    }
+    // parallel_tool_callsパラメータはDatabricksではサポートされていないため削除
   };
 
   // ログを常に表示するかどうかの設定
@@ -217,19 +216,16 @@ class Databricks extends BaseLLM {
       console.log(`Databricksリクエスト: モデル=${options.model || this.model}`);
       console.log(`Databricksリクエスト: メッセージ数=${formattedMessages.length}`);
 
-      // タイムアウトコントローラの設定を設定管理モジュールに委譲
-      const { timeoutController, timeoutId, combinedSignal } = DatabricksConfig.setupTimeoutController(signal, options);
-
-      // リクエストパラメータが正しいか確認
-      // 特にDatabricksエンドポイントがサポートしないパラメータの有無を確認
-      if ((requestBody as any).parallel_tool_calls !== undefined) {
-        console.warn('parallel_tool_callsパラメータがリクエストに含まれています。Databricksはこのパラメータをサポートしていません。');
-        // parallel_tool_callsパラメータを安全に除外
-        delete (requestBody as any).parallel_tool_calls;
+      // ツール関連のログを追加（argsから直接取得して型安全性を確保）
+      if (args.tools && Array.isArray(args.tools)) {
+        console.log(`Databricksリクエスト: ツール数=${args.tools.length}`);
+        const toolNames = args.tools.map((t: any) => t.function.name).join(', ');
+        console.log(`Databricksリクエスト: ツール名=${toolNames}`);
       }
 
-      // 安全な文字列化を使用してリクエストボディを準備
-      const body = safeStringify(requestBody, "{}");
+      // タイムアウトコントローラの設定を設定管理モジュールに委譲
+      const { timeoutController, timeoutId, combinedSignal } = 
+        DatabricksConfig.setupTimeoutController(signal, options);
 
       // DatabricksのエンドポイントにOpenAI形式でリクエスト
       const response = await this.fetch(apiEndpoint, {
@@ -238,7 +234,7 @@ class Databricks extends BaseLLM {
           "Content-Type": "application/json",
           "Authorization": `Bearer ${this.apiKey}`,
         },
-        body,
+        body: safeStringify(requestBody, "{}"),
         signal: combinedSignal,
       });
 

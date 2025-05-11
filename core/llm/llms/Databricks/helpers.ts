@@ -83,9 +83,10 @@ export class DatabricksHelpers {
         }
       }));
 
-      // Disable parallel_tool_calls (always false)
-      // This helps ensure Databricks endpoint can process properly
-      finalOptions.parallel_tool_calls = false;
+      // 重要: parallel_tool_calls パラメータはDatabricksエンドポイントでサポートされていないため、
+      // このパラメータを明示的に設定しないことが重要です。このパラメータを設定するとAPIエラーが発生します。
+      // これはOpenAIやAnthropicとの重要な違いであり、APIの互換性を確保するために注意が必要です。
+      console.log("注意: Databricksエンドポイントはparallel_tool_callsパラメータをサポートしていません");
 
       // Detect specific tools that might be missing Query parameters
       const searchTools = options.tools.filter((tool: any) => 
@@ -111,6 +112,12 @@ export class DatabricksHelpers {
       console.log("Claude 3.7 Sonnet model detected - applying special configuration");
       // Claude 3.7 models specifically require temperature 1.0 for thinking processing
       finalOptions.temperature = DEFAULT_TEMPERATURE;
+    }
+
+    // 最終確認: parallel_tool_callsがオブジェクトに含まれていないことを確認
+    if ('parallel_tool_calls' in finalOptions) {
+      console.warn("警告: parallel_tool_callsパラメータが検出されました。Databricksではサポートされていないため削除します。");
+      delete finalOptions.parallel_tool_calls;
     }
 
     return finalOptions;

@@ -107,6 +107,14 @@ Comprehensive error handling system:
 - Transient error detection and automatic recovery
 - Generic retry mechanisms with customizable strategies
 
+### Claude 3.7 Sonnet Thinking Mode Support
+Support for the advanced thinking mode capability in Claude 3.7 Sonnet:
+- Structured thinking process with detailed step-by-step reasoning
+- Configurable thinking budget for controlling token allocation
+- Integration with streaming to show real-time thinking process
+- Type-safe handling of thinking-specific parameters and responses
+- Automatic detection and configuration for Claude 3.7 models
+
 ## Provider Implementation Patterns
 
 The framework supports two main patterns for implementing LLM providers:
@@ -252,7 +260,7 @@ For complex providers like Databricks, the framework recommends using the orches
    - Clear documentation of module responsibilities
    - Minimized dependencies between modules
 
-This pattern promotes maintainability, testability, and code reuse while keeping the codebase organized and easy to understand.
+This pattern promotes maintainability, testability, and code reuse while keeping the codebase organized and easy to understand. The Databricks implementation serves as a reference example of this pattern.
 
 ## Best Practices
 
@@ -458,5 +466,25 @@ For complex providers, follow these principles:
 6. **Method Abstraction Levels**: Maintain consistent abstraction levels within methods and classes
 7. **Error Handling Consistency**: Use standardized error handling approaches throughout the codebase
 8. **Type Safety**: Utilize comprehensive type definitions for all interfaces and data structures
+
+## 2025 May Updates
+
+The framework has been enhanced with several improvements as of May 2025:
+
+1. **Enhanced Message Content Type Handling**: Improved support for `MessageContent` type handling with better utilities to handle the string | MessagePart[] union type safely.
+
+2. **Centralized Tool Arguments Repair**: Introduced a comprehensive `repairToolArguments` utility to handle various edge cases in malformed JSON.
+
+3. **JSON Delta Processing Centralization**: Standardized the approach for handling incremental JSON updates in streaming contexts through the `processJsonDelta` utility.
+
+4. **Boolean Value Repair in JSON**: Added specialized functions to repair common boolean value corruption issues in streaming contexts.
+
+5. **Type-Safe Error Handling Improvements**: Enhanced error handling patterns to ensure type safety when dealing with unknown error types.
+
+6. **Claude 3.7 Sonnet Thinking Mode Support**: Added full support for the thinking mode in Claude 3.7 Sonnet, including type definitions and processing logic.
+
+7. **Streaming Response Handling Enhancements**: Improved compatibility with different response body formats across platforms.
+
+8. **API URL Normalization and Validation**: Added utilities to ensure consistent and correct API endpoint resolution.
 
 By following these best practices, you can ensure more robust and maintainable code across the LLM framework.

@@ -583,6 +583,26 @@ When working with TypeScript in LLM implementations, be aware of these common ty
    const pattern = /"\w+":/; // No need to escape quotes in regex
    ```
 
+## 2025 May Updates
+
+The framework has been enhanced with several improvements as of May 2025:
+
+1. **Enhanced Message Content Type Handling**: Improved utilities for safely working with the `MessageContent` union type (string | MessagePart[]).
+
+2. **Centralized Tool Arguments Repair**: Added comprehensive `repairToolArguments` utility to standardize handling of malformed JSON in tool arguments.
+
+3. **JSON Delta Processing Standardization**: Implemented a unified approach for handling incremental JSON updates in streaming contexts.
+
+4. **Claude 3.7 Sonnet Thinking Mode Support**: Added full support for Claude 3.7's thinking mode capability, with proper type definitions and processing logic.
+
+5. **API URL Management Improvements**: Enhanced URL normalization and validation to ensure correct endpoint targeting.
+
+6. **Error Handling Enhancements**: Improved type-safe error handling patterns for unknown error types.
+
+7. **Boolean Value Repair in JSON**: Added specialized functions to fix common boolean value corruption issues in streaming contexts.
+
+8. **Type-Safe State Management**: Further improvements to state tracking and preservation during errors and retries.
+
 By following these patterns and best practices, you'll create more maintainable, robust LLM provider implementations that leverage the full power of TypeScript's type system and the common utilities provided by the framework.
 
 ## Usage

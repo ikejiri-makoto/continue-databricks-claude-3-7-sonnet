@@ -2,6 +2,10 @@
 
 このディレクトリには、Databricks LLMインテグレーションで使用される型定義が含まれています。型定義は、コードの安全性、保守性、および自己文書化を向上させるために非常に重要な役割を果たします。
 
+## 重要な注意事項
+
+**注意**: Databricksのエンドポイントは`parallel_tool_calls`パラメータをサポートしていません。このパラメータはDatabricksの型定義から意図的に除外されており、使用するとエラーの原因となります。
+
 ## ディレクトリ構造
 
 ```
@@ -26,10 +30,10 @@ types/
 export interface DatabricksCompletionOptions extends CompletionOptions {
   apiKey?: string;              // 認証用APIキー
   apiBase?: string;             // APIベースURL
-  parallelToolCalls?: boolean;  // 並列ツール呼び出し制御フラグ（推奨値: false）
+  requestTimeout?: number;      // リクエストのタイムアウト（秒）
   thinking?: {                  // Claude 3.7の思考モード設定
-    type: "enabled";
-    budget_tokens: number;      // 思考プロセスのトークン予算
+    type: string;               // 思考モードのタイプ（"enabled"のみサポート）
+    budget_tokens?: number;     // 思考プロセスのトークン予算
   };
 }
 ```
@@ -91,10 +95,9 @@ declare module "../../../../index.js" {
   // CompletionOptions型を拡張
   interface CompletionOptions {
     // Databricks固有のオプション
-    parallelToolCalls?: boolean;  // 並列ツール呼び出し制御フラグ
     thinking?: {                  // 思考モード設定
-      type: "enabled";            // 思考モードのタイプ
-      budget_tokens: number;      // 思考用のトークン予算
+      type: string;               // 思考モードのタイプ
+      budget_tokens?: number;     // 思考用のトークン予算
     };
   }
 }
@@ -258,9 +261,27 @@ static processToolCallDelta(
 }
 ```
 
-## 最近の改善点
+## 2025年5月の改善点
 
-### 1. ツール引数処理の型安全性向上
+### 1. parallel_tool_callsパラメータの完全な削除
+
+Databricksエンドポイントが`parallel_tool_calls`パラメータをサポートしていないため、このパラメータを型定義から完全に削除しました。これにより、コンパイルエラーを早期に検出し、実行時エラーを防止できるようになりました。
+
+### 2. 思考モード（thinking）の型定義強化
+
+Claude 3.7 Sonnetの思考モード機能をサポートするため、型定義を拡張しました：
+
+```typescript
+// CompletionOptions型における思考モードの明示的な型定義
+thinking?: {
+  type: string;               // 思考モードのタイプ（"enabled"のみサポート）
+  budget_tokens?: number;     // 思考用のトークン予算
+};
+```
+
+これにより、思考モードのパラメータを型安全に処理できるようになりました。
+
+### 3. ツール引数処理の型安全性向上
 
 ツール引数処理のフローをより型安全にするための明示的なインターフェース定義を導入しました：
 
@@ -276,7 +297,7 @@ export interface ToolCallResult {
 }
 ```
 
-### 2. ストリーミングレスポンス処理の型安全性向上
+### 4. ストリーミングレスポンス処理の型安全性向上
 
 ストリーミングレスポンス処理の結果型を明示的に定義し、エラー処理と状態管理を改善しました：
 
@@ -290,7 +311,7 @@ export interface StreamingResponseResult {
 }
 ```
 
-### 3. インデックス処理の型安全性向上
+### 5. インデックス処理の型安全性向上
 
 配列インデックスのnull安全性を向上させ、境界外アクセスを防止するための型安全な処理を実装しました：
 
