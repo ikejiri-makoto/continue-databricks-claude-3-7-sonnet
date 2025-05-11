@@ -15,8 +15,14 @@ core/
 │   └── messageContent.js      (チャットメッセージのレンダリング関数)
 └── llm/
     ├── index.js               (BaseLLMクラス - すべてのLLM実装の基底クラス)
+    ├── stream.js              (streamSse関数 - ストリーミングレスポンスの処理)
     ├── types/                 (共通型定義の拡張 - 適切な型安全性の確保)
     │   └── databricks-extensions.d.ts (Databricks用の拡張型定義)
+    ├── utils/                 (共通ユーティリティ関数)
+    │   ├── errors.js          (エラー処理 - getErrorMessage, isConnectionErrorを提供)
+    │   ├── json.js            (JSON処理 - processJsonDelta等の関数を提供)
+    │   ├── messageUtils.js    (メッセージ処理 - extractContentAsString等の関数)
+    │   └── toolUtils.js       (ツール処理 - repairToolArgumentsなどの関数)
     ├── llms/
     │   ├── Databricks.ts       (オーケストレーター - 各モジュールの統合・調整)
     │   └── Databricks/
@@ -28,15 +34,7 @@ core/
     │       ├── toolcalls.ts    (ツールコール処理 - ツール呼び出しの管理)
     │       └── types/          (型定義 - インターフェースと型の定義)
     │           ├── index.ts        (型定義のエントリーポイント - すべての型をエクスポート)
-    │           ├── types.ts        (主要な型定義 - 専用インターフェースを定義)
     │           └── extension.d.ts  (型拡張定義 - コア型をDatabricks固有の要件で拡張)
-    └── utils/
-        ├── errors.ts          (エラー処理 - getErrorMessage, isConnectionErrorを提供)
-        ├── json.ts            (JSON処理 - safeStringify, safeJsonParse, extractValidJson, deepMergeJson関数を提供)
-        ├── messageUtils.ts    (メッセージ処理 - extractContentAsString, コンテンツ抽出やクエリコンテキスト取得関数)
-        ├── sseProcessing.ts   (SSE処理 - processSSEStream関数を提供)
-        ├── streamProcessing.ts (ストリーム処理 - processContentDelta, JsonBufferHelpers関数を提供)
-        └── toolUtils.ts       (ツール処理 - isSearchTool, processSearchToolArguments, repairToolArgumentsを提供)
 ```
 
 ### 各モジュールの明確な責任
@@ -108,14 +106,12 @@ core/
 - 共通ユーティリティを使用したJSONデルタベース処理
 - 部分的なJSONの効率的な処理
 - モジュール化されたメソッドによる責任の明確な分離
-- `JsonBufferHelpers`を活用した標準的なバッファ管理
 - 明確な状態管理と再接続メカニズム
 - 共通の`processContentDelta`や`processJsonDelta`を活用した一貫した処理
-- **メッセージコンテンツ型の適切な処理: `extractContentAsString`を使用した型安全な処理**
+- メッセージコンテンツ型の適切な処理: `extractContentAsString`を使用した型安全な処理
 - 状態の永続化と復元
 - 再接続時の処理
 - 最終ストリーム処理とクリーンアップ
-- **StreamingProcessor.processStreamingResponse メソッドの完全な実装**
 
 **7. `toolcalls.ts` - ツールコール処理**
 - ツール呼び出しの処理と標準化
@@ -127,9 +123,7 @@ core/
 - 二重化されたJSONパターンの検出と修復
 - ツール呼び出しと結果の前後処理
 - ツール引数のデルタ処理と累積
-- ダミーのツール結果生成
-- モデルのツールサポート検証
-- **共通ユーティリティ `repairToolArguments` を活用したツール引数の修復**
+- 共通ユーティリティ `repairToolArguments` を活用したツール引数の修復
 - インターフェースを実装して責任境界を明確化
 
 **8. `types/` - 型定義**
@@ -202,6 +196,9 @@ private async processStreamingRequest(
     // リクエストパラメータの構築をヘルパーモジュールに委譲
     const args = DatabricksHelpers.convertArgs(options);
     
+    // システムメッセージの処理をメッセージ処理モジュールに委譲
+    const systemMessage = MessageProcessor.processSystemMessage(messages);
+    
     // メッセージ変換をメッセージ処理モジュールに委譲
     const formattedMessages = MessageProcessor.convertToOpenAIFormat(
       messages, MessageProcessor.sanitizeMessages(messages)
@@ -215,15 +212,30 @@ private async processStreamingRequest(
       DatabricksConfig.setupTimeoutController(signal, options);
     
     // APIリクエスト実行
-    const response = await this.fetch(apiBaseUrl, { /* リクエスト設定 */ });
+    const response = await this.fetch(apiBaseUrl, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "Authorization": `Bearer ${this.apiKey}`,
+      },
+      body: safeStringify({
+        ...args,
+        messages: formattedMessages,
+        system: systemMessage,
+      }),
+      signal: combinedSignal,
+    });
+    
+    // 非ストリーミングレスポンス処理をヘルパーモジュールに委譲
+    if (options.stream === false) {
+      const message = await DatabricksHelpers.processNonStreamingResponse(response);
+      return { success: true, messages: [message] };
+    }
     
     // ストリーミングレスポンス処理をストリーミングモジュールに委譲
-    const streamResult = await StreamingProcessor.processStreamingResponse(
+    return await StreamingProcessor.processStreamingResponse(
       response, messages, retryCount, this.alwaysLogThinking
     );
-    
-    // 結果を返却
-    return streamResult;
   } catch (error) {
     // エラー結果の構築
     return { 
@@ -235,14 +247,32 @@ private async processStreamingRequest(
 }
 ```
 
-## 最近の改善点
+## 主要な改善点
 
-### 1. メッセージコンテンツ型の処理改善 (2025年5月)
+### 1. ルーティング問題の解決
 
-- **型互換性エラーの解消**: `streaming.ts`ファイルで発生していた「Type 'MessageContent' is not assignable to type 'string'」エラーを修正
-- **共通ユーティリティの活用**: `extractContentAsString`関数を使って型安全にコンテンツを文字列として扱うよう改善
-- **コンテンツ比較の安全化**: メッセージコンテンツの比較時に型を考慮した安全な比較を実装
-- **型の一貫性確保**: 特にツール呼び出し処理において、型の一貫性を向上
+最も重要な改善点は、すべてのリクエストを正しくDatabricksエンドポイントに送信するようにしたことです。以前の実装では、ストリーミング編集差分などの特定の操作で、誤ってAnthropicのAPIを直接使用しようとしていました。
+
+```typescript
+// 新しい実装では、すべてのリクエストが正しくDatabricksに送信されます
+const response = await this.fetch(apiBaseUrl, {
+  method: "POST",
+  headers: {
+    "Content-Type": "application/json",
+    "Authorization": `Bearer ${this.apiKey}`,
+  },
+  body: safeStringify({
+    ...args,
+    messages: formattedMessages,
+    system: systemMessage,
+  }),
+  signal: combinedSignal,
+});
+```
+
+### 2. メッセージコンテンツ型の処理改善
+
+`MessageContent`型が`string`または`MessagePart[]`のユニオン型であることによる型エラーを修正し、`extractContentAsString`関数を使って安全に処理するようにしました。
 
 ```typescript
 // 変更前 - 型エラーが発生
@@ -256,293 +286,118 @@ const currentContentAsString = extractContentAsString(currentMessage.content);
 
 // 型安全な比較と代入
 if (currentContentAsString !== lastYieldedMessageContent) {
-  // ツール呼び出し情報を含む新しいメッセージをyield
-  const messageToYield: ChatMessage = {
-    role: "assistant",
-    content: currentMessage.content,
-    toolCalls: toolCalls.length > 0 ? toolCalls : undefined
-  };
-  
-  responseMessages.push(messageToYield);
+  // メッセージを処理...
   lastYieldedMessageContent = currentContentAsString;
 }
 ```
 
-### 2. 共通ユーティリティの活用強化 (2025年5月)
+### 3. JSON処理の強化
 
-- **ツール引数修復ユーティリティの活用**: `repairToolArguments`共通関数を使用して修復ロジックを統一
-- **JSONデルタ処理の共通化**: 共通ユーティリティの`processJsonDelta`関数を使用
-- **重複実装の解消**: 独自実装していた処理を共通ユーティリティで置き換え、コードの重複を削減
-- **バッファ管理の標準化**: `JsonBufferHelpers`の活用によるバッファ処理の標準化
-- **一貫したエラー処理**: `getErrorMessage`などの標準関数を使用した一貫したエラー処理
+ストリーミング応答内のJSONフラグメントを処理する方法を改善し、`processJsonDelta`関数を使用して部分的なJSONの累積と解析を正しく処理するようにしました。
 
 ```typescript
-// 変更前 - 独自の実装
-// 二重化パターンをチェック
-let repairedArguments = toolCallDelta.function.arguments;
-const repeatedPattern = /\{\s*\"\w+\"\s*:\s*[^{]*\{\s*\"\w+\"\s*:/;
-if (repeatedPattern.test(repairedArguments)) {
-  repairedArguments = repairDuplicatedJsonPattern(repairedArguments);
-  // ...
-}
+// JSONフラグメントの処理に共通ユーティリティを使用
+const result = processJsonDelta(jsonBuffer, toolCallDelta.function.arguments);
+updatedJsonBuffer = result.combined;
 
-// 変更後 - 共通ユーティリティを活用
-// 共通ユーティリティのrepairToolArgumentsを使用して引数を修復
-let repairedArguments = repairToolArguments(toolCallDelta.function.arguments);
-
-// エラーメッセージのデバッグログ
-if (repairedArguments !== toolCallDelta.function.arguments) {
-  console.log(`ツール引数を修復しました: ${toolCallDelta.function.arguments} -> ${repairedArguments}`);
-}
-```
-
-### 3. JSONデルタ処理の堅牢性向上 (2025年5月)
-
-- **部分的なブール値の修復**: 「rue}」などの切断されたJSONフラグメントを「true}」に修復する機能を使用
-- **複数レベルの修復戦略**: 段階的なJSON修復アプローチにより、様々なエラーケースに対応
-- **フラグメント処理の強化**: JSONフラグメントを効率的に処理するデルタベースの処理を活用
-- **エラー耐性の向上**: 修復失敗時にも処理を継続できるフォールバック対応を実装
-
-### 4. `finalizeJsonBuffer`メソッドの改善 (2025年5月)
-
-- **共通ユーティリティの活用**: `repairToolArguments`を使用してJSON修復を統一
-- **コードの簡略化**: 複雑な条件分岐を整理し、シンプルで読みやすい実装に
-- **エラー処理の強化**: クリアなエラーメッセージとエラー後のフォールバック処理を追加
-- **型安全性の向上**: 明確な型定義と型チェックによる安全性の確保
-
-```typescript
-static finalizeJsonBuffer(
-  jsonBuffer: string,
-  isBufferingJson: boolean,
-  currentToolCall: ToolCall | null,
-  messages: ChatMessage[]
-): ToolCall | null {
-  if (!isBufferingJson || !jsonBuffer || !currentToolCall) {
-    return currentToolCall;
-  }
-
-  try {
-    // ツール引数を共通ユーティリティを使用して修復
-    const repairedJson = repairToolArguments(jsonBuffer);
-    
-    // 検索ツールの場合は専用の処理を使用
-    if (isSearchTool(currentToolCall.function.name)) {
-      currentToolCall.function.arguments = processSearchToolArguments(
-        currentToolCall.function.name,
-        currentToolCall.function.arguments || "",
-        repairedJson,
-        messages
-      );
-    } else {
-      // 修復されたJSONが完全であればそのまま使用
-      if (isValidJson(repairedJson)) {
-        // 既存の引数があればマージを試みる
-        if (currentToolCall.function.arguments && 
-            currentToolCall.function.arguments.trim() !== "" && 
-            currentToolCall.function.arguments.trim() !== "{}") {
-          try {
-            // 既存引数と新しい引数を両方パースしてマージ
-            const existingArgs = safeJsonParse(currentToolCall.function.arguments, {});
-            const newArgs = safeJsonParse(repairedJson, {});
-            const mergedArgs = { ...existingArgs, ...newArgs };
-            currentToolCall.function.arguments = JSON.stringify(mergedArgs);
-          } catch (e) {
-            // マージに失敗した場合は修復されたJSONを使用
-            currentToolCall.function.arguments = repairedJson;
-          }
-        } else {
-          // 既存の引数がない場合は修復されたJSONを使用
-          currentToolCall.function.arguments = repairedJson;
-        }
-      } else {
-        // 修復しても有効なJSONにならない場合
-        if (currentToolCall.function.arguments) {
-          currentToolCall.function.arguments += jsonBuffer; // 既存の引数に追加
-        } else {
-          currentToolCall.function.arguments = jsonBuffer; // そのまま使用
-        }
-      }
-    }
-  } catch (e) {
-    console.warn(`最終バッファ処理エラー: ${getErrorMessage(e)}`);
-    
-    // エラーが発生した場合は元のバッファをそのまま使用
-    if (!currentToolCall.function.arguments) {
-      currentToolCall.function.arguments = jsonBuffer;
-    }
-  }
-
-  // 永続的な状態をリセット
-  this.resetPersistentState();
-
-  return currentToolCall;
-}
-```
-
-### 5. API互換性の改善 (2025年5月)
-
-- **parallel_tool_callsパラメータの対応改善**: Databricksエンドポイントがサポートしていない`parallel_tool_calls`パラメータを自動的に除外
-- **リクエストパラメータの最適化**: 互換性のないパラメータを削除し、API呼び出しエラーを防止
-- **デフォルト設定の安全化**: `parallelToolCalls: false`をデフォルト値として設定
-
-### 6. ストリーム処理の完全実装 (2025年5月)
-
-- **StreamingProcessor.processStreamingResponse メソッドの追加**: ストリーミングレスポンスを完全に処理する静的メソッドを実装
-- **型安全なインターフェース**: StreamingResponseResult インターフェース型を追加し、戻り値型の安全性を確保
-- **完全なステートフル処理**: ストリーミングの状態管理を改善し、エラー発生時も一貫した動作を維持
-- **再接続メカニズムの強化**: 接続エラー後の状態復元と再接続処理の改善
-- **責任の明確な分離**: 各処理フェーズが明確なメソッドに分割され、責任境界が明確なコード構造を実現
-
-### 7. 型安全なエラー処理の改善 (2025年5月)
-
-- **unknown型のエラー処理**: `unknown`型の変数からプロパティを安全に抽出する処理を改善
-- **共通ユーティリティの活用**: `getErrorMessage`関数を使用して型安全にエラーメッセージを取得
-- **型チェックの強化**: 適切な型ガードを使用してエラーの種類を判別
-- **エラー情報の標準化**: エラーメッセージの形式を標準化し、診断情報を向上
-
-```typescript
-// 変更前 - 型安全でないエラー処理（TypeScriptコンパイルエラーの原因）
-try {
-  // 処理...
-} catch (streamError) {
-  // エラー: 'streamError' is of type 'unknown'
-  console.error(`接続エラーの詳細: ${streamError.name}, ${streamError.message}`);
-}
-
-// 変更後 - 型安全なエラー処理（共通ユーティリティを活用）
-import { getErrorMessage, isConnectionError } from "../../utils/errors.js";
-
-try {
-  // 処理...
-} catch (streamError: unknown) {
-  // 型安全: getErrorMessageがunknown型を安全に処理
-  const errorMessage = getErrorMessage(streamError);
-  console.error(`ストリーミング処理エラー: ${errorMessage}`);
+// 完全なJSONが得られたかチェック
+if (result.complete && result.valid) {
+  // 共通ユーティリティを使用してJSONを修復
+  const repairedJson = repairToolArguments(updatedJsonBuffer);
   
-  // 接続エラーの判別も型安全に実装
-  if (isConnectionError(streamError)) {
-    console.error(`接続エラーの詳細: ${errorMessage}`);
+  // ツール呼び出し引数を更新
+  if (updatedCurrentToolCallIndex !== null) {
+    updatedToolCalls[updatedCurrentToolCallIndex].function.arguments = repairedJson;
+  }
+  
+  // バッファリング状態をリセット
+  updatedIsBufferingJson = false;
+  updatedJsonBuffer = "";
+  shouldYieldMessage = true;
+}
+```
+
+### 4. ツール呼び出し処理の改善
+
+ツール引数の処理を改善し、`repairToolArguments`関数を使用して破損したJSONを修復できるようにしました。
+
+```typescript
+// 共通ユーティリティを使用してツール引数を修復
+const repairedJson = repairToolArguments(jsonBuffer);
+
+// 検索ツールは特別に処理
+if (isSearchTool(currentToolCall.function.name)) {
+  currentToolCall.function.arguments = processSearchToolArguments(
+    currentToolCall.function.name,
+    currentToolCall.function.arguments || "",
+    repairedJson,
+    messages
+  );
+} else {
+  // 他のツールは修復されたJSONを使用
+  if (isValidJson(repairedJson)) {
+    // 既存の引数があれば、マージを試みる
+    // ...
   }
 }
 ```
 
-## メッセージコンテンツ型の処理改善
+### 5. エラー処理と再接続の強化
 
-メッセージコンテンツ型（`MessageContent`）を適切に処理するための変更点：
-
-```typescript
-// 変更前 - 型エラーが発生する問題のあるコード
-lastYieldedMessageContent = currentMessage.content;
-
-// 変更後 - メッセージユーティリティを使用した安全な処理
-import { extractContentAsString } from "../../utils/messageUtils.js";
-
-// メッセージコンテンツから安全に文字列を抽出
-const contentAsString = extractContentAsString(currentMessage.content);
-lastYieldedMessageContent = contentAsString;
-```
-
-このパターンを他の場所でも適用して、メッセージコンテンツの型安全な処理を実現：
+接続エラーを適切に処理し、指数バックオフとリトライ機能を実装しました。また、再接続時に状態を保持し、ストリーミングセッションを継続できるようにしました。
 
 ```typescript
-// メッセージコンテンツの比較
-function compareMessageContent(oldMessage: ChatMessage, newMessage: ChatMessage): boolean {
-  const oldContent = extractContentAsString(oldMessage.content);
-  const newContent = extractContentAsString(newMessage.content);
-  
-  return oldContent === newContent;
-}
-
-// メッセージコンテンツを文字列として処理
-function processMessageContent(message: ChatMessage): void {
-  const contentAsString = extractContentAsString(message.content);
-  
-  // 文字列として扱えるようになった
-  if (contentAsString.includes("キーワード")) {
-    // 処理...
-  }
-}
-```
-
-## TypeScriptメソッド宣言のベストプラクティス
-
-TypeScriptでのメソッド宣言には、以下のベストプラクティスを採用しています：
-
-### 1. 明示的なインターフェース型の使用
-
-複雑なオブジェクト型パラメータや戻り値には、インライン型定義ではなく明示的なインターフェース型を使用することで、コードの可読性と保守性を向上させています：
-
-```typescript
-// 良い例：明示的なインターフェース型を使用
-private static updateToolCallArguments(
-  result: ToolCallResult,
-  args: string,
-  messages: ChatMessage[]
-): ToolCallResult {
-  // 実装...
-}
-
-// 避けるべき例：インライン型定義
-private static updateToolCallArguments(
-  result: {
-    updatedToolCalls: ToolCall[];
-    updatedCurrentToolCall: ToolCall | null;
-    // 他のプロパティ...
-  },
-  args: string,
-  messages: ChatMessage[]
-): typeof result {
-  // 実装...
-}
-```
-
-### 2. 一貫した戻り値型定義
-
-曖昧な`typeof result`のような型参照を避け、明示的なインターフェース型を使用することで、型安全性を向上させています：
-
-```typescript
-// 良い例：明示的なインターフェース型を戻り値型として使用
-private static processToolCallDelta(
-  delta: ResponseDelta,
-  toolCalls: ToolCall[],
-  currentToolCall: ToolCall | null,
-  currentToolCallIndex: number | null,
-  jsonBuffer: string,
-  isBufferingJson: boolean,
-  messages: ChatMessage[]
-): ToolCallResult {
-  // 実装...
-}
-
-// 避けるべき例：typeof resultを使用
-private static processToolCallDelta(
-  // パラメータ...
-): typeof result {
-  // 実装...
-}
-```
-
-### 3. 型安全なエラー処理
-
-エラー処理においても型安全性を確保するベストプラクティス：
-
-```typescript
-// 型安全なエラー処理：明示的な型アノテーションとユーティリティの使用
+// 型安全なエラー処理
 try {
   // 処理...
 } catch (error: unknown) {
-  // 共通ユーティリティを使用した型安全な処理
+  // 共通ユーティリティを使用して型安全にエラーメッセージを取得
   const errorMessage = getErrorMessage(error);
-  console.error(`エラー発生: ${errorMessage}`);
   
-  // 型ガードを使用したエラー分類
-  if (error instanceof Error) {
-    // Error型としてのプロパティにアクセス可能
-    console.error(`スタックトレース: ${error.stack}`);
-  } else if (isConnectionError(error)) {
-    // 接続エラー固有の処理
-    console.error(`接続エラー: ${errorMessage}`);
+  // エラーが一時的なものかどうかを確認
+  if (isTransientError(error)) {
+    // 指数バックオフを使用してリトライ
+    const delay = Math.min(
+      baseDelay * Math.pow(2, retryCount - 1) * (0.5 + Math.random()), 
+      10000
+    );
+    
+    await new Promise(resolve => setTimeout(resolve, delay));
+    // リトライ...
+  } else {
+    // 永続的なエラーを投げる
+    throw error;
   }
+}
+```
+
+### 6. 並列ツール呼び出しの制御
+
+Databricksエンドポイントが並列ツール呼び出しをサポートしていないため、`parallel_tool_calls: false`パラメータを追加して、ツール呼び出しが正しく処理されるようにしました。
+
+```typescript
+const args = {
+  // その他のパラメータ...
+  
+  // 並列ツール呼び出しを明示的に無効化
+  parallel_tool_calls: false
+};
+```
+
+### 7. 思考モードのサポート
+
+Claude 3.7 Sonnetの思考モードを適切にサポートするための設定を追加しました。
+
+```typescript
+// Claude 3.7モデル用に思考モードを追加
+if (isClaude37) {
+  return {
+    ...args,
+    thinking: {
+      type: "enabled",
+      budget_tokens: options.thinking?.budget_tokens || 60000,
+    }
+  };
 }
 ```
 
@@ -561,25 +416,15 @@ models:
     provider: "databricks"
     apiBase: "https://your-databricks-endpoint.cloud.databricks.com/serving-endpoints/claude-3-7-sonnet/invocations"
     apiKey: "dapi_your_api_key_here"
+    model: "databricks-claude-3-7-sonnet"
 ```
 
-## TypeScriptコンパイルエラー回避のためのガイドライン
+## 今後の改善計画
 
-Databricksインテグレーションでのコンパイルエラーを防ぐために、以下のガイドラインを採用しています：
+1. **パフォーマンス最適化**: リクエスト処理とレスポンスパースのパフォーマンスをさらに最適化
+2. **バッファ管理の改善**: より効率的なJSONバッファ管理による大規模ストリーミングの安定性向上
+3. **コンテキスト管理の強化**: トークン制限を考慮したコンテキスト管理の改善
+4. **型安全性の向上**: より厳密な型定義とチェックによる安全性の向上
+5. **並列処理の改善**: 複数のリクエスト間でのリソース共有の最適化
 
-1. **明示的なインターフェース型の使用**: 複雑なオブジェクト型にはインターフェース型を使用し、`types.ts`で一元的に定義します
-2. **一貫した型宣言パターン**: メソッドのパラメータと戻り値には一貫した型宣言パターンを使用します
-3. **インライン型定義の排除**: メソッド宣言内でのインライン型定義を避け、名前付きインターフェース型を使用します
-4. **適切な配列型表記**: 配列型は`Type[]`形式で正しく宣言します
-5. **文字列リテラルの一貫した使用**: 一貫した引用符スタイル（単一引用符または二重引用符）を採用し、適切なエスケープシーケンスを使用します
-6. **適切な正規表現パターン**: 正規表現パターンでは、メタ文字を適切にエスケープします
-7. **型安全なキャスト**: `as any`などの安全でないキャストを避け、適切な型アサーションを使用します
-8. **インターフェース実装パターン**: 明確な責任境界を持つインターフェースを定義し、それに準拠するクラスを実装します
-9. **戻り値型の明示化**: `typeof result`のような曖昧な型参照を避け、明示的に型を定義します
-10. **文字列リテラルのエスケープ**: 文字列内の引用符はTypeScriptの構文に従って正しくエスケープします
-11. **メッセージコンテンツ型の適切な処理**: `extractContentAsString`を使用して`MessageContent`型を安全に処理します
-12. **必要な共通ユーティリティのインポート**: 特に`extractContentAsString`や`repairToolArguments`など重要な関数を確実にインポートします
-13. **unknown型の適切な処理**: catchブロック内で`unknown`型として捕捉したエラーは、型安全にアクセスするためのユーティリティ関数を使用します
-14. **型ガードの活用**: `instanceof`や`typeof`などの型ガードを使用して、より具体的な型に絞り込みます
-
-これらのガイドラインを遵守することで、TypeScriptコンパイルエラーを防ぎ、よりメンテナンス性の高いコードベースを維持できます。
+このモジュール化されたアーキテクチャにより、拡張機能の安定性と保守性が大幅に向上し、将来のAPI変更にも容易に対応できるようになりました。
