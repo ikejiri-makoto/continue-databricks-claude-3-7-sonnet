@@ -1,4 +1,4 @@
-import { ChatMessage } from "../../../index.js";
+import { ChatMessage, ThinkingChatMessage } from "../../../index.js";
 import { safeStringify, safeJsonParse } from "../../utils/json.js";
 import { 
   extractContentAsString, 
@@ -125,10 +125,21 @@ export class MessageProcessor {
    * @returns OpenAI形式に変換されたメッセージ配列
    */
   static convertToOpenAIFormat(messages: ChatMessage[], preprocessedMessages: ChatMessage[]): any[] {
-    // メッセージをOpenAI形式に変換（システムメッセージとthinkingメッセージを除く）
-    const convertedMessages: any[] = preprocessedMessages
-      .filter(m => m.role !== "system" && m.role !== "thinking")
-      .map(message => this.convertMessageToOpenAIFormat(message, preprocessedMessages));
+    // メッセージをOpenAI形式に変換（システムメッセージを除く）
+    // 思考メッセージは特別な形式で追加
+    const convertedMessages: any[] = [];
+    
+    // 過去の思考メッセージを最初に配置
+    const thinkingMessages = preprocessedMessages.filter(m => m.role === "thinking");
+    for (const thinkingMsg of thinkingMessages) {
+      convertedMessages.push(this.convertThinkingMessageToOpenAIFormat(thinkingMsg));
+    }
+    
+    // 続けて通常のメッセージを配置
+    const regularMessages = preprocessedMessages.filter(m => m.role !== "system" && m.role !== "thinking");
+    for (const msg of regularMessages) {
+      convertedMessages.push(this.convertMessageToOpenAIFormat(msg, preprocessedMessages));
+    }
     
     return convertedMessages;
   }
@@ -190,9 +201,39 @@ export class MessageProcessor {
         return this.convertToolMessageToOpenAIFormat(message);
       case "assistant":
         return this.convertAssistantMessageToOpenAIFormat(message, allMessages);
+      case "thinking":
+        return this.convertThinkingMessageToOpenAIFormat(message);
       default:
         return this.convertUserMessageToOpenAIFormat(message);
     }
+  }
+
+  /**
+   * 思考メッセージをOpenAI形式（Claude互換形式）に変換
+   * 
+   * @param message 思考メッセージ
+   * @returns OpenAI形式に変換された思考メッセージ
+   */
+  private static convertThinkingMessageToOpenAIFormat(message: ThinkingChatMessage): any {
+    // 思考コンテンツを抽出
+    const thinkingContent = typeof message.content === "string" 
+      ? message.content 
+      : safeStringify(message.content, "");
+    
+    // 署名情報を取得
+    const signature = (message as any).signature;
+    
+    // 思考モードが有効な場合、思考ブロックを持つメッセージ形式で返す
+    return {
+      role: "assistant",
+      content: [
+        {
+          type: "thinking",
+          thinking: thinkingContent,
+          ...(signature ? { signature } : {})
+        }
+      ]
+    };
   }
 
   /**
@@ -220,17 +261,13 @@ export class MessageProcessor {
    * @returns OpenAI形式に変換されたアシスタントメッセージ
    */
   private static convertAssistantMessageToOpenAIFormat(message: ChatMessage, allMessages: ChatMessage[]): any {
-    const contentStr = typeof message.content === "string" 
-      ? message.content 
-      : safeStringify(message.content, "");
-      
     // ツール呼び出しを含むアシスタントメッセージの特別処理
     if (this.messageHasToolCalls(message)) {
       const msgAny = message as any;
       
       return {
         role: "assistant",
-        content: contentStr, // 単一の文字列として送信
+        content: null, // ツール呼び出しの場合はcontentをnullに設定
         tool_calls: msgAny.toolCalls.map((toolCall: any) => 
           this.convertToolCallToOpenAIFormat(toolCall, allMessages)
         )
@@ -238,9 +275,17 @@ export class MessageProcessor {
     }
     
     // 通常のアシスタントメッセージ
+    // Claude 3.7の思考モードでは、通常のテキストメッセージでも配列形式に変換する
+    const contentStr = extractContentAsString(message.content);
+    
     return {
       role: "assistant",
-      content: contentStr
+      content: [
+        {
+          type: "text",
+          text: contentStr
+        }
+      ]
     };
   }
 

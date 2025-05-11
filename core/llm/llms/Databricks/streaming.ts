@@ -334,11 +334,15 @@ export class StreamingProcessor {
       newThinking = safeStringify(thinkingChunk.thinking, "[思考データ]");
     }
     
+    // 署名情報を抽出
+    const signature = thinkingChunk.signature || undefined;
+    
+    // 署名情報があるかどうかでメッセージ形式を変える
     // 思考メッセージを返す
     const thinkingMessage: ThinkingChatMessage = {
       role: "thinking",
       content: newThinking,
-      signature: thinkingChunk.signature
+      signature: signature
     };
     
     // デバッグモードに関わらず思考プロセスをコンソールに出力

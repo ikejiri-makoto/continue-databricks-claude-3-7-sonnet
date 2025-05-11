@@ -13,12 +13,10 @@ declare module "../index" {
      */
     thinkingProcess?: boolean;
     
-    /**
-     * Whether to allow parallel tool calls
-     * If false, only process one tool call at a time
-     * Based on OpenAI-style parallel control
-     */
-    parallelToolCalls?: boolean;
+    // 注意: Databricksエンドポイントはparallel_tool_callsパラメータをサポートしていません
+    // このパラメータを含めるとエラーが発生します
+    // parallel_tool_callsパラメータを意図的にコメントアウト
+    // parallelToolCalls?: boolean;
   }
 
   // Add extension for CompletionOptions

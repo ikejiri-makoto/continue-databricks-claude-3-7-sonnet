@@ -195,19 +195,15 @@ class Databricks extends BaseLLM {
       // システムメッセージの処理をメッセージ処理モジュールに委譲
       const systemMessage = MessageProcessor.processSystemMessage(messages);
       
+      // メッセージのサニタイズと前処理
+      const sanitizedMessages = MessageProcessor.sanitizeMessages(messages);
+      
       // メッセージ変換をメッセージ処理モジュールに委譲
       const formattedMessages = MessageProcessor.convertToOpenAIFormat(
         messages, 
-        MessageProcessor.sanitizeMessages(messages)
+        sanitizedMessages
       );
       
-      // リクエストボディを構築
-      const requestBody = {
-        ...args,
-        messages: formattedMessages,
-        system: systemMessage
-      };
-
       // 統一された方法でAPIエンドポイントを取得
       const apiEndpoint = this.getApiEndpoint();
       
@@ -226,6 +222,20 @@ class Databricks extends BaseLLM {
       // タイムアウトコントローラの設定を設定管理モジュールに委譲
       const { timeoutController, timeoutId, combinedSignal } = 
         DatabricksConfig.setupTimeoutController(signal, options);
+
+      // リクエストボディを構築
+      // parallel_tool_callsパラメータが含まれていないことを確認
+      const requestBody = {
+        ...args,
+        messages: formattedMessages,
+        system: systemMessage
+      };
+      
+      // 最終チェック: parallel_tool_callsが含まれていないことを確認
+      if ((requestBody as any).parallel_tool_calls) {
+        console.warn("最終チェック: parallel_tool_callsパラメータが検出されました。削除します。");
+        delete (requestBody as any).parallel_tool_calls;
+      }
 
       // DatabricksのエンドポイントにOpenAI形式でリクエスト
       const response = await this.fetch(apiEndpoint, {
