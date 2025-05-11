@@ -2,57 +2,78 @@ import { ChatMessage, CompletionOptions } from "../../../index.js";
 import { DatabricksCompletionOptions, ToolCall } from "./types/types.js";
 import { safeStringify, safeJsonParse, isValidJson, extractValidJson } from "../../utils/json.js";
 import { isSearchTool } from "../../utils/toolUtils.js";
+import { extractContentAsString } from "../../utils/messageUtils.js";
+import { getErrorMessage } from "../../utils/errors.js";
 
-// 定数
+// Constants
 const DEFAULT_MAX_TOKENS = 32000;
 const MIN_MAX_TOKENS = 4096;
+const DEFAULT_THINKING_TYPE = "enabled";
+const DEFAULT_TEMPERATURE = 1.0;
 
 /**
- * DatabricksLLM用のヘルパー関数
- * リクエストパラメータの構築、状態の初期化、非ストリーミングレスポンスの処理などを担当
+ * Helper functions for DatabricksLLM
+ * Responsible for building request parameters, initializing state, and processing non-streaming responses
  */
 export class DatabricksHelpers {
   /**
-   * OpenAI形式のオプションに変換
-   * CompletionOptionsをDatabricksのリクエストパラメータに変換
+   * Convert to OpenAI-compatible options
+   * Converts CompletionOptions to Databricks request parameters
    * 
-   * @param options 補完オプション
-   * @returns 変換されたリクエストパラメータ
+   * @param options Completion options
+   * @returns Converted request parameters
    */
   static convertArgs(options: DatabricksCompletionOptions): Record<string, any> {
-    // モデル名の設定（デフォルト値またはユーザー指定値）
+    // Set model name (default or user-specified)
     const modelName = options.model || "databricks-claude-3-7-sonnet";
     
-    // max_tokensのデフォルト値または指定値を取得
-    // 最小値を設定して小さすぎる値を防止（少なくとも4096）
+    // Identify Claude 3.7 models
+    const isClaude37 = modelName.includes("claude-3-7");
+    
+    // Get default or specified max_tokens value
+    // Ensure it's not too small (at least 4096)
     const maxTokens = Math.max(options.maxTokens || DEFAULT_MAX_TOKENS, MIN_MAX_TOKENS);
     
-    // 思考予算を計算 - max_tokensの半分または最大64000を上限とする
-    // 常にmax_tokensよりも小さくなるようにする
+    // Calculate thinking budget - half of max_tokens or up to 64000 max
+    // Always ensure it's smaller than max_tokens
     const thinkingBudget = Math.min(Math.floor(maxTokens * 0.5), 64000);
     
-    // OpenAI互換形式のリクエストパラメータ
+    // Build OpenAI-compatible request parameters
     const finalOptions: Record<string, any> = {
       model: modelName,
       max_tokens: maxTokens,
-      temperature: options.temperature ?? 1,
+      temperature: options.temperature ?? DEFAULT_TEMPERATURE,
       top_p: options.topP,
       stream: options.stream ?? true,
     };
 
-    // 空でないstop配列のみを含める
+    // Only include non-empty stop arrays
     if (options.stop && Array.isArray(options.stop) && options.stop.length > 0) {
       finalOptions.stop = options.stop.filter((x: string) => typeof x === 'string' && x.trim() !== "");
     }
 
-    // タイムアウト設定はDatabricksエンドポイントでサポートされていないためリクエストボディに含めない
-    // Fetch APIのtimeoutオプションとAbortControllerで処理する
+    // Add thinking mode for Claude 3.7 models
+    if (isClaude37) {
+      // Safely extract thinking properties with proper fallback values
+      const thinkingType = options.thinking?.type || DEFAULT_THINKING_TYPE;
+      const thinkingBudgetTokens = options.thinking?.budget_tokens || thinkingBudget;
+      
+      finalOptions.thinking = {
+        type: thinkingType,
+        budget_tokens: thinkingBudgetTokens,
+      };
+      
+      // Log thinking configuration
+      console.log(`Setting up Claude 3.7 thinking mode: type=${thinkingType}, budget=${thinkingBudgetTokens}`);
+    }
 
-    // デバッグログ
+    // Debug log
     console.log(`Token settings - max_tokens: ${maxTokens}, thinking budget: ${thinkingBudget}`);
 
-    // ツール関連のパラメータがある場合のみ追加
+    // Add tool parameters only if present
     if (options.tools && Array.isArray(options.tools) && options.tools.length > 0) {
+      console.log("Adding tool configuration - tool count:", options.tools.length);
+      
       finalOptions.tools = options.tools.map((tool: any) => ({
         type: "function",
         function: {
@@ -62,17 +83,17 @@ export class DatabricksHelpers {
         }
       }));
 
-      // parallel_tool_callsパラメータはDatabricksのエンドポイントでサポートされていないため、
-      // このパラメータは含めない（含めるとBad Requestエラーが発生する）
-      // 注：parallel_tool_calls関連のパラメータは完全に除外
+      // Disable parallel_tool_calls (always false)
+      // This helps ensure Databricks endpoint can process properly
+      finalOptions.parallel_tool_calls = false;
 
-      // ツールがあるにもかかわらずQueryパラメータが不足する可能性のある特定のツールを検出
+      // Detect specific tools that might be missing Query parameters
       const searchTools = options.tools.filter((tool: any) => 
         isSearchTool(tool.function.name)
       );
 
       if (searchTools.length > 0) {
-        console.log(`検索ツールが検出されました: ${searchTools.map((t: any) => t.function.name).join(', ')}`);
+        console.log(`Search tools detected: ${searchTools.map((t: any) => t.function.name).join(', ')}`);
       }
     }
 
@@ -85,15 +106,19 @@ export class DatabricksHelpers {
       };
     }
 
-    // Databricksがサポートしないその他のパラメータを除外
-    // (明示的に定義されたfinalOptionsのプロパティのみが含まれる)
+    // Special handling based on Databricks model type
+    if (isClaude37) {
+      console.log("Claude 3.7 Sonnet model detected - applying special configuration");
+      // Claude 3.7 models specifically require temperature 1.0 for thinking processing
+      finalOptions.temperature = DEFAULT_TEMPERATURE;
+    }
 
     return finalOptions;
   }
 
   /**
-   * ストリーミング処理の初期状態を作成
-   * @returns 初期状態オブジェクト
+   * Initialize streaming state for processing streamed responses
+   * @returns Initial state object with default values
    */
   static initializeStreamingState(): {
     currentMessage: {
@@ -119,9 +144,10 @@ export class DatabricksHelpers {
   }
   
   /**
-   * テキストブロックの終了を判定
-   * @param text テキスト
-   * @returns テキストブロックの終了かどうか
+   * Determine if text represents the end of a text block
+   * Used to decide when to yield messages during streaming
+   * @param text Text to check
+   * @returns Whether the text is at a natural breaking point
    */
   static isTextBlockEnd(text: string): boolean {
     return (
@@ -132,74 +158,102 @@ export class DatabricksHelpers {
       text.endsWith("?") || 
       text.endsWith("？") || 
       text.endsWith("\n") ||
-      // 2行以上の改行がある場合は段落区切りとして扱う
+      // Consider paragraphs breaks (2+ newlines) as block endings
       text.includes("\n\n")
     );
   }
-
-  /**
-   * オブジェクトを安全に文字列化する
-   * @param obj 文字列化するオブジェクト
-   * @param defaultValue デフォルト値
-   * @returns 文字列化されたオブジェクト
-   */
-  static safeStringify(obj: any, defaultValue: string = ""): string {
-    // 共通ユーティリティの関数を使用
-    return safeStringify(obj, defaultValue);
-  }
   
   /**
-   * 非ストリーミングレスポンスを処理
-   * @param response HTTPレスポンス
-   * @returns 処理されたメッセージ
+   * Process non-streaming response from Databricks API
+   * @param response HTTP response object
+   * @returns Processed ChatMessage
    */
   static async processNonStreamingResponse(
     response: Response
   ): Promise<ChatMessage> {
-    const data = await response.json();
-    return { 
-      role: "assistant", 
-      content: safeStringify(data.choices[0].message.content, "")
-    };
+    try {
+      const data = await response.json();
+      
+      // Log response details for debugging
+      console.log("Non-streaming response status:", response.status);
+      console.log("Non-streaming response headers:", 
+        Object.fromEntries([...response.headers.entries()]));
+      
+      // Check for expected OpenAI-style response structure
+      if (data && data.choices && data.choices.length > 0) {
+        const messageContent = data.choices[0].message?.content || "";
+        return { role: "assistant", content: messageContent };
+      }
+      
+      // Try to extract content from alternative response structure
+      if (data && typeof data.content === 'string') {
+        return { role: "assistant", content: data.content };
+      }
+      
+      // If structure doesn't match expected patterns, stringify the entire data
+      return { 
+        role: "assistant", 
+        content: safeStringify(data, "Failed to parse response")
+      };
+    } catch (error) {
+      console.error("Error processing non-streaming response:", getErrorMessage(error));
+      
+      // Return error message in response
+      return {
+        role: "assistant",
+        content: `Error processing response: ${getErrorMessage(error)}`
+      };
+    }
   }
 
   /**
-   * コンテンツデルタの処理
-   * @param newContent 新しいコンテンツ
-   * @param currentContent 現在のコンテンツ
-   * @returns 処理されたコンテンツ
+   * Process content delta from streaming response
+   * Uses common utility pattern for all content handling
+   * @param newContent New content to append
+   * @param currentMessage Current message to update
+   * @returns Updated message content as string
    */
-  static processContentDelta(newContent: string, currentContent: string): string {
+  static processContentDelta(newContent: string, currentMessage: ChatMessage): string {
+    // Safely extract current content as string, handling both string and array types
+    const currentContent = extractContentAsString(currentMessage.content);
+    // Append new content to current content
     return currentContent + newContent;
   }
   
   /**
-   * メッセージが有効なJSON形式か検証
-   * @param message チェックするメッセージ
-   * @returns 有効なJSONの場合はtrue
+   * Validate if a message contains valid JSON
+   * @param message Message to check
+   * @returns Whether the message contains valid JSON
    */
   static isValidJsonMessage(message: string): boolean {
-    // 共通ユーティリティを直接使用してJSONの検証
+    // First check for JSON start indicators to avoid unnecessary processing
     if (!message.trim().startsWith('{') && !message.trim().startsWith('[')) {
       return false;
     }
-      
+    
+    // Use common utility for JSON validation
     return isValidJson(message);
   }
   
   /**
-   * リクエストボディのログ出力（デバッグ用）
-   * @param requestBody リクエストボディ
+   * Log request body for debugging (truncated for readability)
+   * @param requestBody Request body to log
    */
   static logRequestBody(requestBody: any): void {
-    // 短縮バージョンのリクエストボディを出力（巨大な場合は一部をトリミング）
+    // Create truncated version of request body (trim large content)
     const messages = requestBody.messages || [];
     
     const truncatedMessages = messages.map((msg: any) => {
-      if (typeof msg.content === 'string' && msg.content.length > 100) {
+      // Use extractContentAsString for type-safe processing
+      let content = msg.content;
+      if (typeof content !== 'string') {
+        content = extractContentAsString(content);
+      }
+      
+      if (content.length > 100) {
         return {
           ...msg,
-          content: msg.content.substring(0, 100) + '...'
+          content: content.substring(0, 100) + '...'
         };
       }
       return msg;
@@ -210,6 +264,6 @@ export class DatabricksHelpers {
       messages: truncatedMessages
     };
     
-    console.log('Request body (truncated):', JSON.stringify(truncatedBody, null, 2));
+    console.log('Request body (truncated):', safeStringify(truncatedBody, "{}"));
   }
 }

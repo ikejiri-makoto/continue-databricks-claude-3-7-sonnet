@@ -32,6 +32,23 @@ export interface DatabricksCompletionOptions extends CompletionOptions {
    */
   requestTimeout?: number;
   
+  /**
+   * Claude 3.7モデル用の思考モード設定
+   * 思考プロセスを有効にし、そのための設定を行う
+   */
+  thinking?: {
+    /**
+     * 思考モードのタイプ - 現在は"enabled"のみサポート
+     */
+    type: string;
+    
+    /**
+     * 思考プロセス用のトークン予算
+     * デフォルトはmax_tokensの半分（最大64000）
+     */
+    budget_tokens?: number;
+  };
+  
   // 注意: parallel_tool_callsパラメータはDatabricksエンドポイントでサポートされていないため、
   // 型定義からも除外し、エラーを防止
 }

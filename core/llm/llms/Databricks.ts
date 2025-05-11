@@ -6,6 +6,7 @@ import { DatabricksLLMOptions } from "./Databricks/types/types.js";
 // 共通ユーティリティのインポート
 import { getErrorMessage, isConnectionError } from "../utils/errors.js";
 import { streamSse } from "../stream.js";
+import { safeStringify } from "../utils/json.js";
 
 // Databricks固有のモジュールインポート
 import { DatabricksConfig } from "./Databricks/config.js";
@@ -66,6 +67,27 @@ class Databricks extends BaseLLM {
     // 思考プロセスを常にログに表示するかどうかの設定を読み込む
     // 設定が明示的にfalseでなければtrueに設定（デフォルトで有効）
     this.alwaysLogThinking = (options as any).thinkingProcess !== false;
+  }
+
+  /**
+   * APIエンドポイントURLの取得
+   * すべてのリクエストで一貫して同じ方法でURLを構築するための共通メソッド
+   * @returns 正規化されたDatabricksエンドポイントURL
+   */
+  private getApiEndpoint(): string {
+    // このメソッドを使用して、すべてのリクエストが統一された方法でURLを取得することを保証
+    if (!this.apiBase) {
+      throw new Error("API base URL is not defined");
+    }
+    
+    // 設定管理モジュールを使用して常に正規化されたURLを取得
+    const endpoint = DatabricksConfig.getFullApiEndpoint(this.apiBase);
+    
+    if (!endpoint) {
+      throw new Error("Failed to get valid Databricks API endpoint");
+    }
+    
+    return endpoint;
   }
 
   /**
@@ -171,6 +193,9 @@ class Databricks extends BaseLLM {
       // リクエストパラメータの構築をヘルパーモジュールに委譲
       const args = DatabricksHelpers.convertArgs(options);
       
+      // システムメッセージの処理をメッセージ処理モジュールに委譲
+      const systemMessage = MessageProcessor.processSystemMessage(messages);
+      
       // メッセージ変換をメッセージ処理モジュールに委譲
       const formattedMessages = MessageProcessor.convertToOpenAIFormat(
         messages, 
@@ -181,21 +206,16 @@ class Databricks extends BaseLLM {
       const requestBody = {
         ...args,
         messages: formattedMessages,
+        system: systemMessage
       };
 
-      // URLの正規化を設定管理モジュールに委譲
-      if (!this.apiBase) {
-        throw new Error("API base URL is not defined");
-      }
+      // 統一された方法でAPIエンドポイントを取得
+      const apiEndpoint = this.getApiEndpoint();
       
-      const apiBaseUrl = this.apiBase ? DatabricksConfig.normalizeApiUrl(this.apiBase) : "";
-      if (apiBaseUrl === "") {
-        throw new Error("Normalized API base URL is empty");
-      }
-      
-      // デバッグログ
-      console.log(`Sending request to Databricks API: ${apiBaseUrl}`);
-      console.log('Request body:', JSON.stringify(requestBody, null, 2));
+      // デバッグログ - リクエスト詳細を常に記録
+      console.log(`Databricksリクエスト: エンドポイント=${apiEndpoint}`);
+      console.log(`Databricksリクエスト: モデル=${options.model || this.model}`);
+      console.log(`Databricksリクエスト: メッセージ数=${formattedMessages.length}`);
 
       // タイムアウトコントローラの設定を設定管理モジュールに委譲
       const { timeoutController, timeoutId, combinedSignal } = DatabricksConfig.setupTimeoutController(signal, options);
@@ -208,14 +228,17 @@ class Databricks extends BaseLLM {
         delete (requestBody as any).parallel_tool_calls;
       }
 
+      // 安全な文字列化を使用してリクエストボディを準備
+      const body = safeStringify(requestBody, "{}");
+
       // DatabricksのエンドポイントにOpenAI形式でリクエスト
-      const response = await this.fetch(apiBaseUrl, {
+      const response = await this.fetch(apiEndpoint, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
           "Authorization": `Bearer ${this.apiKey}`,
         },
-        body: JSON.stringify(requestBody),
+        body,
         signal: combinedSignal,
       });
 

@@ -1,25 +1,45 @@
-// このファイルは、コア型の拡張を定義します
-// Databricks特有の機能をサポートするために必要です
+// This file defines extensions to core types
+// Required to support Databricks-specific features
 
-// LLMOptionsの拡張
-import { LLMOptions } from "../index";
+// LLMOptions extension
+import { LLMOptions, CompletionOptions } from "../index";
 
-// Databricks特有のオプションを追加
+// Add Databricks-specific options
 declare module "../index" {
   interface LLMOptions {
     /**
-     * 思考プロセスを常にログに表示するかどうかの設定
-     * trueの場合は常に表示、falseの場合は開発モードのみ表示
+     * Whether to always log thinking process
+     * If true, always log; if false, only log in development mode
      */
     thinkingProcess?: boolean;
     
     /**
-     * 並列ツール呼び出しを許可するかどうか
-     * falseの場合、一度に1つのツール呼び出しのみを処理する
-     * OpenAIスタイルの並列制御に基づく
+     * Whether to allow parallel tool calls
+     * If false, only process one tool call at a time
+     * Based on OpenAI-style parallel control
      */
     parallelToolCalls?: boolean;
   }
 
-  // 必要であればさらに型拡張を追加
+  // Add extension for CompletionOptions
+  interface CompletionOptions {
+    /**
+     * Thinking mode configuration for Claude 3.7 models
+     * Enables and configures thinking process
+     */
+    thinking?: {
+      /**
+       * Thinking mode type - currently only "enabled" is supported
+       */
+      type: string;
+      
+      /**
+       * Token budget for thinking process
+       * Default is half of max_tokens (up to 64000)
+       */
+      budget_tokens?: number;
+    };
+  }
+
+  // Add further type extensions as needed
 }

@@ -85,41 +85,20 @@ export class MessageProcessor {
   }
 
   /**
-   * ChatMessageをOpenAI形式に変換
+   * システムメッセージを抽出して処理する
    * 
    * @param messages 元のメッセージ配列
-   * @param preprocessedMessages 前処理済みのメッセージ配列
-   * @returns OpenAI形式に変換されたメッセージ配列
+   * @returns 処理されたシステムメッセージ内容
    */
-  static convertToOpenAIFormat(messages: ChatMessage[], preprocessedMessages: ChatMessage[]): any[] {
-    // システムメッセージを抽出して処理
-    const systemMessage = this.extractAndEnhanceSystemMessage(preprocessedMessages);
-    
-    // メッセージをOpenAI形式に変換（システムメッセージとthinkingメッセージを除く）
-    const convertedMessages: any[] = preprocessedMessages
-      .filter(m => m.role !== "system" && m.role !== "thinking")
-      .map(message => this.convertMessageToOpenAIFormat(message, preprocessedMessages));
-    
-    // システムメッセージがあれば先頭に追加
-    if (systemMessage) {
-      convertedMessages.unshift(systemMessage);
-    }
-    
-    return convertedMessages;
-  }
-
-  /**
-   * システムメッセージを抽出し、必要に応じて拡張する
-   * Claudeモデルに適した指示を追加
-   * 
-   * @param messages メッセージ配列
-   * @returns 処理されたシステムメッセージまたはnull
-   */
-  private static extractAndEnhanceSystemMessage(messages: ChatMessage[]): any | null {
+  static processSystemMessage(messages: ChatMessage[]): string {
     // システムメッセージを抽出
     const systemMessage = messages.find(m => m.role === "system");
     if (!systemMessage) {
-      return null;
+      // 日本語環境チェック
+      if (this.containsJapaneseContent(messages)) {
+        return "水平思考で考えて！\nステップバイステップで考えて！\n日本語で回答してください。";
+      }
+      return "";
     }
     
     // システムメッセージのコンテンツを抽出
@@ -135,10 +114,23 @@ export class MessageProcessor {
       systemContent += "\n\n日本語で回答してください。";
     }
     
-    return {
-      role: "system",
-      content: systemContent
-    };
+    return systemContent;
+  }
+
+  /**
+   * ChatMessageをOpenAI形式に変換
+   * 
+   * @param messages 元のメッセージ配列
+   * @param preprocessedMessages 前処理済みのメッセージ配列
+   * @returns OpenAI形式に変換されたメッセージ配列
+   */
+  static convertToOpenAIFormat(messages: ChatMessage[], preprocessedMessages: ChatMessage[]): any[] {
+    // メッセージをOpenAI形式に変換（システムメッセージとthinkingメッセージを除く）
+    const convertedMessages: any[] = preprocessedMessages
+      .filter(m => m.role !== "system" && m.role !== "thinking")
+      .map(message => this.convertMessageToOpenAIFormat(message, preprocessedMessages));
+    
+    return convertedMessages;
   }
 
   /**

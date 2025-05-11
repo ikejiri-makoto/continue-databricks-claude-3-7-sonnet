@@ -50,6 +50,7 @@ core/
 - 全体的なフローの制御と実行順序の管理
 - トップレベルのAPI実装（_streamChat、_streamComplete）
 - ストリーミング処理のライフサイクル管理
+- **新機能**: API要求の統一管理のための`getApiEndpoint()`メソッド
 
 **2. `config.ts` - 設定管理**
 - API設定の読み込みと検証
@@ -60,6 +61,7 @@ core/
 - 環境設定の一元管理
 - APIエンドポイントの正規化と検証
 - タイムアウトコントローラの設定と管理
+- **新機能**: 完全なAPIエンドポイントURLを提供する`getFullApiEndpoint()`メソッド
 
 **3. `errors.ts` - エラー処理**
 - Databricks固有のエラー処理
@@ -84,6 +86,10 @@ core/
 - コンテンツデルタの処理
 - リクエストボディのログ出力
 - テキストブロックの終了判定
+- **新機能**: Claude 3.7モデル自動検出と専用設定
+- **改善**: 拡張されたエラーロギングとデバッグ機能
+- **更新**: 共通ユーティリティを活用した型安全なコンテンツ処理
+- **追加**: `thinking`プロパティの適切な型定義と処理
 
 **5. `messages.ts` - メッセージ変換**
 - 標準メッセージフォーマットの変換
@@ -96,6 +102,7 @@ core/
 - メッセージのサニタイズと標準化
 - 日本語コンテンツの検出と特別処理
 - 空のメッセージの処理と検証
+- **新機能**: `processSystemMessage()`メソッドによるシステムメッセージの専用処理
 
 **6. `streaming.ts` - ストリーム処理**
 - ストリーミングレスポンスの処理
@@ -140,6 +147,7 @@ core/
 - 責任分担を明確にするためのモジュールインターフェース型の提供
 - メソッド宣言のための明示的な型定義
 - 戻り値の型安全性向上
+- **追加**: `DatabricksCompletionOptions`インターフェースにおける`thinking`プロパティの明示的な型定義
 
 ## モジュール間の効果的な連携
 
@@ -204,15 +212,18 @@ private async processStreamingRequest(
       messages, MessageProcessor.sanitizeMessages(messages)
     );
     
-    // URL正規化を設定管理モジュールに委譲
-    const apiBaseUrl = this.apiBase ? DatabricksConfig.normalizeApiUrl(this.apiBase) : "";
+    // 統一された方法でAPIエンドポイントを取得
+    const apiEndpoint = this.getApiEndpoint();
+    
+    // デバッグログ - 常にリクエスト詳細を記録
+    console.log(`Databricksリクエスト: エンドポイント=${apiEndpoint}`);
     
     // タイムアウトコントローラ設定を設定管理モジュールに委譲
     const { timeoutController, timeoutId, combinedSignal } = 
       DatabricksConfig.setupTimeoutController(signal, options);
     
     // APIリクエスト実行
-    const response = await this.fetch(apiBaseUrl, {
+    const response = await this.fetch(apiEndpoint, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
@@ -247,32 +258,66 @@ private async processStreamingRequest(
 }
 ```
 
-## 主要な改善点
+## 2025年5月の主要な改善点
 
-### 1. ルーティング問題の解決
+### 1. API URL問題の根本的解決
 
-最も重要な改善点は、すべてのリクエストを正しくDatabricksエンドポイントに送信するようにしたことです。以前の実装では、ストリーミング編集差分などの特定の操作で、誤ってAnthropicのAPIを直接使用しようとしていました。
+Databricks統合の最も重要な改善点は、APIリクエストが常に正しいDatabricksエンドポイントに送信されるよう保証する仕組みを実装したことです。以前は一部のコードパスでAnthropicのAPIエンドポイント（`https://api.anthropic.com/v1/messages`）に誤ってリクエストが送信されていました。
+
+この問題を根本的に解決するため、以下の改善を行いました：
+
+1. **統一されたエンドポイント管理**: `Databricks.ts`クラスに`getApiEndpoint()`メソッドを追加して、すべてのAPIリクエストが同一の仕組みを通してエンドポイントを取得するようにしました。
 
 ```typescript
-// 新しい実装では、すべてのリクエストが正しくDatabricksに送信されます
-const response = await this.fetch(apiBaseUrl, {
-  method: "POST",
-  headers: {
-    "Content-Type": "application/json",
-    "Authorization": `Bearer ${this.apiKey}`,
-  },
-  body: safeStringify({
-    ...args,
-    messages: formattedMessages,
-    system: systemMessage,
-  }),
-  signal: combinedSignal,
-});
+// 統一されたAPIエンドポイント取得メソッド
+private getApiEndpoint(): string {
+  if (!this.apiBase) {
+    throw new Error("API base URL is not defined");
+  }
+  
+  // 設定管理モジュールを使用して常に正規化されたURLを取得
+  const endpoint = DatabricksConfig.getFullApiEndpoint(this.apiBase);
+  
+  if (!endpoint) {
+    throw new Error("Failed to get valid Databricks API endpoint");
+  }
+  
+  return endpoint;
+}
 ```
 
-### 2. メッセージコンテンツ型の処理改善
+2. **拡張ログ出力**: すべてのAPIリクエスト前に詳細なログを出力することで、URLの取得と正規化のプロセスを追跡できるようにしました。
 
-`MessageContent`型が`string`または`MessagePart[]`のユニオン型であることによる型エラーを修正し、`extractContentAsString`関数を使って安全に処理するようにしました。
+```typescript
+// APIエンドポイントへのリクエスト前のログ出力
+console.log(`Databricksリクエスト: エンドポイント=${apiEndpoint}`);
+console.log(`Databricksリクエスト: モデル=${options.model || this.model}`);
+console.log(`Databricksリクエスト: メッセージ数=${formattedMessages.length}`);
+```
+
+3. **URL正規化機能の拡張**: `config.ts`に`getFullApiEndpoint()`メソッドを追加し、URL正規化を担当するロジックを集中化しました。
+
+```typescript
+// 完全なAPIエンドポイントURLを取得する（正規化済み）
+static getFullApiEndpoint(apiBase: string | undefined): string {
+  if (!apiBase) {
+    console.warn('APIベースURLが提供されていません');
+    return '';
+  }
+  
+  // 常に正規化処理を行い、一貫性を確保
+  const normalizedUrl = this.normalizeApiUrl(apiBase);
+  
+  // デバッグのために完全なURLをログ出力
+  console.log(`Databricksエンドポイント: ${normalizedUrl}`);
+  
+  return normalizedUrl;
+}
+```
+
+### 2. メッセージコンテンツ型の厳密な型安全性
+
+`MessageContent`型が`string`または`MessagePart[]`のユニオン型であることに起因する型エラーを解消するため、`extractContentAsString`共通ユーティリティ関数を徹底的に活用するようにしました。これにより型安全性が向上し、コードの堅牢性が高まりました。
 
 ```typescript
 // 変更前 - 型エラーが発生
@@ -291,9 +336,121 @@ if (currentContentAsString !== lastYieldedMessageContent) {
 }
 ```
 
-### 3. JSON処理の強化
+### 3. `thinking`プロパティの型定義と処理の改善
 
-ストリーミング応答内のJSONフラグメントを処理する方法を改善し、`processJsonDelta`関数を使用して部分的なJSONの累積と解析を正しく処理するようにしました。
+Claude 3.7 Sonnetで重要な`thinking`プロパティの型定義が欠けていたことによるコンパイルエラーを解決しました。以下の改善を行いました：
+
+1. **型定義の追加**: `DatabricksCompletionOptions`インターフェースに`thinking`プロパティの明示的な型定義を追加しました：
+
+```typescript
+export interface DatabricksCompletionOptions extends CompletionOptions {
+  /**
+   * リクエストのタイムアウト (秒)
+   * デフォルトは300秒 (5分)
+   */
+  requestTimeout?: number;
+  
+  /**
+   * Claude 3.7モデル用の思考モード設定
+   * 思考プロセスを有効にし、そのための設定を行う
+   */
+  thinking?: {
+    /**
+     * 思考モードのタイプ - 現在は"enabled"のみサポート
+     */
+    type: string;
+    
+    /**
+     * 思考プロセス用のトークン予算
+     * デフォルトはmax_tokensの半分（最大64000）
+     */
+    budget_tokens?: number;
+  };
+}
+```
+
+2. **コア型拡張の追加**: 全体の型一貫性を保つため、`databricks-extensions.d.ts`ファイルも更新しました：
+
+```typescript
+// Add extension for CompletionOptions
+interface CompletionOptions {
+  /**
+   * Thinking mode configuration for Claude 3.7 models
+   * Enables and configures thinking process
+   */
+  thinking?: {
+    /**
+     * Thinking mode type - currently only "enabled" is supported
+     */
+    type: string;
+    
+    /**
+     * Token budget for thinking process
+     * Default is half of max_tokens (up to 64000)
+     */
+    budget_tokens?: number;
+  };
+}
+```
+
+3. **ヘルパー関数の改善**: `convertArgs`メソッドでの`thinking`プロパティの処理を型安全に改善しました：
+
+```typescript
+// Add thinking mode for Claude 3.7 models
+if (isClaude37) {
+  // Safely extract thinking properties with proper fallback values
+  const thinkingType = options.thinking?.type || DEFAULT_THINKING_TYPE;
+  const thinkingBudgetTokens = options.thinking?.budget_tokens || thinkingBudget;
+  
+  finalOptions.thinking = {
+    type: thinkingType,
+    budget_tokens: thinkingBudgetTokens,
+  };
+  
+  // Log thinking configuration
+  console.log(`Setting up Claude 3.7 thinking mode: type=${thinkingType}, budget=${thinkingBudgetTokens}`);
+}
+```
+
+これらの変更により、TypeScriptコンパイルエラーが解消され、`thinking`プロパティの処理が型安全になりました。
+
+### 4. システムメッセージ処理の専用機能
+
+システムメッセージを適切にDatabricksエンドポイントに渡せるよう、専用の処理メソッドを実装しました。これによりClaude 3.7 Sonnetのシステムプロンプト機能を最大限に活用できるようになりました。
+
+```typescript
+// MessageProcessor.tsにシステムメッセージ専用処理を追加
+static processSystemMessage(messages: ChatMessage[]): string {
+  // システムメッセージを抽出
+  const systemMessage = messages.find(m => m.role === "system");
+  if (!systemMessage) {
+    // 日本語環境チェック
+    if (this.containsJapaneseContent(messages)) {
+      return "水平思考で考えて！\nステップバイステップで考えて！\n日本語で回答してください。";
+    }
+    return "";
+  }
+  
+  // システムメッセージのコンテンツを抽出
+  let systemContent = this.extractSystemMessageContent(systemMessage);
+  
+  // 水平思考とステップバイステップの指示を追加（Claude 3.7 Sonnetに適した指示）
+  if (!systemContent.includes("水平思考") && !systemContent.includes("ステップバイステップ")) {
+    systemContent += "\n\n水平思考で考えて！\nステップバイステップで考えて！";
+  }
+  
+  // 日本語処理に関する指示があるかチェック
+  if (this.containsJapaneseContent(messages) && !systemContent.includes("日本語")) {
+    systemContent += "\n\n日本語で回答してください。";
+  }
+  
+  return systemContent;
+}
+```
+
+### 5. JSON処理の強化とツール呼び出し機能の改善
+
+ストリーミング応答内のJSONフラグメントを処理する方法を改善し、`processJsonDelta`共通ユーティリティ関数を使用して部分的なJSONの累積と解析を正しく処理できるようにしました。また、ツール呼び出し引数の修復にも`repairToolArguments`共通ユーティリティを活用しています。
 
 ```typescript
 // JSONフラグメントの処理に共通ユーティリティを使用
@@ -317,88 +474,70 @@ if (result.complete && result.valid) {
 }
 ```
 
-### 4. ツール呼び出し処理の改善
+### 6. Claude 3.7モデル自動検出と専用設定
 
-ツール引数の処理を改善し、`repairToolArguments`関数を使用して破損したJSONを修復できるようにしました。
-
-```typescript
-// 共通ユーティリティを使用してツール引数を修復
-const repairedJson = repairToolArguments(jsonBuffer);
-
-// 検索ツールは特別に処理
-if (isSearchTool(currentToolCall.function.name)) {
-  currentToolCall.function.arguments = processSearchToolArguments(
-    currentToolCall.function.name,
-    currentToolCall.function.arguments || "",
-    repairedJson,
-    messages
-  );
-} else {
-  // 他のツールは修復されたJSONを使用
-  if (isValidJson(repairedJson)) {
-    // 既存の引数があれば、マージを試みる
-    // ...
-  }
-}
-```
-
-### 5. エラー処理と再接続の強化
-
-接続エラーを適切に処理し、指数バックオフとリトライ機能を実装しました。また、再接続時に状態を保持し、ストリーミングセッションを継続できるようにしました。
+モデル名からClaude 3.7を自動検出し、適切な設定を適用する機能を追加しました。特に思考モード（thinking）の設定が確実に行われるようになりました。
 
 ```typescript
-// 型安全なエラー処理
-try {
-  // 処理...
-} catch (error: unknown) {
-  // 共通ユーティリティを使用して型安全にエラーメッセージを取得
-  const errorMessage = getErrorMessage(error);
-  
-  // エラーが一時的なものかどうかを確認
-  if (isTransientError(error)) {
-    // 指数バックオフを使用してリトライ
-    const delay = Math.min(
-      baseDelay * Math.pow(2, retryCount - 1) * (0.5 + Math.random()), 
-      10000
-    );
-    
-    await new Promise(resolve => setTimeout(resolve, delay));
-    // リトライ...
-  } else {
-    // 永続的なエラーを投げる
-    throw error;
-  }
-}
-```
+// Claude 3.7モデルを識別
+const isClaude37 = modelName.includes("claude-3-7");
 
-### 6. 並列ツール呼び出しの制御
-
-Databricksエンドポイントが並列ツール呼び出しをサポートしていないため、`parallel_tool_calls: false`パラメータを追加して、ツール呼び出しが正しく処理されるようにしました。
-
-```typescript
-const args = {
-  // その他のパラメータ...
-  
-  // 並列ツール呼び出しを明示的に無効化
-  parallel_tool_calls: false
-};
-```
-
-### 7. 思考モードのサポート
-
-Claude 3.7 Sonnetの思考モードを適切にサポートするための設定を追加しました。
-
-```typescript
 // Claude 3.7モデル用に思考モードを追加
 if (isClaude37) {
-  return {
-    ...args,
-    thinking: {
-      type: "enabled",
-      budget_tokens: options.thinking?.budget_tokens || 60000,
-    }
+  finalOptions.thinking = {
+    type: "enabled",
+    budget_tokens: options.thinking?.budget_tokens || thinkingBudget,
   };
 }
+
+// Databricksモデルタイプに応じた特別な処理
+if (isClaude37) {
+  console.log("Claude 3.7 Sonnetモデルを検出しました - 特殊設定を適用します");
+  // Claude 3.7モデルは思考処理で特に温度設定1.0を要求する
+  finalOptions.temperature = 1;
+}
+```
+
+### 7. ツール呼び出し並列処理の制御
+
+Databricksエンドポイントが並列ツール呼び出しを適切に処理できるよう、`parallel_tool_calls: false`パラメータを常に設定し、ツール呼び出しが確実に正しく処理されるようになりました。
+
+```typescript
+// ツール関連のパラメータがある場合のみ追加
+if (options.tools && Array.isArray(options.tools) && options.tools.length > 0) {
+  console.log("ツール設定を追加します - ツール数:", options.tools.length);
+  
+  finalOptions.tools = options.tools.map((tool: any) => ({
+    type: "function",
+    function: {
+      name: tool.function.name,
+      description: tool.function.description,
+      parameters: tool.function.parameters,
+    }
+  }));
+
+  // parallel_tool_callsパラメータは無効化（常にfalse）
+  // Databricksエンドポイントが適切に処理できるようにするため
+  finalOptions.parallel_tool_calls = false;
+}
+```
+
+### 8. 共通ユーティリティの活用強化
+
+コード全体で共通ユーティリティの使用を拡充し、`getErrorMessage`、`extractContentAsString`、`safeStringify`などの関数を適切に活用することで、コードの品質と保守性を向上させました。
+
+```typescript
+// エラーメッセージの取得
+import { getErrorMessage } from "../../utils/errors.js";
+console.error("Error processing non-streaming response:", getErrorMessage(error));
+
+// メッセージコンテンツの安全な抽出
+import { extractContentAsString } from "../../utils/messageUtils.js";
+const currentContent = extractContentAsString(currentMessage.content);
+
+// JSONの安全な文字列化
+import { safeStringify } from "../../utils/json.js";
+console.log('Request body (truncated):', safeStringify(truncatedBody, "{}"));
 ```
 
 ## 設定方法
@@ -419,6 +558,33 @@ models:
     model: "databricks-claude-3-7-sonnet"
 ```
 
+重要: APIベースURLは常に`/invocations`で終わる必要があります。URLが正しく設定されているかどうかは、コンソールログを確認して`DatabricksConfig.normalizeApiUrl`と`DatabricksConfig.getFullApiEndpoint`によるURL変換過程を追跡できます。
+
+## Claude 3.7 Sonnetの思考モード設定
+
+Claude 3.7 Sonnetモデルは思考モード（thinking mode）をサポートしており、より詳細で段階的な推論を行うことができます。このモードを有効にするには、以下のように設定します：
+
+```yaml
+models:
+  - name: "databricks-claude"
+    provider: "databricks"
+    apiBase: "https://your-databricks-endpoint.cloud.databricks.com/serving-endpoints/claude-3-7-sonnet/invocations"
+    apiKey: "dapi_your_api_key_here"
+    model: "databricks-claude-3-7-sonnet"
+    completionOptions:
+      thinking:
+        type: "enabled"
+        budget_tokens: 50000  # オプション: トークン予算を指定（デフォルトはmax_tokensの半分）
+```
+
+思考モードは自動的に検出され、Claude 3.7モデルに対しては常に有効化されます。モデル名に「claude-3-7」が含まれている場合、以下の特別な処理が行われます：
+
+1. **思考モードの有効化**: `thinking: { type: "enabled", budget_tokens: <budget> }`がリクエストに追加されます
+2. **温度の固定**: 思考モードの最適な動作のため、温度パラメータが1.0に固定されます
+3. **トークン予算の自動計算**: 明示的に指定されない場合、`max_tokens`の半分（最大64000）が思考プロセスのトークン予算として割り当てられます
+
+この設定により、Claude 3.7 Sonnetがより詳細な思考過程を表示し、より質の高い応答を生成できるようになります。
+
 ## 今後の改善計画
 
 1. **パフォーマンス最適化**: リクエスト処理とレスポンスパースのパフォーマンスをさらに最適化
@@ -426,5 +592,7 @@ models:
 3. **コンテキスト管理の強化**: トークン制限を考慮したコンテキスト管理の改善
 4. **型安全性の向上**: より厳密な型定義とチェックによる安全性の向上
 5. **並列処理の改善**: 複数のリクエスト間でのリソース共有の最適化
+6. **エラーハンドリングの拡充**: より詳細なエラー分析と自動回復機能の強化
+7. **ドキュメント整備**: ユーザー向けドキュメントとコード内コメントの充実
 
-このモジュール化されたアーキテクチャにより、拡張機能の安定性と保守性が大幅に向上し、将来のAPI変更にも容易に対応できるようになりました。
+このモジュール化されたアーキテクチャにより、拡張機能の安定性と保守性が大幅に向上し、将来のAPI変更にも容易に対応できるようになりました。2025年5月の改善で、特にURLルーティングの問題が解消され、型安全性と共通ユーティリティの活用が大きく進みました。

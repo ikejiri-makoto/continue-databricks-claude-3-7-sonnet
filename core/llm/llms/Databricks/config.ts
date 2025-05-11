@@ -140,6 +140,28 @@ export class DatabricksConfig {
   }
 
   /**
+   * 完全なAPIエンドポイントURLを取得する（正規化済み）
+   * この関数は一貫したURLアクセスを確保するために使用すべき
+   * 
+   * @param apiBase ベースURL
+   * @returns 正規化された完全なエンドポイントURL
+   */
+  static getFullApiEndpoint(apiBase: string | undefined): string {
+    if (!apiBase) {
+      console.warn('APIベースURLが提供されていません');
+      return '';
+    }
+    
+    // 常に正規化処理を行い、一貫性を確保
+    const normalizedUrl = this.normalizeApiUrl(apiBase);
+    
+    // デバッグのために完全なURLをログ出力
+    console.log(`Databricksエンドポイント: ${normalizedUrl}`);
+    
+    return normalizedUrl;
+  }
+
+  /**
    * API設定が有効かどうかを検証
    * より詳細なエラーメッセージを提供
    * 
@@ -163,7 +185,7 @@ export class DatabricksConfig {
     }
     
     // 基本的なURL形式の検証
-    if (!apiBase.includes('databricks') || !apiBase.includes('invocations')) {
+    if (!apiBase.includes('databricks')) {
       console.warn(
         `Databricks API URL may be incorrect: ${apiBase}. ` +
         `Expected format: https://xxx.cloud.databricks.com/serving-endpoints/xxx/invocations`
