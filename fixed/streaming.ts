@@ -1,5 +1,5 @@
 import { ChatMessage, ThinkingChatMessage } from "../../../index.js";
-import { ThinkingChunk, StreamingChunk, ResponseDelta, ToolCall, PersistentStreamState } from "./types/types.js";
+import { ThinkingChunk, StreamingChunk, ResponseDelta, ToolCall, PersistentStreamState, ToolCallResult } from "./types/types.js";
 import "./types/extension.d.ts";
 
 // 共通ユーティリティのインポート
@@ -11,12 +11,11 @@ import {
   extractValidJson, 
   processJsonDelta, 
   processToolArgumentsDelta, 
-  repairDuplicatedJsonPattern,
-  tryFixBrokenBooleanJson 
+  repairDuplicatedJsonPattern 
 } from "../../utils/json.js";
-import { extractQueryContext, extractContentAsString } from "../../utils/messageUtils.js";
+import { extractQueryContext } from "../../utils/messageUtils.js";
 import { processContentDelta, JsonBufferHelpers } from "../../utils/streamProcessing.js";
-import { isSearchTool, processSearchToolArguments, repairToolArguments } from "../../utils/toolUtils.js";
+import { isSearchTool, processSearchToolArguments } from "../../utils/toolUtils.js";
 
 // 独自モジュールをインポート
 import { ToolCallProcessor } from "./toolcalls.js";
@@ -33,38 +32,10 @@ interface QueryArgs {
   [key: string]: any;
 }
 
-// 共通の結果型を定義
-interface ToolCallResult {
-  updatedToolCalls: ToolCall[];
-  updatedCurrentToolCall: ToolCall | null;
-  updatedCurrentToolCallIndex: number | null;
-  updatedJsonBuffer: string;
-  updatedIsBufferingJson: boolean;
-  shouldYieldMessage: boolean;
-}
-
-// 再接続結果の型を定義
-interface ReconnectionResult {
-  restoredMessage: ChatMessage;
-  restoredToolCalls: ToolCall[];
-  restoredCurrentToolCall: ToolCall | null;
-  restoredCurrentToolCallIndex: number | null;
-  restoredJsonBuffer: string;
-  restoredIsBufferingJson: boolean;
-}
-
 /**
  * ストリーミングレスポンスの処理を担当するクラス
  * Databricks上のClaude 3.7 Sonnetからのストリーミングレスポンスを処理
  */
-// ストリーミングレスポンス処理の結果型
-interface StreamingResponseResult {
-  success: boolean;
-  messages: ChatMessage[];
-  error?: Error;
-  state?: any;
-}
-
 export class StreamingProcessor {
   // ストリーミング状態を保持する静的変数
   private static persistentState: PersistentStreamState = {
@@ -135,16 +106,7 @@ export class StreamingProcessor {
     isBufferingJson: boolean,
     messages: ChatMessage[],
     isReconnect: boolean = false
-  ): {
-    updatedMessage: ChatMessage;
-    updatedToolCalls: ToolCall[];
-    updatedCurrentToolCall: ToolCall | null;
-    updatedCurrentToolCallIndex: number | null;
-    updatedJsonBuffer: string;
-    updatedIsBufferingJson: boolean;
-    thinkingMessage?: ChatMessage;
-    shouldYieldMessage: boolean;
-  } {
+  ) {
     // 再接続時は永続的な状態を適用
     if (isReconnect) {
       const state = this.getPersistentState();
@@ -251,7 +213,7 @@ export class StreamingProcessor {
     newContent: string,
     currentMessage: ChatMessage,
     contentBuffer: string
-  ): { updatedMessage: ChatMessage; shouldYield: boolean } {
+  ) {
     const combinedContent = contentBuffer + newContent;
     
     // 文や段落の区切りを検出
@@ -383,7 +345,7 @@ export class StreamingProcessor {
     messages: ChatMessage[]
   ): ToolCallResult {
     // デフォルトの戻り値を初期化
-    const result: ToolCallResult = {
+    const result = {
       updatedToolCalls: [...toolCalls],
       updatedCurrentToolCall: currentToolCall,
       updatedCurrentToolCallIndex: currentToolCallIndex,
@@ -499,12 +461,16 @@ export class StreamingProcessor {
               return result;
             }
           } else {
-            // 共通ユーティリティのrepairToolArgumentsを使用して引数を修復
-            let repairedArguments = repairToolArguments(toolCallDelta.function.arguments);
-            
-            // エラーメッセージのデバッグログ（実際のエラーを伝えずにデバッグに役立てる）
-            if (repairedArguments !== toolCallDelta.function.arguments) {
-              console.log(`ツール引数を修復しました: ${toolCallDelta.function.arguments} -> ${repairedArguments}`);
+            // 二重化パターンをチェック
+            let repairedArguments = toolCallDelta.function.arguments;
+            const repeatedPattern = /\{\s*\"\w+\"\s*:\s*[^{]*\{\s*\"\w+\"\s*:/;
+            if (repeatedPattern.test(repairedArguments)) {
+              repairedArguments = repairDuplicatedJsonPattern(repairedArguments);
+              
+              // エラーメッセージのデバッグログ（実際のエラーを伝えずにデバッグに役立てる）
+              if (repairedArguments !== toolCallDelta.function.arguments) {
+                console.log(`ツール引数を修復しました: ${toolCallDelta.function.arguments} -> ${repairedArguments}`);
+              }
             }
             
             // 標準的な引数更新処理
@@ -966,53 +932,90 @@ export class StreamingProcessor {
 
     console.log(`最終JSONバッファの処理: ${jsonBuffer}`);
     
+    // 有効なJSONの抽出を試みる
+    const validJson = extractValidJson(jsonBuffer);
+    
     try {
-      // ツール引数を共通ユーティリティを使用して修復
-      const repairedJson = repairToolArguments(jsonBuffer);
-      
-      // 検索ツールの場合は専用の処理を使用
-      if (isSearchTool(currentToolCall.function.name)) {
-        currentToolCall.function.arguments = processSearchToolArguments(
-          currentToolCall.function.name,
-          currentToolCall.function.arguments || "",
-          repairedJson,
-          messages
-        );
-      } else {
-        // 修復されたJSONが完全であればそのまま使用
-        if (isValidJson(repairedJson)) {
-          // 既存の引数があればマージを試みる
-          if (currentToolCall.function.arguments && currentToolCall.function.arguments.trim() !== "" && currentToolCall.function.arguments.trim() !== "{}") {
-            try {
-              // 既存引数と新しい引数を両方パースしてマージ
-              const existingArgs = safeJsonParse(currentToolCall.function.arguments, {});
-              const newArgs = safeJsonParse(repairedJson, {});
-              const mergedArgs = { ...existingArgs, ...newArgs };
-              currentToolCall.function.arguments = JSON.stringify(mergedArgs);
-            } catch (e) {
-              // マージに失敗した場合は修復されたJSONを使用
-              currentToolCall.function.arguments = repairedJson;
-            }
-          } else {
-            // 既存の引数がない場合は修復されたJSONを使用
-            currentToolCall.function.arguments = repairedJson;
-          }
+      // 有効なJSONが抽出できた場合
+      if (validJson) {
+        const parsedJson = safeJsonParse(validJson, {});
+        
+        // 検索ツールの場合は専用の処理
+        if (isSearchTool(currentToolCall.function.name)) {
+          currentToolCall.function.arguments = processSearchToolArguments(
+            currentToolCall.function.name,
+            currentToolCall.function.arguments || "",
+            JSON.stringify(parsedJson),
+            messages
+          );
         } else {
-          // 修復しても有効なJSONにならない場合
+          // 既存の引数とマージ
+          try {
+            if (currentToolCall.function.arguments) {
+              const existingArgs = safeJsonParse(currentToolCall.function.arguments, {});
+              const mergedArgs = { ...existingArgs, ...parsedJson };
+              currentToolCall.function.arguments = JSON.stringify(mergedArgs);
+            } else {
+              currentToolCall.function.arguments = JSON.stringify(parsedJson);
+            }
+          } catch (e) {
+            currentToolCall.function.arguments = JSON.stringify(parsedJson);
+          }
+        }
+      } else {
+        // 有効なJSONがない場合、破損したブール値を修復してみる
+        const fixedJson = tryFixBrokenBooleanJson(jsonBuffer);
+        if (fixedJson !== jsonBuffer) {
+          const validFixedJson = extractValidJson(fixedJson);
+          if (validFixedJson) {
+            try {
+              const parsedJson = JSON.parse(validFixedJson);
+              
+              // 検索ツールの場合は専用の処理
+              if (isSearchTool(currentToolCall.function.name)) {
+                currentToolCall.function.arguments = processSearchToolArguments(
+                  currentToolCall.function.name,
+                  currentToolCall.function.arguments || "",
+                  JSON.stringify(parsedJson),
+                  messages
+                );
+              } else {
+                // その他の処理
+                if (currentToolCall.function.arguments) {
+                  const existingArgs = safeJsonParse(currentToolCall.function.arguments, {});
+                  const mergedArgs = { ...existingArgs, ...parsedJson };
+                  currentToolCall.function.arguments = JSON.stringify(mergedArgs);
+                } else {
+                  currentToolCall.function.arguments = JSON.stringify(parsedJson);
+                }
+              }
+              
+              return currentToolCall;
+            } catch (e) {
+              console.warn(`修復されたJSON解析エラー: ${e}`);
+            }
+          }
+        }
+        
+        // 抽出できなかった場合は、そのままの値を使用
+        if (isSearchTool(currentToolCall.function.name)) {
+          currentToolCall.function.arguments = processSearchToolArguments(
+            currentToolCall.function.name,
+            currentToolCall.function.arguments || "",
+            jsonBuffer,
+            messages
+          );
+        } else {
+          // その他のツールは既存の引数に追加
           if (currentToolCall.function.arguments) {
-            currentToolCall.function.arguments += jsonBuffer; // 既存の引数に追加
+            currentToolCall.function.arguments += jsonBuffer;
           } else {
-            currentToolCall.function.arguments = jsonBuffer; // そのまま使用
+            currentToolCall.function.arguments = jsonBuffer;
           }
         }
       }
     } catch (e) {
       console.warn(`最終バッファ処理エラー: ${getErrorMessage(e)}`);
-      
-      // エラーが発生した場合は元のバッファをそのまま使用
-      if (!currentToolCall.function.arguments) {
-        currentToolCall.function.arguments = jsonBuffer;
-      }
     }
 
     // 永続的な状態をリセット
@@ -1054,7 +1057,7 @@ export class StreamingProcessor {
     toolCalls: ToolCall[],
     currentToolCall: ToolCall | null,
     currentToolCallIndex: number | null
-  ): ReconnectionResult {
+  ) {
     // 永続的な状態を取得
     const state = this.getPersistentState();
     
@@ -1092,187 +1095,42 @@ export class StreamingProcessor {
       restoredIsBufferingJson: state.isBufferingJson
     };
   }
+}
 
-  // 共通ユーティリティのtryFixBrokenBooleanJsonを使用
-
-  /**
-   * ストリーミングレスポンスの処理
-   * @param response API応答
-   * @param messages 元のメッセージ配列
-   * @param retryCount 現在のリトライカウント
-   * @param alwaysLogThinking 思考プロセスを常にログ出力するかどうか
-   * @returns 処理結果
-   */
-  static async processStreamingResponse(
-    response: Response, 
-    messages: ChatMessage[], 
-    retryCount: number,
-    alwaysLogThinking: boolean = false
-  ): Promise<StreamingResponseResult> {
-    // 初期状態の設定
-    let currentMessage: ChatMessage = { role: "assistant", content: "" };
-    let toolCalls: ToolCall[] = [];
-    let currentToolCall: ToolCall | null = null;
-    let currentToolCallIndex: number | null = null;
-    let jsonBuffer = "";
-    let isBufferingJson = false;
-    let isReconnect = retryCount > 0;
-    
-    // 再接続時の状態復元
-    if (isReconnect) {
-      console.log(`再接続を検出: リトライカウント = ${retryCount}`);
-      const reconnectResult = this.handleReconnection(
-        currentMessage, toolCalls, currentToolCall, currentToolCallIndex
-      );
-      
-      // 状態を復元
-      currentMessage = reconnectResult.restoredMessage;
-      toolCalls = reconnectResult.restoredToolCalls;
-      currentToolCall = reconnectResult.restoredCurrentToolCall;
-      currentToolCallIndex = reconnectResult.restoredCurrentToolCallIndex;
-      jsonBuffer = reconnectResult.restoredJsonBuffer;
-      isBufferingJson = reconnectResult.restoredIsBufferingJson;
-    }
-    
-    const responseMessages: ChatMessage[] = [];
-    
-    try {
-      // レスポンスをJSONとして解析
-      const reader = response.body?.getReader();
-      if (!reader) {
-        throw new Error("レスポンスボディのリーダーを取得できませんでした");
-      }
-      
-      const decoder = new TextDecoder();
-      let done = false;
-      let lastYieldedMessageContent = "";
-      
-      // ストリーミングレスポンスを逐次処理
-      while (!done) {
-        const { value, done: doneReading } = await reader.read();
-        done = doneReading;
-        
-        if (done) break;
-        
-        const chunk = decoder.decode(value, { stream: true });
-        
-        // データ行を処理
-        const lines = chunk.split('\n');
-        for (const line of lines) {
-          // 空行はスキップ
-          if (!line.trim()) continue;
-          
-          // データプレフィックスを取り除く
-          const dataPrefix = 'data: ';
-          if (!line.startsWith(dataPrefix)) continue;
-          
-          const jsonData = line.substring(dataPrefix.length);
-          
-          try {
-            // JSONをパース
-            const data = JSON.parse(jsonData);
-            
-            // チャンクを処理
-            const result = this.processChunk(
-              data,
-              currentMessage,
-              toolCalls,
-              currentToolCall,
-              currentToolCallIndex,
-              jsonBuffer,
-              isBufferingJson,
-              messages,
-              isReconnect
-            );
-            
-            // 結果を更新
-            currentMessage = result.updatedMessage;
-            toolCalls = result.updatedToolCalls;
-            currentToolCall = result.updatedCurrentToolCall;
-            currentToolCallIndex = result.updatedCurrentToolCallIndex;
-            jsonBuffer = result.updatedJsonBuffer;
-            isBufferingJson = result.updatedIsBufferingJson;
-            isReconnect = false; // 最初のチャンク処理後は再接続フラグをリセット
-            
-            // 思考メッセージをyield
-            if (result.thinkingMessage) {
-              responseMessages.push(result.thinkingMessage);
-            }
-            
-            // メッセージをyield
-            if (result.shouldYieldMessage) {
-              // extractContentAsStringを使用して現在のメッセージ内容を文字列として取得
-              const currentContentAsString = extractContentAsString(currentMessage.content);
-              
-              if (currentContentAsString !== lastYieldedMessageContent) {
-                // ツール呼び出し情報を含む新しいメッセージをyield
-                const messageToYield: ChatMessage = {
-                  role: "assistant",
-                  content: currentMessage.content,
-                  toolCalls: toolCalls.length > 0 ? toolCalls : undefined
-                };
-                
-                responseMessages.push(messageToYield);
-                lastYieldedMessageContent = currentContentAsString;
-              }
-            }
-          } catch (err) {
-            console.warn(`チャンクの処理中にエラーが発生しました: ${getErrorMessage(err)}`);
-            console.warn(`問題のあるJSON: ${jsonData}`);
-            // エラーがあっても処理を継続
-          }
-        }
-      }
-      
-      // 最終的なJSONバッファを処理
-      if (isBufferingJson && jsonBuffer && currentToolCall) {
-        const finalizedToolCall = this.finalizeJsonBuffer(
-          jsonBuffer,
-          isBufferingJson,
-          currentToolCall,
-          messages
-        );
-        
-        if (finalizedToolCall && currentToolCallIndex !== null) {
-          toolCalls[currentToolCallIndex] = finalizedToolCall;
-        }
-      }
-      
-      // 検索ツールの引数を確認
-      toolCalls = this.ensureSearchToolArguments(toolCalls, messages);
-      
-      // 最終結果をyield
-      if (toolCalls.length > 0 || currentMessage.content !== lastYieldedMessageContent) {
-        const finalMessage: ChatMessage = {
-          role: "assistant",
-          content: currentMessage.content,
-          toolCalls: toolCalls.length > 0 ? toolCalls : undefined
-        };
-        
-        responseMessages.push(finalMessage);
-      }
-      
-      // 永続的な状態をリセット
-      this.resetPersistentState();
-      
-      return { success: true, messages: responseMessages };
-    } catch (error) {
-      // エラーが発生した場合は状態を保持して返す
-      console.error(`ストリーミング処理エラー: ${getErrorMessage(error)}`);
-      
-      return { 
-        success: false, 
-        messages: [], 
-        error: error instanceof Error ? error : new Error(getErrorMessage(error)),
-        state: {
-          message: currentMessage,
-          toolCalls,
-          currentToolCall,
-          currentToolCallIndex,
-          jsonBuffer,
-          isBufferingJson
-        }
-      };
-    }
+/**
+ * 破損したブール値JSONを修復する試み
+ * 典型的な破損パターン("rue"→"true", "als"→"false")を検出して修復
+ * @param text 修復対象のテキスト
+ * @returns 修復されたテキスト（修復できなかった場合は元のテキスト）
+ */
+function tryFixBrokenBooleanJson(text: string): string {
+  if (!text || typeof text !== 'string') {
+    return text;
   }
+  
+  let result = text;
+
+  // "rue" -> "true" の修復 (trueが切断された場合)
+  result = result.replace(/([{,]\s*"\w+"\s*:)\s*rue([,}])/g, '$1 true$2');
+  
+  // "als" または "alse" -> "false" の修復 (falseが切断された場合)
+  result = result.replace(/([{,]\s*"\w+"\s*:)\s*als([,}])/g, '$1 false$2');
+  result = result.replace(/([{,]\s*"\w+"\s*:)\s*alse([,}])/g, '$1 false$2');
+  
+  // "rue}" -> "true}" の修復 (特定のケース)
+  if (result.includes('rue}')) {
+    result = result.replace(/rue}/g, 'true}');
+  }
+  
+  // "als}" -> "false}" の修復 (特定のケース)
+  if (result.includes('als}')) {
+    result = result.replace(/als}/g, 'false}');
+  }
+  
+  // "alse}" -> "false}" の修復 (特定のケース)
+  if (result.includes('alse}')) {
+    result = result.replace(/alse}/g, 'false}');
+  }
+  
+  return result;
 }

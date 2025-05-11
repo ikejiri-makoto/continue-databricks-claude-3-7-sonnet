@@ -17,7 +17,8 @@ import {
   extractValidJson, 
   repairDuplicatedJsonPattern, 
   isValidJson, 
-  processToolArgumentsDelta 
+  processToolArgumentsDelta,
+  processJsonDelta 
 } from "../../utils/json.js";
 import { getErrorMessage } from "../../utils/errors.js";
 
@@ -251,24 +252,55 @@ export class ToolCallProcessor implements ToolCallProcessorInterface {
     }
     
     try {
+      // Databricks Claude 3.7 Sonnetの特定パターンを手動で修復
+      let processedArgs = args;
+      
+      // 特殊パターン1: {"dirPath":} -> {"dirPath":"/"}
+      if (processedArgs.includes('"dirPath":}')) {
+        processedArgs = processedArgs.replace(/"dirPath":}/g, '"dirPath":"/"}');
+        console.log(`dirPath特殊パターン修復: ${processedArgs}`);
+        return processedArgs;
+      }
+      
+      // 特殊パターン2: {"filepath"} -> {"filepath":""}
+      if (processedArgs.includes('"filepath"}')) {
+        processedArgs = processedArgs.replace(/"filepath"}/g, '"filepath":""}');
+        console.log(`filepath特殊パターン修復: ${processedArgs}`);
+        return processedArgs;
+      }
+      
+      // 特殊パターン3: {"filepath} -> {"filepath":""}
+      if (processedArgs.match(/\{\s*"filepath(?!":)/)) {
+        processedArgs = processedArgs.replace(/\{\s*"filepath\s*\}/g, '{"filepath":""}');
+        processedArgs = processedArgs.replace(/\{\s*"filepath\s*(?!":)/g, '{"filepath":"');
+        console.log(`filepath特殊パターンエラー修復: ${processedArgs}`);
+        return processedArgs;
+      }
+      
+      // 特殊パターン4: {"dirPath} -> {"dirPath":"/"}
+      if (processedArgs.match(/\{\s*"dirPath(?!":)/)) {
+        processedArgs = processedArgs.replace(/\{\s*"dirPath\s*\}/g, '{"dirPath":"/"}');
+        processedArgs = processedArgs.replace(/\{\s*"dirPath\s*(?!":)/g, '{"dirPath":"/"');
+        console.log(`dirPath特殊パターンエラー修復: ${processedArgs}`);
+        return processedArgs;
+      }
+      
       // 共通ユーティリティのrepairToolArgumentsを使用
-      // 重複コードを省き、共通ユーティリティの活用を強化
-      const repaired = repairToolArguments(args);
+      const repaired = repairToolArguments(processedArgs);
       
       // 修復に成功した場合は結果を返す
-      if (repaired && repaired !== args) {
+      if (repaired && repaired !== processedArgs) {
         return repaired;
       }
       
       // Databricks固有の追加的な修復処理
-      // 共通ユーティリティで処理されなかった場合の特殊処理
-      const repairedArgs = repairDuplicatedJsonPattern(args);
-      if (repairedArgs !== args) {
+      const repairedArgs = repairDuplicatedJsonPattern(processedArgs);
+      if (repairedArgs !== processedArgs) {
         return repairedArgs;
       }
       
       // 最終的に、上記の処理で修復されなかった場合は元の引数を返す
-      return args;
+      return processedArgs;
     } catch (e) {
       // エラーが発生した場合は元の引数を返す
       console.warn(`引数の修復に失敗しました: ${getErrorMessage(e)}`);
@@ -303,40 +335,85 @@ export class ToolCallProcessor implements ToolCallProcessorInterface {
     }
     
     try {
-      // ツール引数の修復メソッドを活用して新しいフラグメントを修復
-      const repairedNewFragment = this.repairToolArguments(newJsonFragment);
+      // Databricksで見られる特定の異常パターンを修復
+      let processedFragment = newJsonFragment;
       
-      // 共通ユーティリティのprocessToolArgumentsDeltaを使用してデルタベースの処理を行う
-      const result = processToolArgumentsDelta(jsonBuffer, repairedNewFragment);
-      
-      // 完全なJSONになり、検索ツールの場合は特別処理を行う
-      if (result.isComplete && result.processedArgs && toolName && isSearchTool(toolName)) {
-        // 検索ツールのクエリが空の場合はデフォルト値を設定
-        if (result.processedArgs === "{}" || !result.processedArgs) {
-          return {
-            processedArgs: JSON.stringify({ query: "" }),
-            isComplete: true
-          };
-        }
-        
-        try {
-          // 型安全なパースで引数を処理し、queryプロパティが存在することを確認
-          const args = safeJsonParse<{ query?: string }>(result.processedArgs, { query: "" });
-          if (!args.query) {
-            args.query = "";
-          }
-          
-          return {
-            processedArgs: JSON.stringify(args),
-            isComplete: true
-          };
-        } catch (e) {
-          // パースエラーの場合は元の結果を返す
-          console.warn(`検索ツール引数処理エラー: ${getErrorMessage(e)}`);
-        }
+      // 特殊パターン1: {"dirPath":} -> {"dirPath":"/"}
+      if (processedFragment.includes('"dirPath":}')) {
+        processedFragment = processedFragment.replace(/"dirPath":}/g, '"dirPath":"/"}');
+        console.log(`dirPath特殊パターン修復: ${processedFragment}`);
       }
       
-      return result;
+      // 特殊パターン2: {"filepath"} -> {"filepath":""}
+      if (processedFragment.includes('"filepath"}')) {
+        processedFragment = processedFragment.replace(/"filepath"}/g, '"filepath":""}');
+        console.log(`filepath特殊パターン修復: ${processedFragment}`);
+      }
+      
+      // 共通ユーティリティを使用して他の一般的な修復を適用
+      const repairedNewFragment = this.repairToolArguments(processedFragment);
+      
+      // バッファがJSONとして有効かチェック
+      const isBufferValid = isValidJson(jsonBuffer);
+      // フラグメントがJSONとして有効かチェック
+      const isFragmentValid = isValidJson(repairedNewFragment);
+      
+      // 共通ユーティリティのprocessJsonDeltaを使用してデルタベースの処理を行う
+      const jsonResult = processJsonDelta(jsonBuffer, repairedNewFragment);
+      
+      // フラグメント自体が有効なJSONで、バッファが空な場合は即座に完了
+      if (isFragmentValid && (!jsonBuffer || jsonBuffer.trim() === '')) {
+        console.log(`フラグメント自体が有効なJSON: ${repairedNewFragment}`);
+        return {
+          processedArgs: repairedNewFragment,
+          isComplete: true
+        };
+      }
+      
+      // JSON結合結果の処理
+      if (jsonResult.complete && jsonResult.valid) {
+        // 完全な有効JSONになった場合
+        const validJson = extractValidJson(jsonResult.combined) || jsonResult.combined;
+        
+        // 検索ツールの場合は特別処理
+        if (toolName && isSearchTool(toolName)) {
+          // 検索ツールのクエリが空の場合はデフォルト値を設定
+          if (validJson === "{}" || !validJson) {
+            return {
+              processedArgs: JSON.stringify({ query: "" }),
+              isComplete: true
+            };
+          }
+          
+          try {
+            // 型安全なパースで引数を処理し、queryプロパティが存在することを確認
+            const args = safeJsonParse<{ query?: string }>(validJson, { query: "" });
+            if (!args.query) {
+              args.query = "";
+            }
+            
+            return {
+              processedArgs: JSON.stringify(args),
+              isComplete: true
+            };
+          } catch (e) {
+            // パースエラーの場合は元の結果を返す
+            console.warn(`検索ツール引数処理エラー: ${getErrorMessage(e)}`);
+          }
+        }
+        
+        // 完成した有効JSONを返す
+        return {
+          processedArgs: validJson,
+          isComplete: true
+        };
+      }
+      
+      // まだ完成していない場合は結合されたバッファを返す
+      return {
+        processedArgs: jsonResult.combined,
+        isComplete: false
+      };
     } catch (e) {
       // 例外が発生した場合は安全なフォールバック値を返す
       console.error(`ツール引数デルタ処理中のエラー: ${getErrorMessage(e)}`);

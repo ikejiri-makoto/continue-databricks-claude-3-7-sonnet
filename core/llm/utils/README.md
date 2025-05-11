@@ -49,9 +49,10 @@ JSON processing utilities that:
 - `processJsonFragment(fragment: string): any | null` - Processes partial JSON fragments in streams
 - `deepMergeJson(target: any, source: any): any` - Recursively merges JSON objects with proper handling
 - `extractJsonAndRemainder(text: string): [any, string] | null` - Extracts JSON and returns remaining content
-- `processJsonDelta(currentJson: string, deltaJson: string): {combined: string; complete: boolean; valid: boolean}` - Processes JSON fragments using delta-based approach
+- `processJsonDelta(currentJson: string, deltaJson: string): {combined: string; complete: boolean; valid: boolean}` - Processes JSON fragments using delta-based approach for incremental JSON accumulation - CRITICAL for handling streaming tool calls
 - `repairDuplicatedJsonPattern(jsonStr: string): string` - Detects and repairs duplicated JSON patterns
 - `processToolArgumentsDelta(currentArgs: string, deltaArgs: string): {processedArgs: string; isComplete: boolean}` - Processes tool arguments using delta-based approach for streaming contexts
+- `tryFixBrokenBooleanJson(text: string): string` - Repairs broken boolean values in JSON (e.g., "rue" -> "true")
 
 ### `messageUtils.ts`
 Message processing utilities that:
@@ -62,7 +63,7 @@ Message processing utilities that:
 - Validate tool result blocks in messages
 
 **Key functions:**
-- `extractContentAsString(content: any): string` - Safely extracts content as string from various formats
+- `extractContentAsString(content: any): string` - Safely extracts content as string from various formats (MessageContent type)
 - `extractQueryContext(messages: any[]): string` - Extracts the main query context from a conversation
 - `sanitizeMessages(messages: any[]): any[]` - Cleans messages for API consumption
 - `hasToolResultBlocksAtBeginning(message: ChatMessage): boolean` - Checks if message starts with tool result blocks
@@ -187,6 +188,67 @@ function processDeltaJsonFragment(currentJson: string, deltaJson: string) {
 }
 ```
 
+### Handling Complex Message Content Types
+
+```typescript
+import { extractContentAsString } from "./messageUtils";
+
+// When you need to ensure content is a string, regardless of its original type
+function processMessageContent(message: ChatMessage): string {
+  // Safely extract the content as a string, even if it's an array of MessagePart objects
+  const contentAsString = extractContentAsString(message.content);
+  
+  // Now contentAsString is guaranteed to be a string you can work with
+  return contentAsString;
+}
+
+// When comparing content from different message objects
+function hasContentChanged(oldMessage: ChatMessage, newMessage: ChatMessage): boolean {
+  const oldContent = extractContentAsString(oldMessage.content);
+  const newContent = extractContentAsString(newMessage.content);
+  
+  return oldContent !== newContent;
+}
+```
+
+### Delta-based JSON Processing for Tool Calls 
+
+```typescript
+// IMPORTANT: Always remember to import processJsonDelta for JSON delta processing
+import { processJsonDelta } from "../../utils/json.js";
+
+// Process tool arguments in a streaming context
+function processToolArguments(jsonBuffer: string, newFragment: string): { 
+  processed: string, 
+  complete: boolean 
+} {
+  try {
+    // Use processJsonDelta to incrementally build JSON
+    const result = processJsonDelta(jsonBuffer, newFragment);
+    
+    if (result.complete && result.valid) {
+      // We have a complete valid JSON
+      return {
+        processed: result.combined,
+        complete: true
+      };
+    } else {
+      // Continue accumulating
+      return {
+        processed: result.combined,
+        complete: false
+      };
+    }
+  } catch (error) {
+    console.error(`Error processing JSON delta: ${error}`);
+    return {
+      processed: jsonBuffer,
+      complete: false
+    };
+  }
+}
+```
+
 ### Using Stream Processing Utilities for Content Updates
 
 ```typescript
@@ -289,7 +351,7 @@ async function withRetry<T>(
 ### Tool Call Processing and Repair
 
 ```typescript
-import { safeJsonParse, extractValidJson, repairDuplicatedJsonPattern } from "./json";
+import { safeJsonParse, extractValidJson } from "./json";
 import { isSearchTool, processSearchToolArguments, formatToolResultsContent, repairToolArguments } from "./toolUtils";
 
 // Process and repair tool arguments
@@ -435,6 +497,30 @@ This approach allows provider implementations to focus on their unique requireme
 
 ## Recent Improvements
 
+### Message Content Type Handling (May 2025)
+
+Added better support for handling complex message content types:
+
+- Enhanced `extractContentAsString` to properly handle both `string` and `MessagePart[]` content types
+- Improved type safety by ensuring proper conversion between message content types
+- Added examples and documentation for correctly handling MessageContent type variations
+- Resolved common type compatibility issues when comparing or manipulating message content
+
+```typescript
+// Before - causes TypeScript error
+lastYieldedMessageContent = currentMessage.content; // Error: Type 'MessageContent' is not assignable to type 'string'
+
+// After - safely extracts content as string
+import { extractContentAsString } from "../../utils/messageUtils.js";
+lastYieldedMessageContent = extractContentAsString(currentMessage.content);
+
+// When comparing message content:
+const currentContentAsString = extractContentAsString(currentMessage.content);
+if (currentContentAsString !== lastYieldedMessageContent) {
+  // Now type-safe comparison
+}
+```
+
 ### Centralized Tool Arguments Repair (May 2025)
 
 The `repairToolArguments` function has been added to the common utilities in `toolUtils.ts` to provide a centralized, robust solution for repairing malformed JSON in tool arguments. This function:
@@ -454,6 +540,97 @@ import { repairToolArguments } from "../../utils/toolUtils.js";
 function processToolArguments(args: string): string {
   // Use the common utility for repairing tool arguments
   return repairToolArguments(args);
+}
+```
+
+### JSON Delta Processing Centralization (May 2025)
+
+The `processJsonDelta` function has been moved to the common utilities in `json.ts` to provide a standardized approach for handling incremental JSON updates in streaming contexts. This function is especially critical for handling streaming tool calls from providers like Databricks Claude 3.7 Sonnet. Always make sure to import this function when working with JSON in streaming contexts:
+
+```typescript
+// IMPORTANT: Always import processJsonDelta when working with streaming JSON
+import { processJsonDelta } from "../../utils/json.js";
+
+// Example usage in a streaming context
+function handleStreamingJson(currentJson: string, deltaJson: string) {
+  const result = processJsonDelta(currentJson, deltaJson);
+  if (result.complete && result.valid) {
+    // Process complete JSON
+    return {
+      jsonBuffer: "",
+      isComplete: true,
+      parsedJson: JSON.parse(result.combined)
+    };
+  } else {
+    // Continue accumulating
+    return {
+      jsonBuffer: result.combined,
+      isComplete: false,
+      parsedJson: null
+    };
+  }
+}
+```
+
+### Boolean Value Repair in JSON (May 2025)
+
+Added a specialized function `tryFixBrokenBooleanJson` to repair common JSON boolean value corruption issues:
+
+```typescript
+// New function to fix broken boolean values in JSON
+function tryFixBrokenBooleanJson(text: string): string {
+  if (!text || typeof text !== 'string') {
+    return text;
+  }
+  
+  let result = text;
+
+  // "rue" -> "true" repair (when true is truncated)
+  result = result.replace(/([{,]\s*"\w+"\s*:)\s*rue([,}])/g, '$1 true$2');
+  
+  // "als" or "alse" -> "false" repair (when false is truncated)
+  result = result.replace(/([{,]\s*"\w+"\s*:)\s*als([,}])/g, '$1 false$2');
+  result = result.replace(/([{,]\s*"\w+"\s*:)\s*alse([,}])/g, '$1 false$2');
+  
+  // Specific case fixes
+  if (result.includes('rue}')) {
+    result = result.replace(/rue}/g, 'true}');
+  }
+  
+  if (result.includes('als}')) {
+    result = result.replace(/als}/g, 'false}');
+  }
+  
+  if (result.includes('alse}')) {
+    result = result.replace(/alse}/g, 'false}');
+  }
+  
+  return result;
+}
+```
+
+This function is particularly useful for fixing JSON errors in streaming contexts where boolean values may be truncated.
+
+### String Literal Escaping Fix (May 2025)
+
+A major issue related to string literal escaping in JSON handling functions has been resolved. The problem occurred due to improperly escaped double quotes (`\"`) in TypeScript files, which caused compilation errors. The fix:
+
+- Replaced improper `\"` escapes with proper unescaped quotes in single quote literals
+- Used a consistent string delimiter approach (single quotes for strings containing double quotes)
+- Fixed backslash escaping in regular expressions
+- Improved handling of JSON strings containing special characters
+
+This fix ensures that the utilities work correctly across different build environments and prevents TypeScript compilation errors. This is particularly important for the `json.ts` utility file, which is used across all LLM integrations.
+
+```typescript
+// BEFORE: Problematic escaped quotes (causes TypeScript errors)
+if (!text || typeof text !== 'string' || text.trim() === \"\") {
+  return null;
+}
+
+// AFTER: Proper string literal syntax
+if (!text || typeof text !== 'string' || text.trim() === "") {
+  return null;
 }
 ```
 
@@ -623,22 +800,41 @@ To maximize code reuse and maintain clear responsibility boundaries:
    - Repair duplicated JSON patterns with `repairDuplicatedJsonPattern`
    - Use proper type annotations with generic parameters
 
-7. **Immutable Data Patterns**:
+7. **Message Content Type Handling**:
+   - Always use `extractContentAsString` when comparing or manipulating message content
+   - Be mindful of the `MessageContent` type which can be either string or array
+   - When setting content that must be string, always convert with proper utility
+
+8. **Immutable Data Patterns**:
    - Avoid reassigning `const` variables; use property updates instead
    - Create new objects instead of mutating existing ones
    - Use spread operators and object destructuring for updates
 
-8. **Modular Responsibility**:
+9. **Modular Responsibility**:
    - Respect the separation of concerns between utility modules
    - Combine utilities to create higher-level functionality
    - Keep utility functions focused on a single responsibility
    - Break down large methods into smaller ones with clear purposes
    - Use descriptive names that indicate a method's responsibility
 
-9. **Method Abstraction Levels**:
-   - Maintain consistent abstraction levels within classes and modules
-   - Public methods should operate at a higher abstraction level
-   - Helper methods should handle specific implementation details
-   - Keep methods short and focused on one task
+10. **Method Abstraction Levels**:
+    - Maintain consistent abstraction levels within classes and modules
+    - Public methods should operate at a higher abstraction level
+    - Helper methods should handle specific implementation details
+    - Keep methods short and focused on one task
+
+11. **Imports Checklist - Critical Functions**: 
+    - Always check that you've imported all necessary functions, especially:
+    - `processJsonDelta` for handling streaming JSON
+    - `repairToolArguments` for fixing tool call JSON
+    - `processToolArgumentsDelta` for streaming tool call processing
+    - `getErrorMessage` for error handling
+    - `extractContentAsString` for handling message content properly
+
+12. **String Literal Best Practices**:
+    - Use single quotes for strings containing double quotes and vice versa
+    - Only escape quotes when they would otherwise terminate the string
+    - Use template literals for complex strings with interpolation
+    - Be careful with backslashes in string literals - double them in regular expressions
 
 By following these guidelines, we can maintain high code quality with clear module boundaries while minimizing code duplication across the codebase.

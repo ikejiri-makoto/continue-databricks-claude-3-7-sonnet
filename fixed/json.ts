@@ -205,7 +205,7 @@ export function safeJsonParse<T>(text: string, defaultValue: T): T {
  * @param text 修復する文字列
  * @returns 修復された文字列または元の文字列（修復できない場合）
  */
-export function tryFixBrokenBooleanJson(text: string): string {
+function tryFixBrokenBooleanJson(text: string): string {
   if (!text || typeof text !== 'string') {
     return text;
   }
@@ -439,7 +439,7 @@ export function repairDuplicatedJsonPattern(jsonStr: string): string {
   }
   
   // 二重化パターンを検出する正規表現
-  const duplicatePattern = /\{\s*"(\w+)"\s*:\s*"([^"]+)"\s*\}\s*\{\s*"\1"\s*:/g;
+  const duplicatePattern = /\{\s*\"(\w+)\"\s*:\s*\"([^\"]+)\"\s*\}\s*\{\s*\"\1\"\s*:/g;
   
   if (duplicatePattern.test(jsonStr)) {
     // 有効なJSONを抽出

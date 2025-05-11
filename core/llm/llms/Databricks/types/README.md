@@ -1,279 +1,538 @@
-# Databricks LLM Types
+# Databricks LLM Integration - Type Definitions
 
-このディレクトリには、Databricks Claude 3.7 Sonnetインテグレーションで使用される型定義が含まれています。型定義は、コード全体の型安全性を確保し、開発時のエラー検出を強化するために重要な役割を果たします。
+このディレクトリには、Databricks LLMインテグレーションで使用される型定義が含まれています。型定義は、コードの安全性、保守性、および自己文書化を向上させるために非常に重要な役割を果たします。
 
-## モジュール構造と責任分担
+## ディレクトリ構造
 
 ```
 types/
-├── index.ts         (型定義のエントリーポイント - すべての型をエクスポート)
-├── types.ts         (主要な型定義 - 専用インターフェースを定義)
-└── extension.d.ts   (型拡張定義 - コア型をDatabricks固有の要件で拡張)
+├── index.ts         # すべての型定義のエントリーポイント
+├── types.ts         # メイン型定義ファイル
+└── extension.d.ts   # 型拡張定義
 ```
-
-### 各ファイルの明確な責任
-
-**1. `index.ts` - エントリーポイント**
-- 型定義のエントリーポイントとして機能
-- `types.ts`からすべての型定義をエクスポート
-- 明示的に`DatabricksLLMOptions`や`DatabricksCompletionOptions`型など主要な型をエクスポート
-- 型拡張定義をインポート
-- 型定義の可視性と参照性を向上
-
-**2. `types.ts` - 主要な型定義**
-- Databricks固有のインターフェース定義
-- `DatabricksLLMOptions`型の定義 - LLMOptionsを拡張し並列ツール呼び出し制御を追加
-- `DatabricksCompletionOptions`型の定義 - CompletionOptionsを拡張
-- `DatabricksChatMessage`型の定義 - ChatMessageを拡張
-- ツール呼び出し型の定義
-- ストリーミング関連の型定義
-- レスポンス処理の型定義
-- 状態管理のインターフェース
-- JSONデルタ処理関連の型定義
-- エラー処理関連の型定義
-- モジュール間で共有される型の標準化
-- モジュールインターフェース型の定義
-
-**3. `extension.d.ts` - 型拡張定義**
-- コアモジュールの既存型をDatabricks固有の要件で拡張
-- 三重スラッシュ参照ディレクティブによる型参照
-- フォールバックとしてのインライン型定義
-- コアモジュールとの互換性維持
-
-## オーケストレーターパターンをサポートする型定義
-
-各モジュールの明確な責任分担をサポートするために、型定義は以下の役割を果たします:
-
-1. **モジュール間インターフェースの定義**: 
-   - 各モジュールが他のモジュールとやり取りするための型を定義
-   - 一貫した型構造でモジュール間の通信を標準化
-   - 明示的な型定義でモジュールの責任境界を強調
-
-2. **状態管理のサポート**:
-   - ストリーミング状態の型定義を提供
-   - エラー処理結果の型構造を標準化
-   - 状態の永続化と復元の型安全性を確保
-
-3. **共通データ構造の定義**:
-   - ツール呼び出しとレスポンスの標準構造を定義
-   - 処理結果の一貫した型を提供
-   - JSON処理と蓄積の状態追跡を型安全に
 
 ## 主要な型定義
 
-### 1. Databricks固有のLLMOptions拡張型
+### `types.ts`
+
+このファイルにはDatabricks統合の主要な型定義が含まれています：
+
+#### ストリーミング関連の型
 
 ```typescript
-/**
- * Databricks固有のLLMOptions拡張型
- * コアのLLMOptions型を拡張し、Databricks特有の機能をサポート
- */
-export interface DatabricksLLMOptions extends LLMOptions {
-  /**
-   * 思考プロセスを常にログに表示するかどうかの設定
-   * trueの場合は常に表示、falseの場合は開発モードのみ表示
-   */
-  thinkingProcess?: boolean;
-  
-  /**
-   * 並列ツール呼び出しを許可するかどうか
-   * falseの場合、一度に1つのツール呼び出しのみを処理する
-   * OpenAIスタイルの並列制御に基づく
-   */
-  parallelToolCalls?: boolean;
+// 永続的なストリーム状態を表す型
+export interface PersistentStreamState {
+  jsonBuffer: string;             // JSON累積用バッファ
+  isBufferingJson: boolean;       // JSONバッファリング中フラグ
+  toolCallsInProgress: ToolCall[]; // 進行中のツール呼び出し
+  currentToolCallIndex: number | null; // 現在のツール呼び出しインデックス
+  contentBuffer: string;          // コンテンツバッファ
+  lastReconnectTimestamp: number; // 最後の再接続タイムスタンプ
+}
+
+// ストリーミングチャンクの型
+export interface StreamingChunk {
+  thinking?: ThinkingChunk;      // 思考プロセスデータ（存在する場合）
+  choices?: Array<{             // 選択肢（標準的なLLMレスポンス形式）
+    delta: ResponseDelta;       // デルタ更新
+  }>;
+}
+
+// 思考チャンクの型
+export interface ThinkingChunk {
+  thinking: string | any;       // 思考内容（文字列またはオブジェクト）
+  signature?: string;           // 署名（オプション）
+}
+
+// レスポンスデルタの型
+export interface ResponseDelta {
+  content?: string;             // コンテンツデルタ
+  tool_calls?: Array<{         // ツール呼び出しデルタ
+    index: number;              // ツール呼び出しのインデックス
+    function?: {                // 関数情報
+      name?: string;            // 関数名
+      arguments?: string;       // 関数引数（JSON文字列）
+    };
+  }>;
+}
+
+// ツール呼び出しの型
+export interface ToolCall {
+  id: string;                   // ツール呼び出しID
+  type: "function";             // ツールタイプ（現在は"function"のみ）
+  function: {                   // 関数情報
+    name: string;               // 関数名
+    arguments: string;          // 関数引数（JSON文字列）
+  };
 }
 ```
 
-### 2. ベース型定義
+#### API関連の型
 
 ```typescript
-// ツール呼び出しの型定義
-export interface ToolCall {
-  /** ツール呼び出しの一意の識別子 */
-  id: string;
-  /** ツールタイプ - 現在は"function"のみサポート */
-  type: "function";
-  /** 関数情報 */
-  function: {
-    /** 関数名 */
-    name: string;
-    /** 関数の引数（JSON文字列） */
-    arguments: string;
+// Databricks完了オプションの型
+export interface DatabricksCompletionOptions extends CompletionOptions {
+  apiKey?: string;              // APIキー
+  apiBase?: string;             // APIベースURL
+  parallelToolCalls?: boolean;  // 並列ツール呼び出しフラグ
+  // 他のオプション...
+}
+
+// Databricksリクエスト本体の型
+export interface DatabricksRequestBody {
+  model: string;                // モデル名
+  messages: any[];              // メッセージ配列
+  max_tokens?: number;          // 最大トークン数
+  temperature?: number;         // 温度パラメータ
+  top_p?: number;               // Top-Pパラメータ
+  frequency_penalty?: number;   // 頻度ペナルティ
+  presence_penalty?: number;    // 存在ペナルティ
+  tools?: any[];                // ツール定義配列
+  stop?: string[];              // 停止シーケンス
+  stream?: boolean;             // ストリーミングフラグ
+  thinking?: {                  // 思考モード設定
+    type: "enabled";            // 思考モードタイプ
+    budget_tokens: number;      // 思考トークン予算
+  };
+  // その他のAPIオプション...
+}
+```
+
+#### メッセージコンテンツ型
+
+特にストリーミング処理における型安全性を確保するための型定義：
+
+```typescript
+// メッセージコンテンツ型（文字列またはメッセージパーツの配列）
+export type MessageContent = string | MessagePart[];
+
+// メッセージパーツの型
+export interface MessagePart {
+  type: "text" | "image";       // パーツタイプ
+  text?: string;                // テキスト（textタイプの場合）
+  imageUrl?: {                  // 画像URL（imageタイプの場合）
+    url: string;
   };
 }
 
-// ツール結果メッセージの型定義
-export interface ToolResultMessage {
-  /** メッセージの役割 - 'tool'に固定 */
-  role: 'tool';
-  /** 対応するツール呼び出しのID */
-  tool_call_id: string;
-  /** ツール実行結果の内容 */
-  content: string;
-  /** 代替のツール呼び出しID（互換性のために提供） */
-  toolCallId?: string;
+// チャットメッセージの型
+export interface ChatMessage {
+  role: "user" | "assistant" | "system" | "tool" | "thinking";
+  content: MessageContent;      // 文字列または配列のいずれか
+  toolCalls?: ToolCall[];       // ツール呼び出し配列（オプション）
+  toolCallId?: string;          // ツール呼び出しID（toolロールの場合）
+  signature?: string;           // 署名（thinkingロールの場合）
+  redactedThinking?: any;       // 編集済み思考データ（オプション）
 }
 ```
 
-### 3. Databricks固有の完了オプション型
+### `extension.d.ts`
+
+このファイルは、コア型定義を拡張してDatabricks固有の要件に対応します：
 
 ```typescript
-/**
- * Databricks固有の完了オプション
- * 基本のCompletionOptionsを拡張し、Databricks特有のオプションを追加
- */
-export interface DatabricksCompletionOptions extends CompletionOptions {
-  /**
-   * リクエストのタイムアウト (秒)
-   * デフォルトは300秒 (5分)
-   */
-  requestTimeout?: number;
+// コアモジュールのChatMessage型を拡張
+declare module "../../../index.js" {
+  interface ChatMessage {
+    // thinkingロール用の追加プロパティ
+    signature?: string;         // 署名情報
+    redactedThinking?: any;     // 編集済み思考データ
+  }
   
-  // 注意: parallel_tool_callsパラメータはDatabricksエンドポイントでサポートされていないため、
-  // 型定義からも除外し、エラーを防止
+  // CompletionOptions型を拡張
+  interface CompletionOptions {
+    // Databricks固有のオプション
+    parallelToolCalls?: boolean; // 並列ツール呼び出しフラグ
+    thinking?: {                 // 思考モード設定
+      type: "enabled";
+      budget_tokens: number;
+    };
+  }
 }
 ```
 
-### 4. Databricks固有のメッセージ型
+### `index.ts`
+
+すべての型定義のエントリーポイントとして機能し、必要な型を外部に公開します：
+
+```typescript
+// 型定義をインポートして再エクスポート
+export * from "./types.js";
+
+// 必要に応じて追加の型定義や整理された型をエクスポート
+export type { DatabricksRequestBody, ToolCall, StreamingChunk } from "./types.js";
+```
+
+## 型安全性の強化ポイント
+
+### 1. MessageContent型の適切な処理 (2025年5月更新)
+
+`MessageContent`型は`string`または`MessagePart[]`のユニオン型であり、これが`streaming.ts`でのTypeScriptエラーの原因でした。この問題を解決するために、型安全な処理方法を追加しました：
+
+```typescript
+// streaming.tsでの型エラー：
+// Type 'MessageContent' is not assignable to type 'string'
+// Type 'MessagePart[]' is not assignable to type 'string'
+lastYieldedMessageContent = currentMessage.content; // エラー！
+
+// 修正アプローチ：コンテンツを安全に文字列として抽出
+import { extractContentAsString } from "../../utils/messageUtils.js";
+lastYieldedMessageContent = extractContentAsString(currentMessage.content);
+```
+
+この修正により、`MessageContent`が文字列か配列かにかかわらず、常に文字列として安全に扱えるようになりました。
+
+### 2. ツール呼び出し関連の型強化
+
+ツール呼び出し処理の型安全性を向上させるための型定義の強化：
+
+```typescript
+// ツール呼び出し処理の結果を表す明示的なインターフェース
+export interface ToolCallResult {
+  updatedToolCalls: ToolCall[];
+  updatedCurrentToolCall: ToolCall | null;
+  updatedCurrentToolCallIndex: number | null;
+  updatedJsonBuffer: string;
+  updatedIsBufferingJson: boolean;
+  shouldYieldMessage: boolean;
+}
+
+// 再接続結果を表す明示的なインターフェース
+export interface ReconnectionResult {
+  restoredMessage: ChatMessage;
+  restoredToolCalls: ToolCall[];
+  restoredCurrentToolCall: ToolCall | null;
+  restoredCurrentToolCallIndex: number | null;
+  restoredJsonBuffer: string;
+  restoredIsBufferingJson: boolean;
+}
+```
+
+これらの明示的なインターフェースにより、メソッド間でデータを渡す際の型安全性が向上し、`typeof result`のような曖昧な型参照を避けることができます。
+
+### 3. ストリーミング処理の状態管理型
+
+ストリーミング処理の状態と結果を管理するための明確な型定義：
+
+```typescript
+// ストリーミングレスポンス処理の結果型
+export interface StreamingResponseResult {
+  success: boolean;
+  messages: ChatMessage[];
+  error?: Error;
+  state?: any;
+}
+
+// ストリーム処理チャンクの結果型
+export interface ProcessedChunkResult {
+  updatedMessage: ChatMessage;
+  updatedToolCalls: ToolCall[];
+  updatedCurrentToolCall: ToolCall | null;
+  updatedCurrentToolCallIndex: number | null;
+  updatedJsonBuffer: string;
+  updatedIsBufferingJson: boolean;
+  thinkingMessage?: ChatMessage;
+  shouldYieldMessage: boolean;
+}
+```
+
+## 型安全性のベストプラクティス
+
+Databricks統合で採用している型安全性向上のためのベストプラクティス：
+
+### 1. 明示的なインターフェース定義
+
+複雑なオブジェクト構造には必ず明示的なインターフェースを定義します：
+
+```typescript
+// 明示的なインターフェース定義の例
+export interface QueryArgs {
+  query?: string;
+  [key: string]: any;
+}
+
+// 使用例
+function processQuery(args: QueryArgs): void {
+  const query = args.query || "";
+  // 型安全に処理...
+}
+```
+
+### 2. ユニオン型の適切な処理
+
+ユニオン型（複数の型の組み合わせ）を処理する際は、型ガードを使用して型を絞り込みます：
+
+```typescript
+// MessageContent型（string | MessagePart[]）の処理
+function processContent(content: MessageContent): string {
+  // 型ガードを使用した型の絞り込み
+  if (typeof content === "string") {
+    return content;
+  } else {
+    // 配列の場合は適切に変換
+    return content.map(part => part.type === "text" ? part.text || "" : "[画像]").join("");
+  }
+}
+```
+
+### 3. Null/Undefinedの安全な処理
+
+Nullやundefinedの可能性がある値を安全に処理します：
+
+```typescript
+// null/undefinedの可能性がある値の安全な処理
+function processIndex(index: number | null): number {
+  // null型ガード
+  if (index === null) {
+    return -1; // デフォルト値
+  }
+  return index;
+}
+
+// オプショナルプロパティの安全な処理
+function extractArguments(toolCall?: ToolCall): string {
+  return toolCall?.function?.arguments || "{}"; // nullish coalescing
+}
+```
+
+### 4. 戻り値型の明示的な宣言
+
+関数やメソッドには必ず明示的な戻り値型を宣言します：
+
+```typescript
+// 戻り値型の明示的な宣言
+function processJsonBuffer(buffer: string): { valid: boolean; json: any } {
+  // 実装...
+  return { valid: true, json: {} };
+}
+```
+
+### 5. ジェネリック型の活用
+
+再利用可能な型パターンにはジェネリック型を使用します：
+
+```typescript
+// ジェネリック型の使用例
+export interface Result<T> {
+  success: boolean;
+  value?: T;
+  error?: Error;
+}
+
+// 使用例
+function processApiResponse<T>(response: Response): Promise<Result<T>> {
+  // 実装...
+}
+```
+
+### 6. 型アサーションの最小化
+
+型アサーション（`as`キーワード）の使用は最小限に抑え、必要な場合のみ使用します：
+
+```typescript
+// 避けるべき例：過剰な型アサーション
+const data = JSON.parse(json) as { name: string; age: number }; // 本当に正しい型か不明
+
+// 良い例：型ガードを使用
+const parsedData = JSON.parse(json);
+if (
+  typeof parsedData === "object" && 
+  parsedData !== null && 
+  "name" in parsedData && 
+  typeof parsedData.name === "string" &&
+  "age" in parsedData && 
+  typeof parsedData.age === "number"
+) {
+  // ここでparsedDataはname:stringとage:numberを持つことが確認された
+  const data = parsedData as { name: string; age: number };
+  // 処理...
+}
+```
+
+## 型定義の使用ガイドライン
+
+Databricksインテグレーションで型定義を使用する際の一般的なガイドライン：
+
+1. **型のインポート**: 必要な型は`types/index.ts`からインポートします：
+   ```typescript
+   import { ToolCall, StreamingChunk, ChatMessage } from "./types/index.js";
+   ```
+
+2. **新しい型の追加**: 新しい型を追加する場合は、適切なファイルに追加し、必要に応じて`index.ts`でエクスポートします。
+
+3. **型拡張**: コア型を拡張する場合は、`extension.d.ts`に追加します。
+
+4. **バージョン互換性**: 型変更を行う際は、既存のコードとの互換性に注意します。
+
+5. **型ドキュメント**: 複雑な型定義にはJSDocコメントを追加して説明します：
+   ```typescript
+   /**
+    * Databricksサーバーからのストリーミングチャンク。
+    * 思考プロセスかコンテンツデルタのいずれかを含む可能性がある。
+    */
+   export interface StreamingChunk {
+     // プロパティ定義...
+   }
+   ```
+
+## 最近の型定義の改善点
+
+### 1. メッセージコンテンツ型の処理強化 (2025年5月)
+
+`MessageContent`型の処理を改善し、文字列と配列の両方のケースで安全に動作するように型定義を強化：
+
+```typescript
+// 修正前の問題のあるコード
+lastYieldedMessageContent = currentMessage.content;
+
+// 修正後の安全なコード
+const contentAsString = extractContentAsString(currentMessage.content);
+lastYieldedMessageContent = contentAsString;
+```
+
+関連する`extractContentAsString`関数の型定義も強化：
 
 ```typescript
 /**
- * 拡張されたChatMessage型（Databricks特有のプロパティを含む）
+ * メッセージコンテンツを安全に文字列として抽出する関数
+ * @param content メッセージコンテンツ（文字列またはMessagePart[]）
+ * @returns 常に文字列を返す
  */
-export type DatabricksChatMessage = ChatMessage & {
-  /** Databricks固有の署名情報 */
-  signature?: string;
-  /** ツール呼び出しID（互換性のために提供） */
-  toolCallId?: string;
-};
+export function extractContentAsString(content: unknown): string {
+  if (typeof content === "string") {
+    return content;
+  } else if (Array.isArray(content)) {
+    return content
+      .map(part => {
+        if (part.type === "text" && typeof part.text === "string") {
+          return part.text;
+        }
+        return part.type === "image" ? "[画像]" : "";
+      })
+      .join("");
+  }
+  return String(content || "");
+}
 ```
 
-### 5. ストリーミング関連の型定義
+### 2. ツール呼び出し処理の型安全性向上 (2025年5月)
+
+ツール呼び出し処理のフローをより型安全にするための明示的なインターフェース導入：
 
 ```typescript
-// Databricksの思考（Thinking）チャンク型定義
-export interface ThinkingChunk {
-  /** 思考内容 - 文字列またはオブジェクト */
-  thinking?: string | object;
-  /** 署名情報 */
-  signature?: string;
+// ツール呼び出し処理の結果を表す明示的なインターフェース
+export interface ToolCallResult {
+  updatedToolCalls: ToolCall[];
+  updatedCurrentToolCall: ToolCall | null;
+  updatedCurrentToolCallIndex: number | null;
+  updatedJsonBuffer: string;
+  updatedIsBufferingJson: boolean;
+  shouldYieldMessage: boolean;
+}
+```
+
+このインターフェースにより、以前は暗黙的に型付けされていたオブジェクトが明示的に型付けされるようになり、型安全性が向上しました。
+
+### 3. インデックス型の安全性向上 (2025年5月)
+
+配列インデックスの安全性を向上させるための変更：
+
+```typescript
+// インデックスの型安全な処理のためのユーティリティ関数
+export function ensureValidIndex(index: number | null, arrayLength: number): number | null {
+  if (index === null) {
+    return null;
+  }
+  
+  const numericIndex = Number(index);
+  return !Number.isNaN(numericIndex) && numericIndex >= 0 && numericIndex < arrayLength
+    ? numericIndex
+    : null;
 }
 
-// Databricksレスポンスデルタの型定義
-export interface ResponseDelta {
-  /** コンテンツのデルタ */
+// 使用例
+const safeIndex = ensureValidIndex(currentToolCallIndex, toolCalls.length);
+if (safeIndex !== null) {
+  // 安全にアクセス可能
+  const currentToolCall = toolCalls[safeIndex];
+}
+```
+
+これにより、配列境界外アクセスなどの一般的な問題を防止できます。
+
+## 今後の改善計画
+
+### 1. より厳格なツール引数の型定義
+
+ツール引数のJSONスキーマに基づいた厳格な型定義の導入：
+
+```typescript
+// 将来の改善例：ツール固有の引数型の定義
+export interface SearchToolArguments {
+  query: string;
+  limit?: number;
+  [key: string]: any;
+}
+
+export interface FileToolArguments {
+  path: string;
   content?: string;
-  /** ツール呼び出しのデルタ情報 */
-  tool_calls?: {
-    /** 配列内のインデックス */
-    index: number;
-    /** ツール呼び出しID（部分的な場合もある） */
-    id?: string;
-    /** 関数情報（部分的な場合もある） */
-    function?: {
-      /** 関数名（部分的な場合もある） */
-      name?: string;
-      /** 関数引数（部分的な場合もある） */
-      arguments?: string;
-    }
-  }[];
+  [key: string]: any;
 }
 
-// ストリーミングチャンクの型定義
-export interface StreamingChunk {
-  /** 思考プロセス情報（存在する場合） */
-  thinking?: ThinkingChunk;
-  /** 選択肢（通常は1つのみ） */
-  choices?: {
-    /** デルタ情報 */
-    delta: ResponseDelta;
-  }[];
-}
-```
-
-## 並列ツール呼び出し処理に関する注意点
-
-Databricks実装では、`parallelToolCalls`（LLMOptions）と`parallel_tool_calls`（APIリクエストパラメータ）の区別が重要です：
-
-1. **LLMOptions.parallelToolCalls**: この設定は内部フラグとして機能し、ツール呼び出しの処理方法を制御します。Databricksクラスでは、これがデフォルトで`false`に設定されています。
-
-2. **API request parallel_tool_calls**: これはDatabricksエンドポイントがサポートしていないパラメータです。このため、リクエスト送信前に削除する必要があります。
-
-この設計によって、クライアントコードは標準の`parallelToolCalls`設定を使用できますが、APIリクエスト時には互換性を確保できます。
-
-## 最近の改善点
-
-### 1. DatabricksLLMOptions型の導入（2025年5月）
-
-- **専用LLMOptions拡張型の導入**: 標準的な`LLMOptions`を拡張し、Databricks固有の機能を型安全に実装
-- **明示的なインターフェース定義**: `parallelToolCalls`などのプロパティに対して明示的な型と説明を提供
-- **型キャストの排除**: `as any`などの型キャストを使わずに適切な型を使用できるよう改善
-- **コンパイルエラーの解消**: TypeScriptコンパイル時の「Object literal may only specify known properties」エラーを解消
-
-### 2. 型定義の整理と明確化
-
-- **重複定義の統合**: 分散していた型定義を統合
-- **モジュールインターフェース型の追加**: 各モジュールの責任を明確にするインターフェース型を追加
-- **JSDocドキュメントの強化**: すべての型定義に詳細なJSDocコメントを追加
-- **並列ツール呼び出し処理の明確化**: `parallelToolCalls`パラメータの扱いを明確化
-- **型安全性の向上**: 状態管理やエラー処理の型安全性を向上
-- **ストリーミング処理の型強化**: 処理結果や状態管理の型定義を強化
-
-## ベストプラクティス
-
-Databricks型定義を使用する際は、以下のベストプラクティスに従ってください：
-
-### 1. 型のインポート方法
-
-```typescript
-// 推奨: types/index.tsからインポート
-import { 
-  DatabricksLLMOptions,
-  DatabricksCompletionOptions, 
-  ToolCall 
-} from "./Databricks/types/index.js";
-```
-
-### 2. モジュールインターフェース型の活用
-
-```typescript
-// モジュールインターフェース型を実装
-import { ConfigManagerInterface } from "./types/index.js";
-
-/**
- * 設定管理モジュール
- * インターフェースを実装することで責任を明確に
- */
-export class DatabricksConfig implements ConfigManagerInterface {
-  // インターフェースで定義されたメソッドを実装
-}
-```
-
-### 3. 並列ツール呼び出しの設定
-
-```typescript
-// DatabricksLLMOptions型を使用した明示的な型指定
-static defaultOptions: Partial<DatabricksLLMOptions> = {
-  model: "databricks-claude-3-7-sonnet",
-  contextLength: 200_000,
-  completionOptions: {
-    model: "databricks-claude-3-7-sonnet",
-    maxTokens: 128000,
-    temperature: 1,
-  },
-  capabilities: {
-    tools: true
-  },
-  // Databricksエンドポイントは並列ツール呼び出しをサポートしていないため無効化
-  parallelToolCalls: false
+// ツール名に基づいた型マッピング
+export type ToolArgumentsMap = {
+  "search_docs": SearchToolArguments;
+  "create_file": FileToolArguments;
+  // 他のツール...
 };
 
-// APIリクエスト送信前に並列ツール呼び出しパラメータを削除
-if ((requestBody as any).parallel_tool_calls !== undefined) {
-  console.warn('parallel_tool_callsパラメータがリクエストに含まれています。Databricksはこのパラメータをサポートしていません。');
-  // parallel_tool_callsパラメータを安全に除外
-  delete (requestBody as any).parallel_tool_calls;
+// ジェネリックツール処理関数
+function processToolArguments<T extends keyof ToolArgumentsMap>(
+  toolName: T,
+  args: string
+): ToolArgumentsMap[T] {
+  // 実装...
 }
 ```
 
-これらの型定義は、オーケストレーターパターンに基づく責任分離を型システムレベルでサポートし、Databricksインテグレーションの堅牢性と保守性を向上させます。
+### 2. エラー処理の型安全性向上
+
+より型安全なエラー処理のための型定義強化：
+
+```typescript
+// エラー結果を表す型
+export interface ErrorResult<T> {
+  success: false;
+  error: Error;
+  state: T;
+}
+
+// 成功結果を表す型
+export interface SuccessResult<T, R> {
+  success: true;
+  result: R;
+  state: T;
+}
+
+// 結合型
+export type Result<T, R> = ErrorResult<T> | SuccessResult<T, R>;
+
+// 使用例
+function processRequest<T, R>(
+  params: T
+): Result<T, R> {
+  try {
+    // 処理...
+    return { success: true, result: resultValue, state: params };
+  } catch (error) {
+    return { 
+      success: false, 
+      error: error instanceof Error ? error : new Error(String(error)),
+      state: params
+    };
+  }
+}
+```
+
+これらの型定義により、コードの安全性と保守性が大幅に向上します。型システムを効果的に活用することで、多くのバグを未然に防ぎ、コードの自己文書化機能を強化できます。

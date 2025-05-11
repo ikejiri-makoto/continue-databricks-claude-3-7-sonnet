@@ -261,8 +261,8 @@ This pattern promotes maintainability, testability, and code reuse while keeping
 When handling JSON in streaming contexts (especially with tool calls), use the enhanced JSON utilities:
 
 ```typescript
-import { safeJsonParse, extractValidJson, processJsonDelta } from "../utils/json";
-import { JsonBufferHelpers } from "../utils/streamProcessing";
+import { safeJsonParse, extractValidJson, processJsonDelta } from "../utils/json.js";
+import { JsonBufferHelpers } from "../utils/streamProcessing.js";
 
 // Extract valid JSON from potentially mixed content
 const validJson = extractValidJson(mixedContent);
@@ -279,7 +279,7 @@ buffer = JsonBufferHelpers.addToBuffer(fragment, buffer, maxBufferSize);
 if (JsonBufferHelpers.isBufferComplete(buffer)) {
   const data = safeJsonParse(buffer, null);
   if (data !== null) {
-    // Process complete JSON data
+    // Process complete JSON
     // Reset buffer
     buffer = JsonBufferHelpers.resetBuffer();
   }
@@ -296,12 +296,25 @@ if (result.complete) {
 }
 ```
 
+### Message Content Type Handling
+
+When working with message content that can be either string or an array of message parts, use the content extraction utility:
+
+```typescript
+import { extractContentAsString } from "../utils/messageUtils.js";
+
+// Safely extract content as string regardless of type
+const contentAsString = extractContentAsString(currentMessage.content);
+```
+
+This is especially important when comparing content or using it in contexts that expect string values. Many TypeScript compilation errors can be fixed by using this utility to safely handle MessageContent types.
+
 ### Error Handling and Retries
 
 Implement consistent error handling with retry mechanisms for network issues:
 
 ```typescript
-import { getErrorMessage, isConnectionError } from "../utils/errors";
+import { getErrorMessage, isConnectionError } from "../utils/errors.js";
 
 // Basic error handling
 try {
@@ -391,6 +404,46 @@ const newState = {
   ...oldState,
   updatedProperty: newValue
 };
+```
+
+### Common Type Issues and Solutions
+
+When working with complex message content types:
+
+```typescript
+// Problem: Type 'MessageContent' is not assignable to type 'string'
+// Type 'MessagePart[]' is not assignable to type 'string'
+lastYieldedMessageContent = currentMessage.content; // Error!
+
+// Solution: Use extractContentAsString utility
+import { extractContentAsString } from "../utils/messageUtils.js";
+lastYieldedMessageContent = extractContentAsString(currentMessage.content);
+
+// When comparing message content:
+// Problem:
+if (currentMessage.content !== lastYieldedMessageContent) { /* ... */ }
+
+// Solution:
+const currentContentAsString = extractContentAsString(currentMessage.content);
+if (currentContentAsString !== lastYieldedMessageContent) { /* ... */ }
+```
+
+### Tool Argument Repair
+
+Always use the common utility function `repairToolArguments` for handling and repairing tool arguments:
+
+```typescript
+import { repairToolArguments } from "../utils/toolUtils.js";
+
+// Instead of custom repair logic:
+const repairedArgs = repairToolArguments(args);
+
+// This utility will handle:
+// - JSON validation
+// - Duplicated pattern repair
+// - Broken boolean values
+// - Mismatched braces
+// - And many other common JSON issues
 ```
 
 ### Modular Design and Responsibility Separation

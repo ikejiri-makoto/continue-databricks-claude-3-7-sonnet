@@ -404,6 +404,38 @@ All providers should utilize the common utility modules from `core/llm/utils/`:
    const textContent = extractContentAsString(content);
    ```
 
+### Message Content Type Handling
+
+Handle message content types properly to avoid type errors:
+
+```typescript
+import { extractContentAsString } from "../../utils/messageUtils.js";
+
+// When comparing message content or needing string format
+function compareMessageContent(oldMessage: ChatMessage, newMessage: ChatMessage): boolean {
+  // Safely extract content as string regardless of type
+  const oldContent = extractContentAsString(oldMessage.content);
+  const newContent = extractContentAsString(newMessage.content);
+  
+  return oldContent === newContent;
+}
+
+// When storing message content in a variable expecting string
+function processMessage(message: ChatMessage): void {
+  // Handles both string and MessagePart[] content types
+  const contentAsString = extractContentAsString(message.content);
+  
+  // Now contentAsString is guaranteed to be a string
+  if (contentAsString.includes("keyword")) {
+    // Process the message
+  }
+}
+
+// When updating lastYieldedMessageContent with message.content
+// (This pattern fixes the common TypeScript error in streaming.ts)
+lastYieldedMessageContent = extractContentAsString(currentMessage.content);
+```
+
 ### Type Safety
 
 Ensure robust type safety in implementation:
@@ -505,6 +537,52 @@ When implementing streaming processors, follow these guidelines:
    }
    ```
 
+### Common Type Compatibility Issues and Solutions
+
+When working with TypeScript in LLM implementations, be aware of these common type issues:
+
+1. **Message Content Type Incompatibility**:
+   ```typescript
+   // Problem: Type 'MessageContent' is not assignable to type 'string'
+   lastYieldedMessageContent = currentMessage.content; // Error!
+   
+   // Solution: Use extractContentAsString
+   import { extractContentAsString } from "../../utils/messageUtils.js";
+   lastYieldedMessageContent = extractContentAsString(currentMessage.content);
+   ```
+
+2. **Array Index Type Safety**:
+   ```typescript
+   // Problem: Object is possibly 'null'
+   const item = array[index]; // Error if index could be null
+   
+   // Solution: Use type guards and bounds checking
+   if (index !== null && index >= 0 && index < array.length) {
+     const item = array[index]; // Safe
+   }
+   ```
+
+3. **JSON Parsing Type Safety**:
+   ```typescript
+   // Problem: Type 'any' for JSON.parse results
+   const config = JSON.parse(jsonText); // Type is 'any'
+   
+   // Solution: Use safeJsonParse with generics
+   import { safeJsonParse } from "../../utils/json.js";
+   const config = safeJsonParse<ConfigType>(jsonText, defaultConfig);
+   ```
+
+4. **String Literal Escaping Issues**:
+   ```typescript
+   // Problem: Invalid escape sequence
+   const pattern = /\"\w+\"\:/; // Error
+   
+   // Solution: Use consistent quote styles
+   const pattern = /"\\w+\":/; // Using double quotes outside
+   // or
+   const pattern = /"\w+":/; // No need to escape quotes in regex
+   ```
+
 By following these patterns and best practices, you'll create more maintainable, robust LLM provider implementations that leverage the full power of TypeScript's type system and the common utilities provided by the framework.
 
 ## Usage
@@ -517,8 +595,8 @@ import { llmFromDescription } from 'core/llm/llms';
 // Create an LLM instance based on a configuration description
 const llm = await llmFromDescription(
   {
-    provider: 'anthropic',
-    model: 'claude-3-5-sonnet-latest',
+    provider: 'databricks',
+    model: 'claude-3-7-sonnet-latest',
     // other options...
   },
   readFile,

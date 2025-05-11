@@ -439,7 +439,7 @@ export function repairDuplicatedJsonPattern(jsonStr: string): string {
   }
   
   // 二重化パターンを検出する正規表現
-  const duplicatePattern = /\{\s*"(\w+)"\s*:\s*"([^"]+)"\s*\}\s*\{\s*"\1"\s*:/g;
+  const duplicatePattern = /\{\s*\"(\w+)\"\s*:\s*\"([^\"]+)\"\s*\}\s*\{\s*\"\1\"\s*:/g;
   
   if (duplicatePattern.test(jsonStr)) {
     // 有効なJSONを抽出
