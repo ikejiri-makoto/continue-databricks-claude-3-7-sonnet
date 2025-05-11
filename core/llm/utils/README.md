@@ -497,6 +497,34 @@ This approach allows provider implementations to focus on their unique requireme
 
 ## Recent Improvements
 
+### Streaming Response Handling (May 2025)
+
+Added improved support for response body streaming across different platforms:
+
+- Enhanced compatibility with different response body formats
+- Used `streamSse` from core module to handle streaming responses consistently
+- Addressed issues with `response.body?.getReader` for platforms that don't support it
+- Fixed streaming issues with Databricks Claude 3.7 Sonnet integration
+
+```typescript
+// IMPORTANT: Use standardized streaming utilities for compatibility
+import { streamSse } from "../../stream.js";
+
+// Process streaming response
+async function processStreamingResponse(response: Response) {
+  try {
+    // Use standardized utility function for all streaming responses
+    for await (const data of streamSse(response)) {
+      // Process each chunk
+      processChunk(data);
+    }
+  } catch (error) {
+    console.error(`Streaming error: ${getErrorMessage(error)}`);
+    // Handle error appropriately
+  }
+}
+```
+
 ### Message Content Type Handling (May 2025)
 
 Added better support for handling complex message content types:
@@ -631,6 +659,42 @@ if (!text || typeof text !== 'string' || text.trim() === \"\") {
 // AFTER: Proper string literal syntax
 if (!text || typeof text !== 'string' || text.trim() === "") {
   return null;
+}
+```
+
+### Type-Safe Error Handling for Unknown Types (May 2025)
+
+Improved the error handling pattern to ensure type safety when dealing with unknown error types:
+
+- Enhanced `getErrorMessage` utility to safely handle various error formats
+- Updated error handling in all modules to leverage this common utility
+- Improved error messages to include more diagnostic information
+- Added explicit type annotations to catch blocks to ensure type safety
+
+This improvement helps resolve common TypeScript errors like "streamError is of type 'unknown'" that occur when trying to access properties on unknown error types.
+
+```typescript
+// BEFORE: Unsafe error property access (causes TypeScript errors)
+try {
+  // Operation
+} catch (streamError) {
+  console.error(`Error details: ${streamError.name}, ${streamError.message}`);
+}
+
+// AFTER: Type-safe error handling
+import { getErrorMessage, isConnectionError } from "../../utils/errors.js";
+
+try {
+  // Operation
+} catch (streamError: unknown) {
+  // Safely extract error message regardless of error type
+  const errorMessage = getErrorMessage(streamError);
+  console.error(`Error details: ${errorMessage}`);
+  
+  // Type-safe error classification
+  if (isConnectionError(streamError)) {
+    // Handle connection errors
+  }
 }
 ```
 
@@ -830,11 +894,19 @@ To maximize code reuse and maintain clear responsibility boundaries:
     - `processToolArgumentsDelta` for streaming tool call processing
     - `getErrorMessage` for error handling
     - `extractContentAsString` for handling message content properly
+    - `streamSse` for streaming response handling
 
 12. **String Literal Best Practices**:
     - Use single quotes for strings containing double quotes and vice versa
     - Only escape quotes when they would otherwise terminate the string
     - Use template literals for complex strings with interpolation
     - Be careful with backslashes in string literals - double them in regular expressions
+
+13. **Type-Safe Error Handling**:
+    - Add explicit `unknown` type annotations in catch blocks
+    - Use `getErrorMessage` to safely extract error information
+    - Never directly access properties on unknown error types
+    - Use type guards to narrow error types when needed
+    - Leverage `isConnectionError` and similar utilities for error classification
 
 By following these guidelines, we can maintain high code quality with clear module boundaries while minimizing code duplication across the codebase.

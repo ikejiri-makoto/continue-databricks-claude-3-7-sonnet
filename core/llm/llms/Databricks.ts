@@ -4,7 +4,8 @@ import { BaseLLM } from "../index.js";
 import { DatabricksLLMOptions } from "./Databricks/types/types.js";
 
 // 共通ユーティリティのインポート
-import { getErrorMessage } from "../utils/errors.js";
+import { getErrorMessage, isConnectionError } from "../utils/errors.js";
+import { streamSse } from "../stream.js";
 
 // Databricks固有のモジュールインポート
 import { DatabricksConfig } from "./Databricks/config.js";
@@ -240,26 +241,40 @@ class Databricks extends BaseLLM {
         return { success: true, messages: responseMessages };
       }
 
-      // ストリーミングレスポンスの処理をストリーミング処理モジュールに委譲
-      const streamResult = await StreamingProcessor.processStreamingResponse(
-        response, 
-        messages, 
-        retryCount, 
-        this.alwaysLogThinking
-      );
-      
-      if (streamResult.success) {
-        responseMessages.push(...streamResult.messages);
-        return { success: true, messages: responseMessages };
-      } else {
-        return { 
-          success: false, 
-          messages: [], 
-          error: streamResult.error,
-          state: streamResult.state
-        };
+      try {
+        // ストリーミングレスポンスの処理をストリーミング処理モジュールに委譲
+        const streamResult = await StreamingProcessor.processStreamingResponse(
+          response, 
+          messages, 
+          retryCount, 
+          this.alwaysLogThinking
+        );
+        
+        if (streamResult.success) {
+          responseMessages.push(...streamResult.messages);
+          return { success: true, messages: responseMessages };
+        } else {
+          return { 
+            success: false, 
+            messages: [], 
+            error: streamResult.error,
+            state: streamResult.state
+          };
+        }
+      } catch (streamError: unknown) {
+        // ストリーミング処理中のエラーを詳細にログ
+        const errorMessage = getErrorMessage(streamError);
+        console.error(`ストリーミング処理エラー: ${errorMessage}`);
+        
+        // 接続エラーの場合はより詳細な情報をログ
+        if (isConnectionError(streamError)) {
+          console.error(`接続エラーの詳細: ${errorMessage}`);
+        }
+        
+        // エラーを再スロー（_streamChatのリトライロジックで処理される）
+        throw streamError;
       }
-    } catch (error) {
+    } catch (error: unknown) {
       // エラー情報の構築をエラーハンドラモジュールのパターンに準拠
       return { 
         success: false, 

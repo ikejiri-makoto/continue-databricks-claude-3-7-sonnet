@@ -17,6 +17,8 @@ import {
 import { extractQueryContext, extractContentAsString } from "../../utils/messageUtils.js";
 import { processContentDelta, JsonBufferHelpers } from "../../utils/streamProcessing.js";
 import { isSearchTool, processSearchToolArguments, repairToolArguments } from "../../utils/toolUtils.js";
+import { streamSse } from "../../stream.js";
+import { processSSEStream } from "../../utils/sseProcessing.js";
 
 // 独自モジュールをインポート
 import { ToolCallProcessor } from "./toolcalls.js";
@@ -1135,92 +1137,64 @@ export class StreamingProcessor {
     }
     
     const responseMessages: ChatMessage[] = [];
+    let lastYieldedMessageContent = "";
     
     try {
-      // レスポンスをJSONとして解析
-      const reader = response.body?.getReader();
-      if (!reader) {
-        throw new Error("レスポンスボディのリーダーを取得できませんでした");
-      }
+      // コンテンツタイプをチェックして処理方法を決定
+      const contentType = response.headers.get('content-type');
       
-      const decoder = new TextDecoder();
-      let done = false;
-      let lastYieldedMessageContent = "";
-      
-      // ストリーミングレスポンスを逐次処理
-      while (!done) {
-        const { value, done: doneReading } = await reader.read();
-        done = doneReading;
-        
-        if (done) break;
-        
-        const chunk = decoder.decode(value, { stream: true });
-        
-        // データ行を処理
-        const lines = chunk.split('\n');
-        for (const line of lines) {
-          // 空行はスキップ
-          if (!line.trim()) continue;
+      // SSEストリームを処理
+      // 共通ユーティリティのstreamSseを使用して互換性を確保
+      for await (const data of streamSse(response)) {
+        try {
+          // チャンクを処理
+          const result = this.processChunk(
+            data,
+            currentMessage,
+            toolCalls,
+            currentToolCall,
+            currentToolCallIndex,
+            jsonBuffer,
+            isBufferingJson,
+            messages,
+            isReconnect
+          );
           
-          // データプレフィックスを取り除く
-          const dataPrefix = 'data: ';
-          if (!line.startsWith(dataPrefix)) continue;
+          // 結果を更新
+          currentMessage = result.updatedMessage;
+          toolCalls = result.updatedToolCalls;
+          currentToolCall = result.updatedCurrentToolCall;
+          currentToolCallIndex = result.updatedCurrentToolCallIndex;
+          jsonBuffer = result.updatedJsonBuffer;
+          isBufferingJson = result.updatedIsBufferingJson;
+          isReconnect = false; // 最初のチャンク処理後は再接続フラグをリセット
           
-          const jsonData = line.substring(dataPrefix.length);
-          
-          try {
-            // JSONをパース
-            const data = JSON.parse(jsonData);
-            
-            // チャンクを処理
-            const result = this.processChunk(
-              data,
-              currentMessage,
-              toolCalls,
-              currentToolCall,
-              currentToolCallIndex,
-              jsonBuffer,
-              isBufferingJson,
-              messages,
-              isReconnect
-            );
-            
-            // 結果を更新
-            currentMessage = result.updatedMessage;
-            toolCalls = result.updatedToolCalls;
-            currentToolCall = result.updatedCurrentToolCall;
-            currentToolCallIndex = result.updatedCurrentToolCallIndex;
-            jsonBuffer = result.updatedJsonBuffer;
-            isBufferingJson = result.updatedIsBufferingJson;
-            isReconnect = false; // 最初のチャンク処理後は再接続フラグをリセット
-            
-            // 思考メッセージをyield
-            if (result.thinkingMessage) {
-              responseMessages.push(result.thinkingMessage);
-            }
-            
-            // メッセージをyield
-            if (result.shouldYieldMessage) {
-              // extractContentAsStringを使用して現在のメッセージ内容を文字列として取得
-              const currentContentAsString = extractContentAsString(currentMessage.content);
-              
-              if (currentContentAsString !== lastYieldedMessageContent) {
-                // ツール呼び出し情報を含む新しいメッセージをyield
-                const messageToYield: ChatMessage = {
-                  role: "assistant",
-                  content: currentMessage.content,
-                  toolCalls: toolCalls.length > 0 ? toolCalls : undefined
-                };
-                
-                responseMessages.push(messageToYield);
-                lastYieldedMessageContent = currentContentAsString;
-              }
-            }
-          } catch (err) {
-            console.warn(`チャンクの処理中にエラーが発生しました: ${getErrorMessage(err)}`);
-            console.warn(`問題のあるJSON: ${jsonData}`);
-            // エラーがあっても処理を継続
+          // 思考メッセージをyield
+          if (result.thinkingMessage) {
+            responseMessages.push(result.thinkingMessage);
           }
+          
+          // メッセージをyield
+          if (result.shouldYieldMessage) {
+            // extractContentAsStringを使用して現在のメッセージ内容を文字列として取得
+            const currentContentAsString = extractContentAsString(currentMessage.content);
+            
+            if (currentContentAsString !== lastYieldedMessageContent) {
+              // ツール呼び出し情報を含む新しいメッセージをyield
+              const messageToYield: ChatMessage = {
+                role: "assistant",
+                content: currentMessage.content,
+                toolCalls: toolCalls.length > 0 ? toolCalls : undefined
+              };
+              
+              responseMessages.push(messageToYield);
+              lastYieldedMessageContent = currentContentAsString;
+            }
+          }
+        } catch (err) {
+          console.warn(`チャンクの処理中にエラーが発生しました: ${getErrorMessage(err)}`);
+          console.warn(`問題のあるデータ: ${JSON.stringify(data)}`);
+          // エラーがあっても処理を継続
         }
       }
       
@@ -1242,7 +1216,7 @@ export class StreamingProcessor {
       toolCalls = this.ensureSearchToolArguments(toolCalls, messages);
       
       // 最終結果をyield
-      if (toolCalls.length > 0 || currentMessage.content !== lastYieldedMessageContent) {
+      if (toolCalls.length > 0 || extractContentAsString(currentMessage.content) !== lastYieldedMessageContent) {
         const finalMessage: ChatMessage = {
           role: "assistant",
           content: currentMessage.content,
