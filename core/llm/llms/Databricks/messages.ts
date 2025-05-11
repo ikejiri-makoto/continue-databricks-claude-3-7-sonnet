@@ -255,6 +255,7 @@ export class MessageProcessor {
 
   /**
    * アシスタントメッセージをOpenAI形式に変換
+   * Claude 3.7の思考モードに対応した形式に変換する
    * 
    * @param message アシスタントメッセージ
    * @param allMessages すべてのメッセージ配列（コンテキスト用）
@@ -265,22 +266,37 @@ export class MessageProcessor {
     if (this.messageHasToolCalls(message)) {
       const msgAny = message as any;
       
+      // 重要: ツール呼び出しの場合、思考モードのメッセージも付与する
+      // thinkingブロックが必要なため、コンテンツをnullではなく思考ブロック配列にする
       return {
         role: "assistant",
-        content: null, // ツール呼び出しの場合はcontentをnullに設定
+        content: [
+          {
+            type: "thinking",
+            thinking: "Preparing to use tools to help with this request"
+          }
+        ],
         tool_calls: msgAny.toolCalls.map((toolCall: any) => 
           this.convertToolCallToOpenAIFormat(toolCall, allMessages)
         )
       };
     }
     
+    // 記録: ログのエラーメッセージから判断
+    // "Expected `thinking` or `redacted_thinking`, but found `text`. When `thinking` is enabled"
+    // 思考モードが有効な場合、コンテンツの最初の要素は必ず thinking タイプである必要がある
+    
     // 通常のアシスタントメッセージ
-    // Claude 3.7の思考モードでは、通常のテキストメッセージでも配列形式に変換する
+    // Claude 3.7の思考モードでは、thinkingタイプのコンテンツを最初に含める必要がある
     const contentStr = extractContentAsString(message.content);
     
     return {
       role: "assistant",
       content: [
+        {
+          type: "thinking",
+          thinking: "Processing your request"
+        },
         {
           type: "text",
           text: contentStr

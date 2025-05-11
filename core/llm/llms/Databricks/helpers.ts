@@ -121,11 +121,12 @@ export class DatabricksHelpers {
       // これはOpenAIやAnthropicとの重要な違いであり、APIの互換性を確保するために注意が必要です。
       console.log("注意: Databricksエンドポイントはparallel_tool_callsパラメータをサポートしていません");
       
-      // parallel_tool_callsパラメータが設定されていないことを確認
-      if ('parallel_tool_calls' in finalOptions) {
-        console.warn('警告: parallel_tool_callsパラメータが検出されました。削除します。');
-        delete finalOptions.parallel_tool_calls;
-      }
+      // 強制的に parallel_tool_calls パラメータが設定されないようにする
+      // TypeScriptの型チェックを回避して明示的に削除
+      delete (finalOptions as any).parallel_tool_calls;
+      
+      // 古い形式の function_call パラメータも削除
+    delete (finalOptions as any).function_call;
       
       // OpenAIから継承された可能性があるパラメータが含まれていないか確認
       if ('function_call' in finalOptions) {
@@ -159,11 +160,18 @@ export class DatabricksHelpers {
       finalOptions.temperature = DEFAULT_TEMPERATURE;
     }
 
-    // 最終確認: parallel_tool_callsがオブジェクトに含まれていないことを確認
-    if ('parallel_tool_calls' in finalOptions) {
-      console.warn("警告: parallel_tool_callsパラメータが検出されました。Databricksではサポートされていないため削除します。");
-      delete finalOptions.parallel_tool_calls;
+    // 最終確認: 再度安全対策として特定のパラメータを確認して削除
+    const unsupportedParams = ['parallel_tool_calls', 'function_call', 'request_timeout'];
+    
+    for (const param of unsupportedParams) {
+      if (param in (finalOptions as any)) {
+        console.warn(`警告: ${param}パラメータが検出されました。Databricksではサポートされていないため削除します。`);
+        delete (finalOptions as any)[param];
+      }
     }
+    
+    // 追加の安全対策: has_parallel_tool_callsが設定されていないことを確認
+    delete (finalOptions as any).has_parallel_tool_calls;
     
     // 冗長プロパティのチェック - undefinedの値を持つプロパティを削除
     Object.keys(finalOptions).forEach(key => {

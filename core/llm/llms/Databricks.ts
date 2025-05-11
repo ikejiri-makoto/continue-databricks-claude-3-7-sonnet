@@ -251,18 +251,24 @@ class Databricks extends BaseLLM {
         DatabricksConfig.setupTimeoutController(signal, options);
 
       // リクエストボディを構築
-      // parallel_tool_callsパラメータが含まれていないことを確認
+      // 注意: parallel_tool_callsパラメータが含まれていないことを確認
       const requestBody = {
-        ...args,
-        messages: formattedMessages,
-        system: systemMessage
+      ...args,
+      messages: formattedMessages,
+      system: systemMessage
       };
       
       // 最終チェック: parallel_tool_callsが含まれていないことを確認
       if ((requestBody as any).parallel_tool_calls !== undefined) {
-        console.warn("最終チェック: parallel_tool_callsパラメータが検出されました。削除します。");
-        delete (requestBody as any).parallel_tool_calls;
+      console.warn("最終チェック: parallel_tool_callsパラメータが検出されました。削除します。");
+      delete (requestBody as any).parallel_tool_calls;
       }
+    
+    // 追加の安全対策: 強制的にparallel_tool_callsを削除
+    // 標準のスプレッド演算子では参照がコピーされる可能性があるため
+    const finalRequestBody = { ...requestBody };
+    delete (finalRequestBody as any).parallel_tool_calls;
+    delete (finalRequestBody as any).function_call; // 旧式のパラメータも削除
       
       // リクエストボディのログ出力(開発モード時のみ詳細を表示)
       if (process.env.NODE_ENV === 'development') {
@@ -286,7 +292,7 @@ class Databricks extends BaseLLM {
           "Content-Type": "application/json",
           "Authorization": `Bearer ${this.apiKey}`,
         },
-        body: safeStringify(requestBody, "{}"),
+        body: safeStringify(finalRequestBody, "{}"),
         signal: combinedSignal,
       });
 
