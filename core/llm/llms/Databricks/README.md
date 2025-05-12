@@ -347,23 +347,23 @@ For streaming responses in thinking mode, the implementation uses a specialized 
 
 ```typescript
 /**
- * Claude 3.7 Sonnetの思考モードデータを抽出する
- * 実際のデータパス: choices[0].delta.content[0].summary[0].text
- * @param chunk ストリーミングチャンク
- * @returns 抽出した思考テキストとシグネチャ、または null
+ * Extract thinking mode data from Claude 3.7 Sonnet
+ * Actual data path: choices[0].delta.content[0].summary[0].text
+ * @param chunk Streaming chunk
+ * @returns Extracted thinking text and signature, or null
  */
 private static extractThinkingData(chunk: StreamingChunk): { text: string; signature?: string } | null {
   if (!chunk?.choices?.[0]?.delta?.content) {
     return null;
   }
   
-  // content が配列の場合
+  // Process content as array
   const content = chunk.choices[0].delta.content;
   
   if (Array.isArray(content) && content.length > 0) {
     const firstContent = content[0];
     
-    // type が "reasoning" で summary が配列の場合
+    // Check for "reasoning" type with summary array
     if (typeof firstContent === 'object' && 
         firstContent !== null && 
         firstContent.type === "reasoning" && 
@@ -372,7 +372,7 @@ private static extractThinkingData(chunk: StreamingChunk): { text: string; signa
       
       const summaryItem = firstContent.summary[0];
       
-      // type が "summary_text" でテキストが存在する場合
+      // Check for "summary_text" type with text
       if (typeof summaryItem === 'object' && 
           summaryItem !== null && 
           summaryItem.type === "summary_text" && 
@@ -386,7 +386,7 @@ private static extractThinkingData(chunk: StreamingChunk): { text: string; signa
     }
   }
   
-  // フォールバック処理も含む...
+  // Additional fallback processing...
 }
 ```
 
@@ -505,6 +505,36 @@ choices?: Array<{
 ```
 
 This dual support ensures robust handling of different API response formats with a single implementation.
+
+### Modular Architecture Refinements
+
+The May 2025 update further refines the modular architecture of the Databricks integration:
+
+1. **Clearer Module Responsibilities**: Each module now has more clearly defined responsibilities:
+   - `Databricks.ts`: Primary orchestrator that coordinates between specialized modules
+   - `config.ts`: Configuration management and validation
+   - `errors.ts`: Error handling and recovery strategies
+   - `helpers.ts`: General utility functions for parameter processing
+   - `messages.ts`: Message formatting and transformation
+   - `streaming.ts`: Stream processing and chunk handling
+   - `toolcalls.ts`: Tool call processing and result formatting
+
+2. **Improved Error Handling**: Enhanced error handling with better recovery mechanisms:
+   - Structured error results with preserved state information
+   - Exponential backoff for transient errors
+   - Type-safe error processing with standardized patterns
+
+3. **Better State Management**: Improved state management between modules:
+   - Clear state interfaces with proper type definitions
+   - Immutable update patterns for state changes
+   - Preservation of state during error recovery
+   - Type-safe state transitions
+
+4. **Standardized Logging**: Consolidated approach to logging:
+   - Consistent message formats
+   - Safe object stringification
+   - Exception handling for logging operations
+   - Conditional detailed logging based on environment
 
 ## JSON Processing for Streaming Content
 

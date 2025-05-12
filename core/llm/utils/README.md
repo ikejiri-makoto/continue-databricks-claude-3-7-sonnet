@@ -735,6 +735,35 @@ try {
 }
 ```
 
+### Enhanced Type Guard Functions (May 2025)
+
+Added specialized type guard functions for safer property access:
+
+```typescript
+// Type guard for checking if content is an array
+function isArrayContent(content: any): content is any[] {
+  return Array.isArray(content);
+}
+
+// Type guard for checking object properties
+function isContentObject(content: any): content is { summary?: any } {
+  return typeof content === 'object' && content !== null;
+}
+
+// Using type guards to safely access properties
+if (isArrayContent(content)) {
+  // Safe to access array methods and properties
+  const firstItem = content[0];
+  // ...
+} else if (isContentObject(content) && content.summary) {
+  // Safe to access the summary property
+  const summaryText = content.summary.text;
+  // ...
+}
+```
+
+These type guards help prevent "Property does not exist on type 'never'" errors, which commonly happen when TypeScript loses track of an object's structure in complex conditionals.
+
 ## Best Practices for Utility Usage
 
 ### Type Safety
@@ -945,5 +974,12 @@ To maximize code reuse and maintain clear responsibility boundaries:
     - Never directly access properties on unknown error types
     - Use type guards to narrow error types when needed
     - Leverage `isConnectionError` and similar utilities for error classification
+
+14. **Type Guard Functions for Safe Property Access**:
+    - Use type guard functions to safely check object properties and narrow types
+    - Create specialized type guards for different data structures
+    - Use TypeScript's "is" type predicate for effective type narrowing
+    - Combine type guards with proper conditionals for complex type narrowing
+    - Ensure proper error handling when type guards fail
 
 By following these guidelines, we can maintain high code quality with clear module boundaries while minimizing code duplication across the codebase.
