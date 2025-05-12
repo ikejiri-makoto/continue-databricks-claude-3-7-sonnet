@@ -487,7 +487,11 @@ The framework has been enhanced with several improvements as of May 2025:
 
 8. **API URL Normalization and Validation**: Added utilities to ensure consistent and correct API endpoint resolution.
 
-9. **Improved Databricks Claude 3.7 Integration**: Enhanced support for Databricks-hosted Claude 3.7 models with proper thinking mode handling and endpoint configuration.
+9. **Improved Databricks Claude 3.7 Integration**: Enhanced support for Databricks-hosted Claude 3.7 models with proper thinking mode handling and endpoint configuration. Key improvements include:
+   - Intelligent extraction of parameters from `extra_body` to root level for Databricks compatibility
+   - Automatic handling of both OpenAI-compatible client calls and direct REST API calls
+   - Elimination of the `extra_body: Extra inputs are not permitted` error
+   - Enhanced parameter validation and unsupported parameter filtering
 
 10. **Provider-specific Parameter Management**: Added improved validation and filtering of unsupported parameters for various providers.
 

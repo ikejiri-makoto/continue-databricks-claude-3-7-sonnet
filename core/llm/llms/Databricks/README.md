@@ -6,55 +6,79 @@ This directory contains the implementation for connecting Continue VS Code exten
 
 ### API Parameter Differences for Claude's Thinking Mode
 
-**IMPORTANT**: Databricks endpoints require different API parameter placement for Claude's thinking mode compared to direct Anthropic API calls. The key differences are:
+**IMPORTANT**: Databricks endpoints have specific requirements for Claude's thinking mode implementation that differ from direct Anthropic API calls. The key differences are:
 
-1. Databricks requires the `thinking` parameter to be placed inside the `extra_body` object, not at the top level
-2. Model names need a `databricks-` prefix (e.g., `databricks-claude-3-7-sonnet` instead of `claude-3-7-sonnet-20240219`)
-3. When disabling thinking mode, the `budget_tokens` parameter must be completely excluded (partial settings are not allowed)
+1. **Parameter Placement**: When using REST API directly with Databricks, the `thinking` parameter must be placed at the root level of the request, not within `extra_body`
+2. **Model Names**: Require a `databricks-` prefix (e.g., `databricks-claude-3-7-sonnet` instead of `claude-3-7-sonnet-20240219`)
+3. **Parameter Exclusion**: When disabling thinking mode, the `budget_tokens` parameter must be completely excluded (partial settings are not allowed)
 
-Example comparison:
+#### REST API vs OpenAI Compatible Client
+
+There are two ways to implement thinking mode for Databricks endpoints:
+
 ```typescript
-// Anthropic direct API
-const response = await anthropicClient.messages.create({
-  model: "claude-3-7-sonnet-20240219",
+// 1. Direct REST API approach (RECOMMENDED) - thinking at root level
+const requestBody = {
+  model: "databricks-claude-3-7-sonnet",
+  messages: [
+    {"role": "user", "content": "量子コンピューティングについて説明してください"}
+  ],
+  max_tokens: 20000,
   thinking: {
     type: "enabled",
-    budget_tokens: 10240
-  },
-  // Other parameters
-});
+    budget_tokens: 8000
+  }
+}
 
-// Databricks API
+// 2. OpenAI compatible client approach - thinking inside extra_body
+// NOTE: This approach may be rejected by some Databricks endpoints
 const response = await client.chat.completions.create({
   model: "databricks-claude-3-7-sonnet",
-  // IMPORTANT: thinking parameter inside extra_body object
+  messages: [{"role": "user", "content": "量子コンピューティングについて説明してください"}],
+  max_tokens: 20480,
   extra_body: {
     thinking: {
       type: "enabled",
       budget_tokens: 10240
     }
-  },
-  // Other parameters
+  }
 });
 ```
 
-These parameter structure differences have been handled in the implementation to ensure compatibility with Databricks endpoints.
+**UPDATE (2025年5月)**: Our implementation now automatically extracts the `thinking` parameter from `extra_body` and places it at the root level of the request for Databricks compatibility. This handles both cases transparently:
 
-### About the `parallel_tool_calls` Parameter
+- If the thinking parameter is provided in `extra_body`, it's extracted and placed at the root level
+- If the thinking parameter is already at the root level, it's maintained as is
+- All unnecessary parameters are filtered out before sending the request to Databricks
 
-**IMPORTANT**: Databricks endpoints do not support the `parallel_tool_calls` parameter. This parameter is used by other providers (like OpenAI) to process tool calls in parallel, but Databricks endpoints do not recognize this parameter and it may cause errors.
+### About the `parallel_tool_calls` and `extra_body` Parameters
 
-The following measures have been implemented to address this issue:
+**IMPORTANT**: Databricks endpoints have two key parameter limitations:
 
-1. **Exclusion at Type Definition Level**: Intentionally excluded this parameter from the `DatabricksCompletionOptions` and `DatabricksLLMOptions` interfaces to ensure type safety
-2. **Parameter Setting Avoidance**: Modified `DatabricksHelpers.convertArgs()` to avoid setting this parameter
-3. **Safe Access**: Modified to access tool information directly from properly typed `args` object instead of `requestBody` object
-4. **Detailed Logging**: Added detailed logging for tool-related processing to facilitate debugging
-5. **Error Detection and Handling**: Enhanced error handling to detect and handle special error patterns
-6. **Safe Value Checking and Removal**: Added final validation before sending requests to automatically remove the `parallel_tool_calls` parameter if present
-7. **Multiple Lines of Defense**: Multiple checkpoints through `convertArgs()` and request body construction
+1. **No Support for `parallel_tool_calls`**: This parameter (used by other providers like OpenAI) is not supported by Databricks endpoints and will cause errors.
 
-These measures improve compatibility with Databricks endpoints for tool calling functionality and prevent errors.
+2. **Special Handling for `extra_body`**: Databricks endpoints may reject requests with `extra_body` as a top-level parameter. Instead, the contents of `extra_body` need to be extracted and placed at the root level of the request.
+
+The following measures have been implemented to address these issues:
+
+1. **Exclusion at Type Definition Level**: We've intentionally excluded unsupported parameters from the `DatabricksCompletionOptions` and `DatabricksLLMOptions` interfaces to ensure type safety
+
+2. **Intelligent Parameter Processing**: Modified `DatabricksHelpers.convertArgs()` to:
+   - Avoid setting `parallel_tool_calls` parameter
+   - Extract contents from `extra_body` (particularly `thinking` parameter) and place them at the root level
+   - Handle all parameter transformations transparently
+
+3. **Safe Access and Detailed Logging**: 
+   - Modified to access tool information directly from properly typed `args` object
+   - Added comprehensive logging for request parameters
+   - Improved error detection for unsupported parameters
+
+4. **Multiple Validation Layers**:
+   - Final validation before sending requests to ensure clean parameters
+   - Automatic correction of problematic parameters when possible
+   - Detailed error reporting when invalid parameters are detected
+
+These enhancements ensure reliable communication with Databricks endpoints while maintaining compatibility with different client approaches.
 
 ### Debugging and Logging Best Practices
 
@@ -114,7 +138,32 @@ These measures improve compatibility with Databricks endpoints for tool calling 
 
 These best practices prevent `[object Object]` issues in logs and ensure more useful information is being logged.
 
-### Thinking Mode Processing
+### Thinking Mode Parameters and Processing
+
+#### Request Parameters for Thinking Mode
+
+To enable thinking mode for Claude 3.7 Sonnet models, the following parameters need to be set properly:
+
+```typescript
+// Correct structure for Databricks REST API
+{
+  "model": "databricks-claude-3-7-sonnet",
+  "messages": [ /* messages */ ],
+  "max_tokens": 20000,
+  "thinking": {
+    "type": "enabled",
+    "budget_tokens": 8000  // Must be less than max_tokens
+  }
+}
+```
+
+**Key Constraints**:
+- `budget_tokens` should be smaller than `max_tokens`
+- Minimum recommended value is 1,024 tokens
+- For complex reasoning tasks, at least 4,000 tokens is recommended
+- Values larger than 32K may not result in better performance
+
+#### Response Processing for Thinking Mode
 
 Claude 3.7 Sonnet's thinking mode can return data in multiple different formats. In streaming mode, this thinking data may be sent in various formats:
 
@@ -225,9 +274,30 @@ finalOptions.extra_body = {
 
 Note that thinking mode is only supported by Claude 3.7 Sonnet models.
 
-## Type Safety and Reduced Complexity
+## May 2025 Updates
 
-With the May 2025 update, we've simplified thinking mode processing logic to focus exclusively on the `choices[0].delta.content.summary.text` format. This leads to several benefits:
+### Parameter Handling Improvements
+
+The May 2025 update includes several important improvements to parameter handling for Databricks endpoints:
+
+1. **Intelligent `extra_body` Processing**: The implementation now automatically extracts parameters from `extra_body` and places them at the root level for Databricks compatibility
+   - This handles both OpenAI-compatible client calls and direct REST API calls
+   - Eliminates the `extra_body: Extra inputs are not permitted` error
+   - Makes the implementation more robust and flexible
+
+2. **Enhanced Debug Logging**: Improved logging for request parameters and response processing
+   - Complete request body logging for better debugging
+   - Detailed parameter tracking
+   - Clear error messages for parameter issues
+
+3. **Type-Safe Parameter Handling**: Better type definitions and handling of request parameters
+   - Clearer type definitions for request options
+   - Better error detection for unsupported parameters
+   - Safer parameter transformation
+
+### Thinking Mode Processing Enhancements
+
+With the May 2025 update, we've also simplified thinking mode processing logic to focus exclusively on the `choices[0].delta.content.summary.text` format. This leads to several benefits:
 
 1. **Improved Type Safety**: By focusing on one specific format with well-defined type guards, we avoid TypeScript compilation errors
 2. **Reduced Complexity**: The simplified approach makes the code easier to understand and maintain
@@ -279,7 +349,10 @@ models:
     model: "databricks-claude-3-7-sonnet"
 ```
 
-Important: The API base URL must always end with `/invocations`. You can verify if the URL is correctly configured by checking the console logs, which show the URL transformation process via `DatabricksConfig.normalizeApiUrl` and `DatabricksConfig.getFullApiEndpoint`.
+**Important Notes**:
+- The API base URL must always end with `/invocations`. The implementation will automatically normalize URLs by adding this suffix if missing.
+- You can verify URL configuration in the console logs, which show the URL transformation via `DatabricksConfig.normalizeApiUrl` and `DatabricksConfig.getFullApiEndpoint`.
+- If you're seeing `extra_body: Extra inputs are not permitted` errors, check that you're using the latest implementation that correctly handles parameter extraction.
 
 ## Claude 3.7 Sonnet Thinking Mode Configuration
 
@@ -357,6 +430,21 @@ const content = response?.choices?.[0]?.message?.content ?? 'No response content
 
 ## Troubleshooting
 
+### If `extra_body: Extra inputs are not permitted` Errors Occur
+
+This error occurs when the Databricks endpoint does not recognize the `extra_body` parameter. With the May 2025 update, this error should be resolved automatically as the implementation now extracts parameters from `extra_body` and places them at the root level.
+
+If you still encounter this error:
+
+1. Ensure you're using the latest implementation with the May 2025 updates
+2. Check that the `DatabricksHelpers.convertArgs()` method correctly processes the `extra_body` parameter
+3. Enable detailed debug logging to see the exact request being sent
+
+```yaml
+# Enable debug logging (add to config.yaml)
+debug: true
+```
+
 ### If parallel_tool_calls Errors Occur
 
 If you see error messages like this in the error logs:
@@ -369,14 +457,7 @@ Check the following:
 
 1. Whether you're using the latest code version (with May 2025 updates applied)
 2. Whether `Databricks.ts` file is using `args.tools` instead of `requestBody.tools`
-3. Whether `DatabricksHelpers.convertArgs()` method is not setting the `parallel_tool_calls` parameter
-
-If these issues persist, enable detailed debug logging to identify the problem:
-
-```typescript
-// Enable debug logging (add to config.yaml)
-debug: true
-```
+3. Whether `DatabricksHelpers.convertArgs()` method is properly removing the `parallel_tool_calls` parameter
 
 ### If `[object Object]` is Displayed
 
@@ -403,6 +484,23 @@ If TypeScript compilation errors occur, check:
 3. **ContentObject Pattern**: Use the `isContentObject` type guard for safely checking object properties
 4. **Content Extraction**: Use `extractContentAsString` to safely handle `MessageContent` type, which can be string or object
 
+## Implementation Details
+
+### Parameter Processing Flow
+
+The implementation follows a clear processing flow for handling parameters:
+
+1. **Parameter Collection**: Gather parameters from user options
+2. **Parameter Transformation**: Transform parameters to match Databricks requirements:
+   - For thinking mode: Extract from `extra_body` if present, or construct from default values
+   - For tools: Process and validate tool definitions
+   - For unsupported parameters: Remove parameters not supported by Databricks
+3. **Parameter Validation**: Ensure all parameters are valid and properly formatted
+4. **Request Construction**: Build the final request with properly structured parameters
+5. **Error Handling**: Handle error responses with detailed information
+
+This approach ensures robust communication with Databricks endpoints while maintaining compatibility with different client approaches.
+
 ## Future Improvement Plans
 
 1. **Performance Optimization**: Further optimize request processing and response parsing performance
@@ -415,4 +513,4 @@ If TypeScript compilation errors occur, check:
 8. **Performance Metrics Collection**: Detailed performance measurement and metrics collection for optimization
 9. **Expanded Automated Testing**: More comprehensive automated testing for quality assurance
 
-This modularized architecture significantly improves the extension's stability and maintainability, making it easier to adapt to future API changes. The May 2025 improvements have resolved URL routing issues, improved type safety and common utility usage. Most importantly, Claude 3.7 Sonnet's thinking mode is now correctly processed with a more focused approach to handling the `choices[0].delta.content.summary.text` format, eliminating the previous [object Object] display issues.
+This modularized architecture significantly improves the extension's stability and maintainability, making it easier to adapt to future API changes. The May 2025 improvements have resolved parameter handling issues, improved type safety and common utility usage. Most importantly, both the `extra_body` parameter processing and Claude 3.7 Sonnet's thinking mode are now correctly handled with a more focused approach, eliminating previous errors and display issues.

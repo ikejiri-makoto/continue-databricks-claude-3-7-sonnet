@@ -234,7 +234,7 @@ class Databricks extends BaseLLM {
           console.log(`Databricksリクエスト: ツール名=${toolNames}`);
           
           // 開発モードでより詳細なツール情報をログ出力
-          if (process.env.NODE_ENV === 'development') {
+          if (process.env.NODE_ENV === 'development' || true) {
             args.tools.forEach((tool: any, index: number) => {
               const toolInfo = {
                 name: tool?.function?.name || 'unnamed',
@@ -266,6 +266,9 @@ class Databricks extends BaseLLM {
       // リクエストのJSON化と最終チェック
       const requestBodyString = safeStringify(requestBody, "{}");
       
+      // 完全なリクエストボディを詳細にログ出力（デバッグ用）
+      console.log(`完全なリクエストボディJSON: ${requestBodyString}`);
+      
       // DatabricksのエンドポイントにOpenAI形式でリクエスト（修正版を使用）
       const response = await this.fetch(apiEndpoint, {
         method: "POST",
@@ -276,6 +279,9 @@ class Databricks extends BaseLLM {
         body: requestBodyString,
         signal: combinedSignal,
       });
+      
+      // レスポンスヘッダー情報をログ出力
+      console.log(`Request ID: ${response.headers.get('x-request-id') || response.headers.get('x-ms-request-id') || 'unknown'}, Status: ${response.status}`);
       
       // タイムアウトタイマーをクリア
       clearTimeout(timeoutId);

@@ -20,6 +20,7 @@ export class DatabricksHelpers {
     'tool_choice',          // Databricksがサポートしているか不明
     'functions',            // 古いOpenAIの要求形式
     'reasoning'             // Databricksではエラーになるパラメータ（追加）
+    // 'extra_body' は削除 - extra_bodyは除外せず、その内容を処理する
   ];
 
   /**
@@ -61,15 +62,18 @@ export class DatabricksHelpers {
       
       console.log(`Token settings - max_tokens: ${args.max_tokens}, thinking budget: ${thinkingBudgetTokens}`);
       
-      // 重要: Databricksエンドポイントで思考モードを使用するには、extra_bodyに配置する必要がある
-      // reasoningパラメータの代わりにthinkingパラメータをextra_body内に配置
-      args.extra_body = {
-        thinking: {
+      // 重要: extra_bodyから思考モードパラメータを抽出してトップレベルに配置
+      if (options.extra_body && typeof options.extra_body === 'object' && options.extra_body.thinking) {
+        // extra_bodyから直接thinking設定を抽出
+        console.log('思考モードパラメータをextra_bodyから抽出してルートに配置します');
+        args.thinking = options.extra_body.thinking;
+      } else {
+        // デフォルトの思考モード設定
+        args.thinking = {
           type: "enabled",
           budget_tokens: thinkingBudgetTokens
-        }
-      };
-    }
+        };
+      }
     
     // ツール設定の処理
     if (options.tools && Array.isArray(options.tools) && options.tools.length > 0) {
@@ -110,8 +114,26 @@ export class DatabricksHelpers {
       delete args.reasoning;
     }
     
+    // extra_bodyの内容を適切に処理 - extra_bodyをそのまま削除せず、その内容を処理する
+    if ('extra_body' in args && typeof args.extra_body === 'object') {
+      console.log('extra_bodyが検出されました - 内容を処理します');
+      
+      // extra_bodyの内容を処理
+      if (args.extra_body.thinking) {
+        console.log('extra_body内のthinkingパラメータをルートに移動します');
+        args.thinking = args.extra_body.thinking;
+      }
+      
+      // 処理後にextra_bodyを削除
+      delete args.extra_body;
+      console.log('extra_bodyパラメータを処理して削除しました');
+    }
+    
     // Databricksエンドポイントに送信するパラメータのログ
     console.log(`Databricksに送信するパラメータ: ${Object.keys(args).join(', ')}`);
+    
+    // 完全なリクエストボディをログ出力（デバッグ用）
+    this.logRequestBody(args);
     
     return args;
   }
@@ -142,16 +164,32 @@ export class DatabricksHelpers {
       delete obj.reasoning;
     }
     
+    // extra_bodyは特別に処理 - 直接削除せず、必要な内容を抽出
+    if ('extra_body' in obj && typeof obj.extra_body === 'object') {
+      // extra_bodyの内容を確認
+      if (obj.extra_body.thinking) {
+        console.log('extra_body内のthinkingパラメータを処理します');
+        // thinkingパラメータをルートレベルに移動
+        if (!obj.thinking) {
+          obj.thinking = obj.extra_body.thinking;
+        }
+      }
+      
+      // その他のextra_body内のパラメータを処理（思考モード以外にも必要なパラメータがあれば）
+      const extraBodyKeys = Object.keys(obj.extra_body);
+      for (const key of extraBodyKeys) {
+        if (key !== 'thinking' && !(key in obj) && !this.UNSUPPORTED_PARAMETERS.includes(key)) {
+          console.log(`extra_body内の${key}パラメータをルートに移動します`);
+          obj[key] = obj.extra_body[key];
+        }
+      }
+    }
+    
     // thinking関連パラメータを確認し、適切に処理
     if (obj.thinking && typeof obj.thinking === 'object' && obj.thinking.type === 'enabled') {
-      // Databricksエンドポイントでは直接thinkingパラメータを使用せず、
-      // thinkingパラメータはextra_body内で設定される必要がある
-      // ただし、変換はconvertArgs関数で一括して行うため、ここでは削除のみを行う
-      
-      // バッファリング中にthinkingパラメータが見つかった場合は削除
-      if (!('extra_body' in obj)) {
-        delete obj.thinking;
-      }
+      // Databricksエンドポイントでは思考モードパラメータをトップレベルに配置する
+      // convertArgs関数で適切に設定されているので、ここでは何もしない
+      console.log(`思考モードが設定されています: ${JSON.stringify(obj.thinking)}`);
     }
     
     // その他のサポートされていないパラメータも削除
@@ -229,6 +267,9 @@ export class DatabricksHelpers {
    */
   static logRequestBody(requestBody: any): void {
     try {
+      // まず完全なリクエストボディを詳細ログに出力（デバッグ用）
+      console.log(`Databricks Claudeに発行している詳細なリクエストのJSON: ${safeStringify(requestBody, "{}")}`);
+      
       // 長いメッセージコンテンツを省略してログ出力
       const loggableBody = { ...requestBody };
       
@@ -245,7 +286,12 @@ export class DatabricksHelpers {
       }
       
       const bodyString = safeStringify(loggableBody, "{}");
-      console.log(`Request body (truncated): ${bodyString.substring(0, 500)}${bodyString.length > 500 ? '...' : ''}`);
+      console.log(`完全なリクエストボディ (一部省略): ${bodyString.substring(0, 500)}${bodyString.length > 500 ? '...' : ''}`);
+      
+      // リクエストBodyの重要な部分を個別にログ出力
+      console.log(`Databricks request model: ${requestBody.model || '未指定'}`);
+      console.log(`Databricks request max_tokens: ${requestBody.max_tokens || '未指定'}`);
+      console.log(`Databricks request thinking設定: ${safeStringify(requestBody.thinking || {}, "{}")}`);
       
       // 重要: サポートされていないパラメータがリクエストボディに含まれていないか最終確認
       // 特にparallel_tool_callsとreasoingパラメータは重要なので明示的に確認
@@ -255,6 +301,10 @@ export class DatabricksHelpers {
       
       if (bodyString.includes('"reasoning"')) {
         console.error(`警告: リクエストボディ内にreasoningが検出されました。これは問題を引き起こす可能性があります。`);
+      }
+      
+      if (bodyString.includes('"extra_body"')) {
+        console.error(`警告: リクエストボディ内にextra_bodyが検出されました。これは問題を引き起こす可能性があります。`);
       }
     } catch (e) {
       console.log("リクエストボディのログ出力に失敗しました");
