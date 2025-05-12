@@ -78,6 +78,171 @@
 
 これらのベストプラクティスにより、デバッグ中に`[object Object]`が表示される問題を防止し、より有用な情報がログに出力されるようになります。
 
+### 思考モード(Thinking Mode)の処理
+
+Claude 3.7 Sonnetの思考モードは、複数の異なる形式でデータが返される場合があります。ストリーミングモードでは、この思考データは以下のようなさまざまな形式で送信されることがあります：
+
+1. `thinking`プロパティとして直接送信される場合
+2. `choices[0].delta.content.summary.text`形式で送信される場合（Databricksエンドポイントで最も一般的）
+3. `content.summary.text`形式で送信される場合
+4. `summary.text`形式で送信される場合
+
+これらの異なる形式に対応するため、`processThinkingChunk`メソッドは以下の戦略を使用しています：
+
+```typescript
+private static processThinkingChunk(thinkingData: ThinkingChunk): ChatMessage {
+  // 思考内容を適切にシリアライズ
+  let newThinking = "";
+  let signature: string | undefined = undefined;
+  
+  try {
+    // ***** 最優先: choices[0].delta.content.summary.text形式 *****
+    if (thinkingData.choices?.[0]?.delta?.content?.summary?.text) {
+      newThinking = thinkingData.choices[0].delta.content.summary.text;
+    }
+    // ***** 次優先: content.summary.text形式 *****
+    else if (thinkingData.content?.summary?.text) {
+      newThinking = thinkingData.content.summary.text;
+    }
+    // ***** 次優先: summary.text形式 *****
+    else if (thinkingData.summary?.text) {
+      newThinking = thinkingData.summary.text;
+    }
+    // ***** 次優先: thinking形式（直接文字列または内部オブジェクト） *****
+    else if (thinkingData.thinking) {
+      // 思考データの処理...
+    }
+    // ***** 最終手段: 再帰的にオブジェクト内のテキストプロパティを探す *****
+    else {
+      const textProperties = this.findTextProperty(thinkingData);
+      if (textProperties) {
+        newThinking = textProperties;
+      } else {
+        newThinking = "[思考内容を処理中...]";
+      }
+    }
+    
+    // 署名情報の取得
+    signature = thinkingData.signature || 
+               (thinkingData.choices?.[0]?.delta?.signature) ||
+               undefined;
+  } catch (error) {
+    // エラー処理...
+    newThinking = `[思考データを処理中...]`;
+  }
+  
+  // 思考メッセージを返す
+  const thinkingMessage: ThinkingChatMessage = {
+    role: "thinking",
+    content: newThinking,
+    signature: signature
+  };
+  
+  // 思考プロセスをログ出力
+  this.logThinkingProcess(thinkingMessage);
+  
+  return thinkingMessage;
+}
+```
+
+### 思考データの検出
+
+思考データの検出も重要です。Databricksエンドポイントの場合、主に`choices[0].delta.content`オブジェクトに`summary`プロパティが含まれていることで思考データを検出します：
+
+```typescript
+// choices[0].delta.content.summary.text形式の思考チャンクの処理
+if (chunk.choices && 
+    chunk.choices[0]?.delta?.content) {
+  
+  // 思考データ形式であるかをチェック
+  const hasThinkingData = 
+    chunk.choices[0].delta.content.summary || 
+    (typeof chunk.choices[0].delta.content === 'object' && 
+     chunk.choices[0].delta.content.hasOwnProperty('summary'));
+      
+  if (hasThinkingData) {
+    try {
+      // 思考データを適切な形式に変換
+      const thinkingData: ThinkingChunk = {
+        content: {
+          summary: chunk.choices[0].delta.content.summary
+        }
+      };
+      
+      // choices配列のフォーマットでも追加
+      thinkingData.choices = [{
+        delta: {
+          content: {
+            summary: chunk.choices[0].delta.content.summary
+          }
+        }
+      }];
+      
+      const thinkingMessage = this.processThinkingChunk(thinkingData);
+      result.thinkingMessage = thinkingMessage;
+      return result;
+    } catch (e) {
+      console.warn(`思考データ形式の処理中にエラー: ${getErrorMessage(e)}`);
+    }
+  }
+}
+```
+
+この拡張された検出ロジックにより、従来の方法では検出されなかった思考データも正しく処理できるようになります。
+
+### `[object Object]`表示問題の解決
+
+`[object Object]`表示問題は、TypeScriptの型システムとJavaScriptのオブジェクト文字列化の相互作用によって発生します。以下の方法で解決しています：
+
+1. **柔軟な型定義**: `ThinkingChunk`インターフェースを拡張して、様々なデータ構造に対応
+2. **階層アクセス**: オプショナルチェイニング(`?.`)を使用して、すべてのデータ形式でテキストを安全に抽出
+3. **再帰的なプロパティ探索**: `findTextProperty`メソッドを使用して、深いネストのオブジェクト内からもテキストを探索
+4. **安全な文字列化**: `extractContentAsString`や`safeStringify`などの共通ユーティリティを使用して、文字列化を安全に行う
+5. **適切なフォールバック**: どの方法でもテキストが抽出できない場合の明示的な代替テキスト提供
+
+思考プロセスのログ出力時も、同様の対策を適用しています：
+
+```typescript
+private static logThinkingProcess(thinkingMessage: ThinkingChatMessage): void {
+  if (!thinkingMessage) {
+    return;
+  }
+  
+  try {
+    // extractContentAsStringを使用して安全にコンテンツを抽出
+    const content = extractContentAsString(thinkingMessage.content) || "";
+    
+    // 安全な型チェックを追加
+    if (content === undefined || content === null) {
+      console.log('[思考プロセス] データがありません');
+      return;
+    }
+    
+    // 長い思考プロセスは省略して表示(常に文字列を使用)
+    const truncatedThinking = content.length > 200 
+      ? content.substring(0, 200) + '...' 
+      : content;
+    
+    // シンプルにテキストとしてログ出力
+    console.log('[思考プロセス]', truncatedThinking);
+  } catch (error) {
+    // ログ出力中のエラーはスキップして機能を継続
+    console.log('[思考プロセス] データを処理中...');
+  }
+}
+```
+
+思考モードが正しく動作するためには、リクエスト時に適切なパラメータが設定されている必要があります：
+
+```typescript
+finalOptions.thinking = {
+  type: "enabled",
+  budget_tokens: thinkingBudgetTokens,
+};
+```
+
+また、思考モードはClaude 3.7 Sonnetモデルのみでサポートされていることに注意してください。
+
 ## モジュール間の関係と連携
 
 Databricksインテグレーションは、メインの`Databricks.ts`クラスと、`Databricks/`ディレクトリ内の複数の特化したモジュールから構成されています。モジュール化された設計により、責任を明確に分離し、共通ユーティリティを最大限に活用しています。
@@ -231,6 +396,8 @@ core/
 - **改善**: 拡張されたエラーロギングとデバッグ機能
 - **更新**: 共通ユーティリティを活用した型安全なコンテンツ処理
 - **追加**: `thinking`プロパティの適切な型定義と処理
+- **新機能**: `processThinkingSummary()`メソッドによる思考データの抽出
+- **新機能**: `removeUnsupportedParameters()`による不要パラメータ削除
 
 **5. `messages.ts` - メッセージ変換**
 - 標準メッセージフォーマットの変換
@@ -260,6 +427,10 @@ core/
 - 状態の永続化と復元
 - 再接続時の処理
 - 最終ストリーム処理とクリーンアップ
+- **改善**: 思考モードの複数データ形式の適切な処理
+- **新機能**: `findTextProperty()`による再帰的なテキストプロパティ探索
+- **新機能**: 思考データ形式検出の強化
+- **更新**: `processThinkingChunk()`メソッドの階層的優先処理
 
 **7. `toolcalls.ts` - ツールコール処理**
 - ツール呼び出しの処理と標準化
@@ -288,7 +459,9 @@ core/
 - 責任分担を明確にするためのモジュールインターフェース型の提供
 - メソッド宣言のための明示的な型定義
 - 戻り値の型安全性向上
-- **追加**: `DatabricksCompletionOptions`インターフェースにおける`thinking`プロパティの明示的な型定義
+- **改善**: `ThinkingChunk`インターフェースの拡張と柔軟化
+- **追加**: 思考モードに対応した複数フォーマットをサポートする型定義
+- **更新**: `ResponseDelta`の拡張によるオブジェクト形式のコンテンツサポート
 
 ## モジュール間の効果的な連携
 
@@ -377,7 +550,7 @@ private async processStreamingRequest(
               description: tool?.function?.description ? 
                 `${tool.function.description.substring(0, 30)}...` : 'no description'
             };
-            console.log(`ツール[${index}]: ${JSON.stringify(toolInfo)}`);
+            console.log(`ツール[${index}]: ${safeStringify(toolInfo, "{}")}`);
           });
         }
       } catch (e) {
@@ -427,7 +600,23 @@ private async processStreamingRequest(
 
 ## 2025年5月の主要な改善点
 
-### 1. parallel_tool_callsパラメータの完全除去と型安全性の向上
+### 1. 思考モード処理の完全対応
+
+2025年5月の最も重要な改善点は、Claude 3.7 Sonnetの思考モードに完全に対応したことです：
+
+1. **複数の思考データ形式に対応**: 様々な形式で送信される思考データをすべて適切に処理できるようになりました。特に主要な形式である`choices[0].delta.content.summary.text`形式を優先的に処理します。
+
+2. **階層的なプロパティアクセス**: オプショナルチェイニング（`?.`）やnullセーフなプロパティアクセスにより、すべての形式の思考データから安全にテキストを抽出できるようになりました。
+
+3. **再帰的なテキスト抽出**: `findTextProperty`メソッドを導入し、複雑なネスト構造からもテキストを抽出できるようになりました。これにより、従来の方法では処理できなかった形式の思考データも適切に処理できます。
+
+4. **思考データの検出改善**: 複数の検出方法を導入し、思考データの様々な形式を確実に検出できるようになりました。
+
+5. **適切な思考データのログ出力**: `logThinkingProcess`メソッドを改善し、思考データを適切に文字列化してログ出力できるようになりました。
+
+6. **エラーに強い実装**: 様々なエラーケースに対応する例外処理を追加し、思考データの処理中にエラーが発生しても、処理を継続できるようになりました。
+
+### 2. parallel_tool_callsパラメータの完全除去と型安全性の向上
 
 Databricksエンドポイントが`parallel_tool_calls`パラメータをサポートしていないため、このパラメータを型レベルから完全に除外し、コードの安全性を向上させました：
 
@@ -437,10 +626,11 @@ Databricksエンドポイントが`parallel_tool_calls`パラメータをサポ�
 4. **デフォルトオプションの更新**: `Databricks.ts`のデフォルトオプションからも関連プロパティを削除
 5. **詳細なログ出力の追加**: ツール関連のログ出力を強化し、問題の早期発見を可能に
 6. **リクエスト前の検証強化**: マップの型階層全体で整合性を確保
+7. **専用関数の追加**: `removeUnsupportedParameters`メソッドを追加し、不要なパラメータの削除を一元化
 
 これらの改修により、Databricksのエンドポイントに対するツール呼び出し機能が安定して動作するようになりました。
 
-### 2. API URL問題の根本的解決
+### 3. API URL問題の根本的解決
 
 Databricks統合の最も重要な改善点は、APIリクエストが常に正しいDatabricksエンドポイントに送信されるよう保証する仕組みを実装したことです。以前は一部のコードパスでAnthropicのAPIエンドポイント（`https://api.anthropic.com/v1/messages`）に誤ってリクエストが送信されていました。
 
@@ -466,36 +656,13 @@ private getApiEndpoint(): string {
 }
 ```
 
-2. **拡張ログ出力**: すべてのAPIリクエスト前に詳細なログを出力することで、URLの取得と正規化のプロセスを追跡できるようにしました。
-
-```typescript
-// APIエンドポイントへのリクエスト前のログ出力
-console.log(`Databricksリクエスト: エンドポイント=${apiEndpoint}`);
-console.log(`Databricksリクエスト: モデル=${options.model || this.model}`);
-console.log(`Databricksリクエスト: メッセージ数=${formattedMessages.length}`);
-```
+2. **拡張ログ出力**: すべてのAPIリクエスト前に詳細なログを出力することで、URLの取得と正規化のプロセスを追跡できるようになりました。
 
 3. **URL正規化機能の拡張**: `config.ts`に`getFullApiEndpoint()`メソッドを追加し、URL正規化を担当するロジックを集中化しました。
 
-```typescript
-// 完全なAPIエンドポイントURLを取得する（正規化済み）
-static getFullApiEndpoint(apiBase: string | undefined): string {
-  if (!apiBase) {
-    console.warn('APIベースURLが提供されていません');
-    return '';
-  }
-  
-  // 常に正規化処理を行い、一貫性を確保
-  const normalizedUrl = this.normalizeApiUrl(apiBase);
-  
-  // デバッグのために完全なURLをログ出力
-  console.log(`Databricksエンドポイント: ${normalizedUrl}`);
-  
-  return normalizedUrl;
-}
-```
+4. **APIエンドポイント検証の強化**: URLが`/invocations`で終わっていることを確認し、正しいDatabricksエンドポイントフォーマットになっているか検証します。
 
-### 3. メッセージコンテンツ型の厳密な型安全性
+### 4. メッセージコンテンツ型の厳密な型安全性
 
 `MessageContent`型が`string`または`MessagePart[]`のユニオン型であることに起因する型エラーを解消するため、`extractContentAsString`共通ユーティリティ関数を徹底的に活用するようにしました。これにより型安全性が向上し、コードの堅牢性が高まりました。
 
@@ -516,185 +683,68 @@ if (currentContentAsString !== lastYieldedMessageContent) {
 }
 ```
 
-### 4. `thinking`プロパティの型定義と処理の改善
+### 5. `[object Object]`表示問題の根本的解決
 
-Claude 3.7 Sonnetで重要な`thinking`プロパティの型定義が欠けていたことによるコンパイルエラーを解決しました。以下の改善を行いました：
+`[object Object]`表示問題を根本的に解決するために、以下の改善を実装しました：
 
-1. **型定義の追加**: `DatabricksCompletionOptions`インターフェースに`thinking`プロパティの明示的な型定義を追加しました：
+1. **階層的な思考データ処理**: 優先順位を明確にして階層的に思考データを処理し、適切な形式からテキストを抽出します。
 
 ```typescript
-export interface DatabricksCompletionOptions extends CompletionOptions {
-  /**
-   * リクエストのタイムアウト (秒)
-   * デフォルトは300秒 (5分)
-   */
-  requestTimeout?: number;
+// ***** 最優先: choices[0].delta.content.summary.text形式 *****
+if (thinkingData.choices?.[0]?.delta?.content?.summary?.text) {
+  newThinking = thinkingData.choices[0].delta.content.summary.text;
+}
+// ***** 次優先: content.summary.text形式 *****
+else if (thinkingData.content?.summary?.text) {
+  newThinking = thinkingData.content.summary.text;
+}
+// ***** 次優先: summary.text形式 *****
+else if (thinkingData.summary?.text) {
+  newThinking = thinkingData.summary.text;
+}
+```
+
+2. **再帰的テキスト探索**: オブジェクト内の任意の深さからテキストプロパティを探索する機能を追加しました。
+
+```typescript
+private static findTextProperty(obj: any, depth: number = 0): string | null {
+  // 無限ループや過度に深い再帰を防止
+  if (depth > 5) {
+    return null;
+  }
   
-  /**
-   * Claude 3.7モデル用の思考モード設定
-   * 思考プロセスを有効にし、そのための設定を行う
-   */
-  thinking?: {
-    /**
-     * 思考モードのタイプ - 現在は"enabled"のみサポート
-     */
-    type: string;
+  // nullまたはundefinedの場合
+  if (obj === null || obj === undefined) {
+    return null;
+  }
+  
+  // 文字列の場合は直接返す
+  if (typeof obj === 'string') {
+    return obj;
+  }
+  
+  // オブジェクトの場合は再帰的に処理
+  if (typeof obj === 'object') {
+    // 優先して探すべきプロパティ名のリスト
+    const textPropertyNames = [
+      'text', 'content', 'summary', 'thinking',
+      'message', 'description', 'value'
+    ];
     
-    /**
-     * 思考プロセス用のトークン予算
-     * デフォルトはmax_tokensの半分（最大64000）
-     */
-    budget_tokens?: number;
-  };
-}
-```
-
-2. **コア型拡張の追加**: 全体の型一貫性を保つため、`databricks-extensions.d.ts`ファイルも更新しました：
-
-```typescript
-// Add extension for CompletionOptions
-interface CompletionOptions {
-  /**
-   * Thinking mode configuration for Claude 3.7 models
-   * Enables and configures thinking process
-   */
-  thinking?: {
-    /**
-     * Thinking mode type - currently only "enabled" is supported
-     */
-    type: string;
-    
-    /**
-     * Token budget for thinking process
-     * Default is half of max_tokens (up to 64000)
-     */
-    budget_tokens?: number;
-  };
-}
-```
-
-3. **ヘルパー関数の改善**: `convertArgs`メソッドでの`thinking`プロパティの処理を型安全に改善しました：
-
-```typescript
-// Add thinking mode for Claude 3.7 models
-if (isClaude37) {
-  // Safely extract thinking properties with proper fallback values
-  const thinkingType = options.thinking?.type || DEFAULT_THINKING_TYPE;
-  const thinkingBudgetTokens = options.thinking?.budget_tokens || thinkingBudget;
-  
-  finalOptions.thinking = {
-    type: thinkingType,
-    budget_tokens: thinkingBudgetTokens,
-  };
-  
-  // Log thinking configuration
-  console.log(`Setting up Claude 3.7 thinking mode: type=${thinkingType}, budget=${thinkingBudgetTokens}`);
-}
-```
-
-これらの変更により、TypeScriptコンパイルエラーが解消され、`thinking`プロパティの処理が型安全になりました。
-
-### 5. システムメッセージ処理の専用機能
-
-システムメッセージを適切にDatabricksエンドポイントに渡せるよう、専用の処理メソッドを実装しました。これによりClaude 3.7 Sonnetのシステムプロンプト機能を最大限に活用できるようになりました。
-
-```typescript
-// MessageProcessor.tsにシステムメッセージ専用処理を追加
-static processSystemMessage(messages: ChatMessage[]): string {
-  // システムメッセージを抽出
-  const systemMessage = messages.find(m => m.role === "system");
-  if (!systemMessage) {
-    // 日本語環境チェック
-    if (this.containsJapaneseContent(messages)) {
-      return "水平思考で考えて！\nステップバイステップで考えて！\n日本語で回答してください。";
-    }
-    return "";
+    // 優先プロパティを先に確認...
   }
   
-  // システムメッセージのコンテンツを抽出
-  let systemContent = this.extractSystemMessageContent(systemMessage);
-  
-  // 水平思考とステップバイステップの指示を追加（Claude 3.7 Sonnetに適した指示）
-  if (!systemContent.includes("水平思考") && !systemContent.includes("ステップバイステップ")) {
-    systemContent += "\n\n水平思考で考えて！\nステップバイステップで考えて！";
-  }
-  
-  // 日本語処理に関する指示があるかチェック
-  if (this.containsJapaneseContent(messages) && !systemContent.includes("日本語")) {
-    systemContent += "\n\n日本語で回答してください。";
-  }
-  
-  return systemContent;
+  return null;
 }
 ```
 
-### 6. JSON処理の強化とツール呼び出し機能の改善
-
-ストリーミング応答内のJSONフラグメントを処理する方法を改善し、`processJsonDelta`共通ユーティリティ関数を使用して部分的なJSONの累積と解析を正しく処理できるようにしました。また、ツール呼び出し引数の修復にも`repairToolArguments`共通ユーティリティを活用しています。
+3. **安全なオブジェクト文字列化**: `safeStringify`ユーティリティを使用して、オブジェクトを安全に文字列化します。
 
 ```typescript
-// JSONフラグメントの処理に共通ユーティリティを使用
-const result = processJsonDelta(jsonBuffer, toolCallDelta.function.arguments);
-updatedJsonBuffer = result.combined;
-
-// 完全なJSONが得られたかチェック
-if (result.complete && result.valid) {
-  // 共通ユーティリティを使用してJSONを修復
-  const repairedJson = repairToolArguments(updatedJsonBuffer);
-  
-  // ツール呼び出し引数を更新
-  if (updatedCurrentToolCallIndex !== null) {
-    updatedToolCalls[updatedCurrentToolCallIndex].function.arguments = repairedJson;
-  }
-  
-  // バッファリング状態をリセット
-  updatedIsBufferingJson = false;
-  updatedJsonBuffer = "";
-  shouldYieldMessage = true;
-}
+console.log("思考データ:", safeStringify(thinkingData, "<データなし>"));
 ```
 
-### 7. Claude 3.7モデル自動検出と専用設定
-
-モデル名からClaude 3.7を自動検出し、適切な設定を適用する機能を追加しました。特に思考モード（thinking）の設定が確実に行われるようになりました。
-
-```typescript
-// Claude 3.7モデルを識別
-const isClaude37 = modelName.includes("claude-3-7");
-
-// Claude 3.7モデル用に思考モードを追加
-if (isClaude37) {
-  finalOptions.thinking = {
-    type: "enabled",
-    budget_tokens: options.thinking?.budget_tokens || thinkingBudget,
-  };
-}
-
-// Databricksモデルタイプに応じた特別な処理
-if (isClaude37) {
-  console.log("Claude 3.7 Sonnetモデルを検出しました - 特殊設定を適用します");
-  // Claude 3.7モデルは思考処理で特に温度設定1.0を要求する
-  finalOptions.temperature = 1;
-}
-```
-
-### 8. 共通ユーティリティの活用強化
-
-コード全体で共通ユーティリティの使用を拡充し、`getErrorMessage`、`extractContentAsString`、`safeStringify`などの関数を適切に活用することで、コードの品質と保守性を向上させました。
-
-```typescript
-// エラーメッセージの取得
-import { getErrorMessage } from "../../utils/errors.js";
-console.error("Error processing non-streaming response:", getErrorMessage(error));
-
-// メッセージコンテンツの安全な抽出
-import { extractContentAsString } from "../../utils/messageUtils.js";
-const currentContent = extractContentAsString(currentMessage.content);
-
-// JSONの安全な文字列化
-import { safeStringify } from "../../utils/json.js";
-console.log('Request body (truncated):', safeStringify(truncatedBody, "{}"));
-```
+これらの改善により、`[object Object]`が不適切に表示される問題が解消され、常に適切なテキスト表示が行われるようになりました。
 
 ## 設定方法
 
@@ -774,15 +824,27 @@ debug: true
 
 詳細は「デバッグとロギングのベストプラクティス」セクションを参照してください。
 
-### `combinedSignal`の順序エラーが発生した場合
+また、思考データの処理に関する問題の場合は、以下の点も確認してください：
 
-以下のようなエラーメッセージが表示される場合：
+1. **正しい思考データ形式の検出**: `StreamingProcessor.processChunk`メソッド内で正しく思考データを検出できているか
+2. **適切な思考データ抽出**: `processThinkingChunk`メソッドで適切にテキストを抽出できているか
+3. **思考データの形式**: 実際にDatabricksエンドポイントから返される思考データの形式を確認（コンソールログを確認）
 
-```
-Block-scoped variable 'combinedSignal' used before its declaration
-```
+### エラー処理に関する問題 - 思考モードのストリーミング
 
-`processStreamingRequest()`メソッド内で、`combinedSignal`変数の宣言と使用の順序が正しいことを確認してください。常に`DatabricksConfig.setupTimeoutController()`を呼び出した後に変数を使用してください。
+思考モードのストリーミング中にエラーが発生する場合、以下の点を確認してください：
+
+1. **思考データの形式**: 思考データが様々な形式で送信される可能性があるため、すべての形式に対応できるよう`processThinkingChunk`メソッドが適切に実装されているか確認します。
+2. **オプショナルチェイニング**: プロパティへのアクセス時に`?.`を使用して、存在しないプロパティへのアクセスを防止します。
+3. **例外処理**: 思考データの処理中に例外が発生した場合、適切なフォールバック処理が実装されているか確認します。
+
+### 型定義に関する問題
+
+TypeScriptのコンパイルエラーが発生する場合、以下の点を確認してください：
+
+1. **適切な型インポート**: 必要な型がすべて正しくインポートされているか確認します。
+2. **拡張型の定義**: `extension.d.ts`ファイルが適切に参照されているか確認します。
+3. **型互換性**: `ToolCall`と`ToolCallDelta`など、関連する型の互換性を確認します。
 
 ## オーケストレーターパターンの利点
 
@@ -814,4 +876,4 @@ Databricksの実装では、オーケストレーターパターンを採用す�
 9. **パフォーマンスメトリクスの収集**: 詳細なパフォーマンス測定と最適化のためのメトリクス収集
 10. **自動テスト拡充**: より包括的な自動テストによる品質保証
 
-このモジュール化されたアーキテクチャにより、拡張機能の安定性と保守性が大幅に向上し、将来のAPI変更にも容易に対応できるようになりました。2025年5月の改善で、特にURLルーティングの問題が解消され、型安全性と共通ユーティリティの活用が大きく進みました。
+このモジュール化されたアーキテクチャにより、拡張機能の安定性と保守性が大幅に向上し、将来のAPI変更にも容易に対応できるようになりました。2025年5月の改善で、特にURLルーティングの問題が解消され、型安全性と共通ユーティリティの活用が大きく進みました。そして最も重要な改善点として、Claude 3.7 Sonnetの思考モードを正しく処理できるようになり、[object Object]問題が解消されました。

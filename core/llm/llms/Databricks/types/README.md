@@ -39,7 +39,10 @@ export type {
   ToolCallResult,
   ToolCallDelta,
   ErrorHandlingResult,
-  StreamingState
+  StreamingState,
+  ThinkingChunk,
+  StreamingResponseResult,
+  ReconnectionResult
 } from "./types";
 ```
 
@@ -51,62 +54,56 @@ export type {
 
 ```typescript
 /**
- * Databricks完了オプションの型
- * CompletionOptionsを拡張してDatabricks固有のパラメータを定義
+ * Databricks LLM特有のオプション型
+ * parallel_tool_callsはDatabricksエンドポイントではサポートされないため含まれていない
+ */
+export interface DatabricksLLMOptions extends LLMOptions {
+  apiBase?: string;
+  apiKey?: string;
+  alwaysLogThinking?: boolean;
+}
+
+/**
+ * Databricksリクエスト時の補完オプション型
+ * parallel_tool_callsはDatabricksエンドポイントではサポートされないため含まれていない
  */
 export interface DatabricksCompletionOptions extends CompletionOptions {
-  apiKey?: string;              // 認証用APIキー
-  apiBase?: string;             // APIベースURL
-  requestTimeout?: number;      // リクエストのタイムアウト（秒）
-  thinking?: {                  // Claude 3.7の思考モード設定
-    type: string;               // 思考モードのタイプ（"enabled"のみサポート）
-    budget_tokens?: number;     // 思考プロセスのトークン予算
+  /**
+   * リクエストのタイムアウト (秒)
+   * デフォルトは300秒 (5分)
+   */
+  requestTimeout?: number;
+  
+  /**
+   * API Base URL
+   */
+  apiBase?: string;
+  
+  /**
+   * API Key
+   */
+  apiKey?: string;
+  
+  /**
+   * Claude 3.7モデル用の思考モード設定
+   * 思考プロセスを有効にし、そのための設定を行う
+   */
+  thinking?: {
+    /**
+     * 思考モードのタイプ - 現在は"enabled"のみサポート
+     */
+    type: string;
+    
+    /**
+     * 思考プロセス用のトークン予算
+     * デフォルトはmax_tokensの半分（最大64000）
+     */
+    budget_tokens?: number;
   };
 }
 ```
 
-#### ストリーミング関連の型
-
-```typescript
-/**
- * 永続的なストリーム状態を表す型
- * 再接続を可能にするためのストリーミング中の状態を追跡
- */
-export interface StreamingState {
-  jsonBuffer: string;                 // JSONフラグメント蓄積用バッファ
-  isBufferingJson: boolean;           // JSON収集中フラグ
-  toolCallsInProgress: any[];         // 処理中のツール呼び出し
-  currentToolCallIndex: number | null; // 現在のツール呼び出しインデックス
-  contentBuffer: string;              // これまでに蓄積されたコンテンツ
-  lastReconnectTimestamp: number;     // 最後の再接続タイムスタンプ
-}
-
-/**
- * ストリーミングレスポンス結果
- * ストリーミングレスポンス処理の戻り値型
- */
-export interface StreamingResponseResult {
-  success: boolean;             // 成功フラグ
-  messages: ChatMessage[];      // 処理されたメッセージ
-  error?: Error;                // エラー（存在する場合）
-  state?: StreamingState;       // 再接続用の状態
-}
-
-/**
- * ツール呼び出し結果
- * ツール呼び出し処理の戻り値型
- */
-export interface ToolCallResult {
-  updatedToolCalls: any[];                  // 更新されたツール呼び出し
-  updatedCurrentToolCall: any | null;       // 現在のツール呼び出し
-  updatedCurrentToolCallIndex: number | null; // 現在のツール呼び出しインデックス
-  updatedJsonBuffer: string;                // 更新されたJSONバッファ
-  updatedIsBufferingJson: boolean;          // 更新されたバッファリングフラグ
-  shouldYieldMessage: boolean;              // メッセージを生成すべきかを示すフラグ
-}
-```
-
-#### ツール関連の型
+#### ツール関連の型定義
 
 ```typescript
 /**
@@ -114,7 +111,7 @@ export interface ToolCallResult {
  */
 export interface ToolCall {
   id: string;
-  type: string;  // 常に"function"に固定すべき
+  type: string;
   function: {
     name: string;
     arguments: string;
@@ -122,23 +119,205 @@ export interface ToolCall {
 }
 
 /**
- * ツール呼び出しデルタ型（ストリーミング用）
+ * ツール結果メッセージ型
+ */
+export interface ToolResultMessage {
+  role: string;
+  tool_call_id: string;
+  content: string;
+}
+
+/**
+ * ストリーミングチャンク内のツール呼び出しデルタ
  */
 export interface ToolCallDelta {
   index: number;
   id?: string;
-  type?: string;  // 常に"function"に固定すべき
+  type?: string; // typeプロパティを追加して型の互換性を確保
   function?: {
     name?: string;
     arguments?: string;
   };
 }
+```
+
+#### ストリーミング関連の型定義
+
+```typescript
+/**
+ * ストリーミングレスポンスデルタ
+ */
+export interface ResponseDelta {
+  tool_calls?: ToolCallDelta[];
+  content?: string | {
+    summary?: {
+      text?: string;
+    };
+  };
+  signature?: string;
+}
 
 /**
- * ツール呼び出しプロセッサインターフェース
+ * ストリーミングチャンク型
+ */
+export interface StreamingChunk {
+  id?: string;
+  object?: string;
+  created?: number;
+  model?: string;
+  thinking?: any; // 思考データは様々な形式で来る可能性があるためany型
+  choices?: Array<{
+    index?: number;
+    delta?: ResponseDelta & {
+      content?: string | {
+        summary?: {
+          text?: string;
+        };
+      }; // content.summary.textなどの入れ子構造に対応
+    };
+    finish_reason?: string | null;
+  }>;
+}
+
+/**
+ * 思考チャンク型 - 拡張版
+ * 様々な思考データ構造に対応する柔軟な型定義
+ * Claude 3.7 Sonnetの思考モードで返される複数のデータ形式に対応
+ */
+export interface ThinkingChunk {
+  /** 直接の思考データ（様々な形式で渡される可能性あり） */
+  thinking?: any;
+  
+  /** summary.text形式の思考データ */
+  summary?: { 
+    text?: string;
+  };
+  
+  /** content.summary.text形式の思考データ */
+  content?: { 
+    summary?: { 
+      text?: string;
+    };
+  };
+  
+  /** 思考データの署名情報 */
+  signature?: string;
+  
+  /** デルタ形式の思考データ */
+  delta?: any;
+  
+  /** choices[0].delta.content.summary.text形式の思考データ（最優先）*/
+  choices?: Array<{
+    delta?: {
+      content?: {
+        summary?: {
+          text?: string;
+        };
+      };
+      signature?: string;
+    };
+  }>;
+}
+```
+
+#### 状態管理関連の型定義
+
+```typescript
+/**
+ * ストリーミング状態追跡型
+ */
+export interface StreamingState {
+  message: ChatMessage;
+  toolCalls: ToolCall[];
+  currentToolCall: ToolCall | null;
+  currentToolCallIndex: number | null;
+  jsonBuffer: string;
+  isBufferingJson: boolean;
+}
+
+/**
+ * 永続的なストリーム状態型
+ * 再接続時に状態を復元するために使用
+ */
+export interface PersistentStreamState {
+  jsonBuffer: string;
+  isBufferingJson: boolean;
+  toolCallsInProgress: ToolCall[];
+  currentToolCallIndex: number | null;
+  contentBuffer: string;
+  lastReconnectTimestamp: number;
+}
+```
+
+#### 結果型と処理インターフェース
+
+```typescript
+/**
+ * エラー処理結果型
+ */
+export interface ErrorHandlingResult {
+  success: boolean;
+  error: Error;
+  state?: StreamingState;
+}
+
+/**
+ * Databricksチャットメッセージ型
+ */
+export interface DatabricksChatMessage {
+  role: string;
+  content: string | any[];
+  name?: string;
+  toolCalls?: ToolCall[];
+}
+
+/**
+ * ストリーミング結果型
+ */
+export interface StreamingResult {
+  updatedMessage: ChatMessage;
+  shouldYield: boolean;
+}
+
+/**
+ * ツールコールプロセッサのインターフェース
  */
 export interface ToolCallProcessorInterface {
   preprocessToolCallsAndResults(messages: ChatMessage[]): ChatMessage[];
+}
+
+/**
+ * ツール呼び出し結果型
+ */
+export interface ToolCallResult {
+  updatedToolCalls: ToolCall[];
+  updatedCurrentToolCall: ToolCall | null;
+  updatedCurrentToolCallIndex: number | null;
+  updatedJsonBuffer: string;
+  updatedIsBufferingJson: boolean;
+  shouldYieldMessage: boolean;
+}
+
+/**
+ * ストリーミングレスポンス処理結果型
+ */
+export interface StreamingResponseResult {
+  success: boolean;
+  messages: ChatMessage[];
+  error?: Error;
+  state?: any;
+}
+
+/**
+ * 再接続結果型
+ */
+export interface ReconnectionResult {
+  restoredMessage: ChatMessage;
+  restoredToolCalls: ToolCall[];
+  restoredCurrentToolCall: ToolCall | null;
+  restoredCurrentToolCallIndex: number | null;
+  restoredJsonBuffer: string;
+  restoredIsBufferingJson: boolean;
 }
 ```
 
@@ -147,56 +326,229 @@ export interface ToolCallProcessorInterface {
 このファイルは、コア型定義を拡張してDatabricks固有の要件に対応します：
 
 ```typescript
-// コアモジュールのChatMessage型を拡張
-declare module "../../../../index.js" {
+// This file defines extensions to core types
+// Required to support Databricks-specific features
+
+// Add Databricks-specific options
+declare module "../index" {
+  // ChatMessage型の拡張でツール呼び出し関連プロパティを追加
   interface ChatMessage {
-    // thinking（思考）ロール用の追加プロパティ
-    signature?: string;         // 思考メッセージの署名情報
-    redactedThinking?: any;     // 編集済み思考データ
+    /**
+     * ツール呼び出しの結果に関連付けられたツール呼び出しID
+     * ツール結果メッセージ（role: "tool"）で使用される
+     */
+    toolCallId?: string;
+    
+    /**
+     * 思考メッセージの署名情報
+     * 思考プロセス（role: "thinking"）で使用される
+     */
+    signature?: string;
+    
+    /**
+     * 編集済み思考データ
+     * 思考プロセスの非公開部分
+     */
+    redactedThinking?: any;
   }
-  
-  // CompletionOptions型を拡張
+
+  interface LLMOptions {
+    /**
+     * Whether to always log thinking process
+     * If true, always log; if false, only log in development mode
+     */
+    thinkingProcess?: boolean;
+    
+    /**
+     * APIベースURL
+     * DatabricksエンドポイントのベースURL
+     */
+    apiBase?: string;
+    
+    /**
+     * APIキー
+     * Databricksエンドポイントの認証に使用するAPIキー
+     */
+    apiKey?: string;
+    
+    /**
+     * 思考プロセスを常にログに出力するかどうか
+     */
+    alwaysLogThinking?: boolean;
+    
+    // 注意: Databricksエンドポイントはparallel_tool_callsパラメータをサポートしていません
+    // このパラメータを含めるとエラーが発生します
+    // parallel_tool_callsパラメータを意図的にコメントアウト
+    // parallelToolCalls?: boolean;
+  }
+
+  // Add extension for CompletionOptions
   interface CompletionOptions {
-    // Databricks固有のオプション
-    thinking?: {                  // 思考モード設定
-      type: string;               // 思考モードのタイプ
-      budget_tokens?: number;     // 思考用のトークン予算
+    /**
+     * Thinking mode configuration for Claude 3.7 models
+     * Enables and configures thinking process
+     */
+    thinking?: {
+      /**
+       * Thinking mode type - currently only "enabled" is supported
+       */
+      type: string;
+      
+      /**
+       * Token budget for thinking process
+       * Default is half of max_tokens (up to 64000)
+       */
+      budget_tokens?: number;
     };
   }
+
+  // ThinkingChatMessageを拡張して必要なプロパティを追加
+  interface ThinkingChatMessage extends ChatMessage {
+    /**
+     * 思考プロセスの署名情報
+     */
+    signature?: string;
+    
+    /**
+     * 思考プロセスの結果要約
+     */
+    summary?: {
+      text?: string;
+    };
+    
+    /**
+     * 思考プロセスのデルタ更新
+     */
+    delta?: any;
+    
+    /**
+     * 思考プロセスの選択肢情報
+     */
+    choices?: Array<{
+      delta?: {
+        content?: {
+          summary?: {
+            text?: string;
+          };
+        };
+        signature?: string;
+      };
+    }>;
+  }
 }
 ```
 
-## 2025年5月に追加された型定義
+## 2025年5月に追加・更新された型定義
 
-2025年5月の更新で、以下の新しい型定義が追加されました：
+2025年5月の更新で、以下の重要な型定義が追加または更新されました：
 
-### `DatabricksChatMessage`型
+### 1. `ThinkingChunk`インターフェースの拡張
+
+Claude 3.7 Sonnetの思考モードをサポートするために、`ThinkingChunk`インターフェースが大幅に拡張されました。以前は基本的な思考データのみをサポートしていましたが、現在は様々な形式の思考データに対応できるように柔軟な構造になっています：
 
 ```typescript
-/**
- * Databricksチャットメッセージ型
- * チャットメッセージのフォーマットを定義
- */
-export interface DatabricksChatMessage {
-  role: string;
-  content: string | any[];
-  name?: string;
-  toolCalls?: ToolCall[];
+export interface ThinkingChunk {
+  thinking?: any;
+  summary?: { text?: string; };
+  content?: { summary?: { text?: string; }; };
+  signature?: string;
+  delta?: any;
+  choices?: Array<{
+    delta?: {
+      content?: { summary?: { text?: string; }; };
+      signature?: string;
+    };
+  }>;
 }
 ```
 
-### `StreamingResult`型
+これにより、以下の思考データ形式すべてに対応できるようになりました：
+- `thinking`プロパティとして直接送信される形式
+- `summary.text`形式
+- `content.summary.text`形式
+- `choices[0].delta.content.summary.text`形式（Databricksエンドポイントで最も一般的に使用される形式）
+
+### 2. 再接続とストリーミング状態管理の型定義
+
+ストリーミング処理中の接続エラーに対応するため、状態管理と再接続に関連する型定義が追加されました：
 
 ```typescript
-/**
- * ストリーミング結果型
- * コンテンツデルタ処理の結果を表す
- */
-export interface StreamingResult {
-  updatedMessage: ChatMessage;
-  shouldYield: boolean;
+export interface ReconnectionResult {
+  restoredMessage: ChatMessage;
+  restoredToolCalls: ToolCall[];
+  restoredCurrentToolCall: ToolCall | null;
+  restoredCurrentToolCallIndex: number | null;
+  restoredJsonBuffer: string;
+  restoredIsBufferingJson: boolean;
+}
+
+export interface PersistentStreamState {
+  jsonBuffer: string;
+  isBufferingJson: boolean;
+  toolCallsInProgress: ToolCall[];
+  currentToolCallIndex: number | null;
+  contentBuffer: string;
+  lastReconnectTimestamp: number;
 }
 ```
+
+### 3. ツール呼び出し関連の型定義の改善
+
+ツール呼び出し処理の安定性を向上させるため、関連する型定義が更新されました：
+
+```typescript
+export interface ToolCallDelta {
+  index: number;
+  id?: string;
+  type?: string; // typeプロパティを追加して型の互換性を確保
+  function?: {
+    name?: string;
+    arguments?: string;
+  };
+}
+
+export interface ToolCallResult {
+  updatedToolCalls: ToolCall[];
+  updatedCurrentToolCall: ToolCall | null;
+  updatedCurrentToolCallIndex: number | null;
+  updatedJsonBuffer: string;
+  updatedIsBufferingJson: boolean;
+  shouldYieldMessage: boolean;
+}
+```
+
+特に`type`プロパティが追加されたことで、コアの`ToolCallDelta`型との互換性が向上しました。
+
+### 4. ストリーミングレスポンスの型定義強化
+
+ストリーミングレスポンス処理の型安全性を向上させるため、専用の型定義が追加されました：
+
+```typescript
+export interface StreamingResponseResult {
+  success: boolean;
+  messages: ChatMessage[];
+  error?: Error;
+  state?: any;
+}
+```
+
+### 5. `ResponseDelta`の改善
+
+思考モードのデータ構造をサポートするために、`ResponseDelta`インターフェースが拡張されました：
+
+```typescript
+export interface ResponseDelta {
+  tool_calls?: ToolCallDelta[];
+  content?: string | {
+    summary?: {
+      text?: string;
+    };
+  };
+  signature?: string;
+}
+```
+
+これにより、通常のテキストコンテンツだけでなく、`content.summary.text`形式の思考データもサポートできるようになりました。
 
 ## 型互換性の問題と解決策
 
@@ -209,20 +561,21 @@ export interface StreamingResult {
  * ツール呼び出しを出力用に処理するヘルパー関数
  * ToolCall型とToolCallDelta型の互換性問題を解決します
  */
-function processToolCallsForOutput(toolCalls: ToolCall[] | undefined): ToolCall[] | undefined {
+private static processToolCallsForOutput(toolCalls: ToolCall[] | undefined): CoreToolCallDelta[] | undefined {
   if (!toolCalls || toolCalls.length === 0) {
     return undefined;
   }
 
   // すべてのツール呼び出しが適切なtypeプロパティを持っていることを確認
-  return toolCalls.map(call => ({
+  // 明示的に"function"を指定し、コアの型と互換性を持たせる
+  const processedToolCalls = toolCalls.map(call => ({
     ...call,
-    type: "function" // typeプロパティを明示的に"function"に設定して型互換性を確保
+    type: "function" as const  // "function"リテラル型として明示
   }));
+  
+  // CoreToolCallDelta[]型として返す
+  return processedToolCalls as unknown as CoreToolCallDelta[];
 }
-
-// 使用例
-toolCalls: toolCalls.length > 0 ? processToolCallsForOutput(toolCalls) : undefined
 ```
 
 ## 型安全性の強化ポイント
@@ -232,14 +585,6 @@ toolCalls: toolCalls.length > 0 ? processToolCallsForOutput(toolCalls) : undefin
 `MessageContent`型は`string`または`MessagePart[]`のユニオン型であり、これがTypeScriptエラーの原因でした。この問題を解決するために、`extractContentAsString`ユーティリティを使用します：
 
 ```typescript
-// streaming.tsでの型エラー：
-// Type 'MessageContent' is not assignable to type 'string'
-// Type 'MessagePart[]' is not assignable to type 'string'
-lastYieldedMessageContent = currentMessage.content; // エラー！
-
-// 修正アプローチ：コンテンツを安全に文字列として抽出
-import { extractContentAsString } from "../../utils/messageUtils.js";
-
 // 型安全な比較
 const currentContentAsString = extractContentAsString(currentMessage.content);
 if (currentContentAsString !== lastYieldedMessageContent) {
@@ -257,7 +602,6 @@ if (currentContentAsString !== lastYieldedMessageContent) {
 ```typescript
 /**
  * ツール呼び出し処理の結果を表す明示的なインターフェース
- * 以前は暗黙的な型付けだったものを明示的に型付け
  */
 export interface ToolCallResult {
   updatedToolCalls: ToolCall[];
@@ -271,41 +615,31 @@ export interface ToolCallResult {
 
 これにより、モジュール間でデータを渡す際の型安全性が向上し、`typeof result`のような曖昧な型参照を避けることができます。
 
-### 3. ストリーミング処理の状態管理型
+### 3. 思考モード関連の型強化
 
-ストリーミング処理の状態を明確に定義することで、接続エラーからの回復をより安全に実装できるようになりました：
+Claude 3.7 Sonnetの思考モードをサポートするため、関連する型定義が大幅に強化されました：
 
 ```typescript
-/**
- * 永続的なストリーム状態を表す型
- * 再接続を可能にするためのストリーミング中の状態を追跡
- */
-export interface StreamingState {
-  jsonBuffer: string;
-  isBufferingJson: boolean;
-  toolCallsInProgress: ToolCall[];
-  currentToolCallIndex: number | null;
-  contentBuffer: string;
-  lastReconnectTimestamp: number;
+// 思考メッセージの拡張定義
+interface ThinkingChatMessage extends ChatMessage {
+  signature?: string;
+  summary?: { text?: string; };
+  delta?: any;
+  choices?: Array<{ delta?: { content?: { summary?: { text?: string; }; }; signature?: string; }; }>;
+}
+
+// 思考チャンクの柔軟な定義
+export interface ThinkingChunk {
+  thinking?: any;
+  summary?: { text?: string; };
+  content?: { summary?: { text?: string; }; };
+  signature?: string;
+  delta?: any;
+  choices?: Array<{ delta?: { content?: { summary?: { text?: string; }; }; signature?: string; }; }>;
 }
 ```
 
-### 4. リクエストボディ型の改善
-
-`requestBody.model`へのアクセスによる型エラーを解決するため、リクエストボディ構築時の型安全なアプローチを導入しました：
-
-```typescript
-// リクエストボディを構築（型安全な方法）
-const requestBody = {
-  ...args,  // 既に型チェック済みのパラメータ
-  messages: formattedMessages,
-  system: systemMessage
-};
-
-// モデル情報はargsから取得して型安全性を確保
-const modelForLogging = args.model || options.model || this.model;
-console.log(`Databricksリクエスト: モデル=${modelForLogging}`);
-```
+この柔軟な型定義により、様々な形式の思考データを適切に処理できるようになりました。
 
 ## 型安全性のベストプラクティス
 
@@ -322,13 +656,6 @@ export interface StreamingResponseResult {
   messages: ChatMessage[];
   error?: Error;
   state?: StreamingState;
-}
-
-// 使用例
-function processStreamingResponse(
-  response: Response
-): Promise<StreamingResponseResult> {
-  // 実装...
 }
 ```
 
@@ -385,77 +712,74 @@ thinking?: {
 
 これにより、思考モードのパラメータを型安全に処理できるようになりました。
 
-### 3. ツール引数処理の型安全性向上
+### 3. ThinkingChunkインターフェースの拡張と柔軟化
 
-ツール引数処理のフローをより型安全にするための明示的なインターフェース定義を導入し、コンパイルエラーを防止しました。
+思考データの様々な形式に対応するため、`ThinkingChunk`インターフェースを柔軟な構造に変更しました。これにより、様々な階層のデータから思考情報を適切に抽出できるようになり、より堅牢な処理が可能になりました。
 
 ### 4. ストリーミングレスポンス処理の型安全性向上
 
 ストリーミングレスポンス処理の結果型を明示的に定義し、エラー処理と状態管理を改善しました。
 
-### 5. インデックス処理の型安全性向上
+### 5. 再接続機能のサポート
 
-配列インデックスのnull安全性を向上させ、境界外アクセスを防止するための型安全な処理を実装しました。
+接続エラーからの回復を容易にするため、再接続関連の型定義を追加しました。これにより、ストリーミング処理中に接続が切断された場合でも、状態を保持して処理を再開できるようになりました。
 
 ## 型エラーのトラブルシューティング
 
-### 1. `Property 'model' does not exist on type '{ messages: any[]; system: string; }'`
+### 1. `Property 'delta' does not exist on type 'ThinkingChunk'`
 
-このエラーは、`requestBody`オブジェクトの型定義が不十分な場合に発生します。解決方法：
+このエラーは、`ThinkingChunk`インターフェースに`delta`プロパティが定義されていない場合に発生します。解決方法は以下の通りです：
 
-```typescript
-// 問題のあるコード
-console.log(`モデル: ${requestBody.model}`); // エラー
-
-// 修正方法
-const modelName = args.model || options.model || this.model;
-console.log(`モデル: ${modelName}`); // 安全
-```
-
-### 2. `Module has no exported member 'DatabricksChatMessage'`
-
-このエラーは、必要な型が正しくエクスポートされていない場合に発生します。解決方法：
-
-1. `types.ts`ファイルに型を追加
-2. `index.ts`ファイルで明示的にエクスポート
-3. インポート側で正しいパスからインポート
+1. `types.ts`ファイルで`ThinkingChunk`インターフェースを拡張して`delta`プロパティを追加
+2. オプショナルチェイニング（`?.`）を使用してプロパティの存在を確認
+3. 様々なデータ形式に対応できるようにany型を使用
 
 ```typescript
-// types.ts
-export interface DatabricksChatMessage {
-  role: string;
-  content: string | any[];
-  name?: string;
-  toolCalls?: ToolCall[];
+export interface ThinkingChunk {
+  thinking?: any;
+  delta?: any; // deltaプロパティを追加
+  // 他のプロパティ...
 }
 
-// index.ts
-export type { DatabricksChatMessage } from "./types";
-
-// 使用側
-import { DatabricksChatMessage } from "./types/index.js";
+// 使用時にオプショナルチェイニングを使用
+if (thinkingChunk.delta?.content?.summary?.text) {
+  // 安全なアクセス
+}
 ```
 
-### 3. `Type 'ToolCall[] | undefined' is not assignable to type 'ToolCallDelta[] | undefined'`
+### 2. `Type 'MessageContent' is not assignable to type 'string'`
 
-このエラーは、`ToolCall`型と`ToolCallDelta`型の間に互換性がない場合に発生します。解決方法：
+このエラーは、`MessageContent`型が`string | MessagePart[]`のユニオン型であるのに対して、代入先の変数が`string`型である場合に発生します。解決方法は以下の通りです：
 
 ```typescript
-// 型変換ヘルパー関数を使用
-function processToolCallsForOutput(toolCalls: ToolCall[] | undefined): ToolCallDelta[] | undefined {
-  if (!toolCalls || toolCalls.length === 0) {
-    return undefined;
-  }
+// 共通ユーティリティを使用して型安全に変換
+import { extractContentAsString } from "../../utils/messageUtils.js";
 
-  // 型変換を明示的に行う
-  return toolCalls.map(call => ({
-    ...call,
-    type: "function" // "function"に固定
-  })) as ToolCallDelta[];
-}
-
-// 使用例
-toolCalls: processToolCallsForOutput(toolCalls)
+// 型安全な変換と代入
+const contentAsString = extractContentAsString(message.content);
 ```
 
-このような型強化により、コードの安全性と保守性が大幅に向上しました。型システムを効果的に活用することで、多くのバグを未然に防ぎ、コードの自己文書化機能を強化しています。
+### 3. `[object Object]と表示される問題`
+
+これは、オブジェクトを直接文字列として使用した場合に発生します。以下の方法で解決できます：
+
+1. `safeStringify`ユーティリティを使用してオブジェクトを適切に文字列化
+2. `extractContentAsString`を使用してメッセージコンテンツを文字列として抽出
+3. オブジェクト内のテキストプロパティを明示的に抽出
+
+```typescript
+// 悪い例
+console.log("思考データ:", thinkingData);  // [object Object]と表示される
+
+// 良い例
+console.log("思考データ:", safeStringify(thinkingData, "<データなし>"));
+
+// 思考データからテキストを明示的に抽出
+const thinkingText = thinkingData.choices?.[0]?.delta?.content?.summary?.text ||
+                     thinkingData.content?.summary?.text ||
+                     thinkingData.summary?.text ||
+                     safeStringify(thinkingData, "<データなし>");
+console.log("思考テキスト:", thinkingText);
+```
+
+これらの型定義と型安全なプログラミング手法により、コードの品質と保守性が大幅に向上しました。型システムを活用することで、多くのバグを未然に防ぎ、コードの自己文書化を促進しています。

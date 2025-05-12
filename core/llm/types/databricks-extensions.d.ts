@@ -34,6 +34,23 @@ declare module "../index" {
      */
     thinkingProcess?: boolean;
     
+    /**
+     * APIベースURL
+     * DatabricksエンドポイントのベースURL
+     */
+    apiBase?: string;
+    
+    /**
+     * APIキー
+     * Databricksエンドポイントの認証に使用するAPIキー
+     */
+    apiKey?: string;
+    
+    /**
+     * 思考プロセスを常にログに出力するかどうか
+     */
+    alwaysLogThinking?: boolean;
+    
     // 注意: Databricksエンドポイントはparallel_tool_callsパラメータをサポートしていません
     // このパラメータを含めるとエラーが発生します
     // parallel_tool_callsパラメータを意図的にコメントアウト
@@ -58,7 +75,49 @@ declare module "../index" {
        */
       budget_tokens?: number;
     };
+    
+    /**
+     * APIベースURL（リクエスト時のオプション）
+     */
+    apiBase?: string;
+    
+    /**
+     * APIキー（リクエスト時のオプション）
+     */
+    apiKey?: string;
   }
 
-  // Add further type extensions as needed
+  // ThinkingChatMessageを拡張して必要なプロパティを追加
+  interface ThinkingChatMessage extends ChatMessage {
+    /**
+     * 思考プロセスの署名情報
+     */
+    signature?: string;
+    
+    /**
+     * 思考プロセスの結果要約
+     */
+    summary?: {
+      text?: string;
+    };
+    
+    /**
+     * 思考プロセスのデルタ更新
+     */
+    delta?: any;
+    
+    /**
+     * 思考プロセスの選択肢情報
+     */
+    choices?: Array<{
+      delta?: {
+        content?: {
+          summary?: {
+            text?: string;
+          };
+        };
+        signature?: string;
+      };
+    }>;
+  }
 }

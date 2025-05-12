@@ -7,6 +7,7 @@ import { LLMOptions, CompletionOptions, ChatMessage } from "../../../../index.js
 export interface DatabricksLLMOptions extends LLMOptions {
   apiBase?: string;
   apiKey?: string;
+  alwaysLogThinking?: boolean;
 }
 
 /**
@@ -19,6 +20,16 @@ export interface DatabricksCompletionOptions extends CompletionOptions {
    * デフォルトは300秒 (5分)
    */
   requestTimeout?: number;
+  
+  /**
+   * API Base URL
+   */
+  apiBase?: string;
+  
+  /**
+   * API Key
+   */
+  apiKey?: string;
   
   /**
    * Claude 3.7モデル用の思考モード設定
@@ -77,7 +88,12 @@ export interface ToolCallDelta {
  */
 export interface ResponseDelta {
   tool_calls?: ToolCallDelta[];
-  content?: string;
+  content?: string | {
+    summary?: {
+      text?: string;
+    };
+  };
+  signature?: string;
 }
 
 /**
@@ -88,19 +104,58 @@ export interface StreamingChunk {
   object?: string;
   created?: number;
   model?: string;
-  thinking?: ThinkingChunk;
+  thinking?: any; // 思考データは様々な形式で来る可能性があるためany型
   choices?: Array<{
     index?: number;
-    delta?: ResponseDelta;
+    delta?: ResponseDelta & {
+      content?: string | {
+        summary?: {
+          text?: string;
+        };
+      }; // content.summary.textなどの入れ子構造に対応
+    };
+    finish_reason?: string | null;
   }>;
 }
 
 /**
- * 思考チャンク型
+ * 思考チャンク型 - 拡張版
+ * 様々な思考データ構造に対応する柔軟な型定義
+ * Claude 3.7 Sonnetの思考モードで返される複数のデータ形式に対応
  */
 export interface ThinkingChunk {
-  thinking: string | any;
+  /** 直接の思考データ（様々な形式で渡される可能性あり） */
+  thinking?: any;
+  
+  /** summary.text形式の思考データ */
+  summary?: { 
+    text?: string;
+  };
+  
+  /** content.summary.text形式の思考データ */
+  content?: { 
+    summary?: { 
+      text?: string;
+    };
+  };
+  
+  /** 思考データの署名情報 */
   signature?: string;
+  
+  /** デルタ形式の思考データ */
+  delta?: any;
+  
+  /** choices[0].delta.content.summary.text形式の思考データ（最優先）*/
+  choices?: Array<{
+    delta?: {
+      content?: {
+        summary?: {
+          text?: string;
+        };
+      };
+      signature?: string;
+    };
+  }>;
 }
 
 /**
@@ -176,4 +231,28 @@ export interface ToolCallResult {
   updatedJsonBuffer: string;
   updatedIsBufferingJson: boolean;
   shouldYieldMessage: boolean;
+}
+
+/**
+ * ストリーミングレスポンス処理結果型
+ * streaming.tsで使用する型を一元管理
+ */
+export interface StreamingResponseResult {
+  success: boolean;
+  messages: ChatMessage[];
+  error?: Error;
+  state?: any;
+}
+
+/**
+ * 再接続結果型
+ * streaming.tsで使用する型を一元管理
+ */
+export interface ReconnectionResult {
+  restoredMessage: ChatMessage;
+  restoredToolCalls: ToolCall[];
+  restoredCurrentToolCall: ToolCall | null;
+  restoredCurrentToolCallIndex: number | null;
+  restoredJsonBuffer: string;
+  restoredIsBufferingJson: boolean;
 }

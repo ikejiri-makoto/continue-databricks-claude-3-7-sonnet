@@ -487,4 +487,8 @@ The framework has been enhanced with several improvements as of May 2025:
 
 8. **API URL Normalization and Validation**: Added utilities to ensure consistent and correct API endpoint resolution.
 
+9. **Improved Databricks Claude 3.7 Integration**: Enhanced support for Databricks-hosted Claude 3.7 models with proper thinking mode handling and endpoint configuration.
+
+10. **Provider-specific Parameter Management**: Added improved validation and filtering of unsupported parameters for various providers.
+
 By following these best practices, you can ensure more robust and maintainable code across the LLM framework.
