@@ -247,9 +247,8 @@ export class StreamingProcessor {
       return result;
     }
 
-    // 思考モード処理 - choices[0].delta.content.summary.text形式を優先的に処理
-
-    // ===== 優先順位1: choices[0].delta.content.summary.text形式（最も一般的な形式） =====
+    // 思考モード処理 - choices[0].delta.content.summary.text形式のみを優先的に処理
+    // === 優先的に choices.delta.content.summary.text 形式のみを処理 ===
     if (chunk.choices && 
         Array.isArray(chunk.choices) && 
         chunk.choices.length > 0 && 
@@ -270,113 +269,14 @@ export class StreamingProcessor {
           signature: chunk.choices[0].delta.signature || undefined
         };
         
+        // 処理結果に思考メッセージを設定
         result.thinkingMessage = thinkingMessage;
+        
+        // 処理を完了して結果を返す
         return result;
       }
     }
     
-    // ===== 優先順位2: thinking直接形式 =====
-    if (chunk.thinking !== undefined) {
-      try {
-        let thinkingText = "";
-        
-        // 思考データがオブジェクトの場合
-        if (typeof chunk.thinking === 'object' && chunk.thinking !== null) {
-          // textプロパティがあればそれを使用
-          if (typeof (chunk.thinking as any).text === 'string') {
-            thinkingText = (chunk.thinking as any).text;
-          } 
-          // summaryプロパティ内のテキストを検索
-          else if (typeof (chunk.thinking as any).summary === 'object' && 
-                  (chunk.thinking as any).summary !== null && 
-                  typeof (chunk.thinking as any).summary.text === 'string') {
-            thinkingText = (chunk.thinking as any).summary.text;
-          }
-          // その他の場合はfindTextPropertyを使用して再帰的に探索
-          else {
-            thinkingText = this.findTextProperty(chunk.thinking) || "[思考中...]";
-          }
-        } 
-        // 思考データが文字列の場合
-        else if (typeof chunk.thinking === 'string') {
-          thinkingText = chunk.thinking;
-        }
-        
-        // 思考メッセージを構築
-        const thinkingMessage: ThinkingChatMessage = {
-          role: "thinking",
-          content: thinkingText || "[思考中...]",
-          signature: typeof chunk.signature === 'string' ? chunk.signature : undefined
-        };
-        
-        result.thinkingMessage = thinkingMessage;
-        return result;
-      } catch (error) {
-        console.warn(`思考データの処理中にエラー: ${getErrorMessage(error)}`);
-        // エラーが発生しても処理を続行
-      }
-    }
-    
-    // ===== 優先順位3: reasoning形式（Databricks特有） =====
-    if (chunk.choices?.[0]?.delta?.reasoning) {
-      try {
-        const reasoningData = chunk.choices[0].delta.reasoning;
-        let thinkingText = "";
-        
-        // テキストプロパティを探す
-        if (typeof reasoningData === 'object' && reasoningData !== null) {
-          if (typeof reasoningData.text === 'string') {
-            thinkingText = reasoningData.text;
-          } else if (reasoningData.summary?.text && typeof reasoningData.summary.text === 'string') {
-            thinkingText = reasoningData.summary.text;
-          } else {
-            // オブジェクト内のテキストプロパティを再帰的に探す
-            thinkingText = this.findTextProperty(reasoningData) || "[思考中...]";
-          }
-        } else if (typeof reasoningData === 'string') {
-          thinkingText = reasoningData;
-        }
-        
-        // 思考メッセージを作成
-        const thinkingMessage: ThinkingChatMessage = {
-          role: "thinking",
-          content: thinkingText,
-          signature: typeof reasoningData === 'object' && reasoningData !== null ? 
-                    reasoningData.signature || undefined : 
-                    undefined
-        };
-        
-        result.thinkingMessage = thinkingMessage;
-        return result;
-      } catch (error) {
-        console.warn(`reasoning形式の思考データ処理エラー: ${getErrorMessage(error)}`);
-        // エラーが発生しても処理を続行
-      }
-    }
-    
-    // ===== 優先順位4: その他の思考データ形式 =====
-    // いずれの形式にも当てはまらない場合は、思考チャンクとして処理を試みる
-    if ((chunk.choices && Array.isArray(chunk.choices)) || 
-        chunk.content || 
-        chunk.summary) {
-      try {
-        const thinkingMessage = this.processThinkingChunk(chunk);
-        
-        // 内容があれば処理結果に設定
-        if (thinkingMessage && 
-            thinkingMessage.content && 
-            extractContentAsString(thinkingMessage.content) !== "[思考中...]") {
-          result.thinkingMessage = thinkingMessage;
-          return result;
-        }
-      } catch (e) {
-        // エラーが発生した場合は無視して次の処理に進む
-        if (process.env.NODE_ENV === 'development') {
-          console.warn(`思考データ処理中にエラー: ${getErrorMessage(e)}`);
-        }
-      }
-    }
-
     // 通常のメッセージコンテンツの処理（思考モードではない場合）
     if (chunk.choices?.[0]?.delta?.content && 
         typeof chunk.choices[0].delta.content === 'string') {
@@ -527,92 +427,42 @@ export class StreamingProcessor {
   * @param thinkingData 思考データ
   * @returns 処理された思考メッセージ
   */
-  private static processThinkingChunk(thinkingData: ThinkingChunk): ChatMessage {
-    // 思考内容を適切にシリアライズ
-    let newThinking = "";
+  private static processThinkingChunk(thinkingData: any): ChatMessage {
+    // 変更: choices.delta.content.summary.text形式のみを処理
+    let newThinking = "[思考中...]";
     let signature: string | undefined = undefined;
     
     try {
-      // ***** 最優先形式: choices[0].delta.content.summary.text *****
+      // ***** choices[0].delta.content.summary.text形式のみを処理 *****
       if (thinkingData.choices && 
           Array.isArray(thinkingData.choices) && 
           thinkingData.choices.length > 0 && 
-          thinkingData.choices[0]?.delta?.content?.summary?.text) {
+          thinkingData.choices[0]?.delta?.content) {
+          
+        const content = thinkingData.choices[0].delta.content;
         
-        newThinking = thinkingData.choices[0].delta.content.summary.text;
-        
-        if (process.env.NODE_ENV === 'development') {
-          console.log('最優先形式(choices.delta.content.summary.text)を検出しました');
-        }
-      }
-      // ***** 次優先形式: content.summary.text *****
-      else if (thinkingData.content?.summary?.text) {
-        newThinking = thinkingData.content.summary.text;
-        
-        if (process.env.NODE_ENV === 'development') {
-          console.log('content.summary.text形式を検出しました');
-        }
-      }
-      // ***** 次優先形式: summary.text *****
-      else if (thinkingData.summary?.text) {
-        newThinking = thinkingData.summary.text;
-        
-        if (process.env.NODE_ENV === 'development') {
-          console.log('summary.text形式を検出しました');
-        }
-      }
-      // ***** 次優先形式: reasoning(.summary.text) *****
-      else if (typeof thinkingData === 'object' && 
-               thinkingData !== null && 
-               'reasoning' in thinkingData) {
-        
-        const reasoningData = thinkingData.reasoning;
-        
-        if (typeof reasoningData === 'object' && reasoningData !== null) {
-          if (reasoningData.text) {
-            newThinking = reasoningData.text;
-          } else if (reasoningData.summary?.text) {
-            newThinking = reasoningData.summary.text;
-          } else {
-            // その他のプロパティを探索
-            newThinking = this.findTextProperty(reasoningData) || "[思考中...]";
-          }
-        } else if (typeof reasoningData === 'string') {
-          newThinking = reasoningData;
-        }
-        
-        if (process.env.NODE_ENV === 'development') {
-          console.log('reasoning形式を検出しました');
-        }
-      }
-      // ***** 直接thinkingプロパティがある場合 *****
-      else if (thinkingData.thinking) {
-        if (typeof thinkingData.thinking === 'string') {
-          newThinking = thinkingData.thinking;
-        } else if (typeof thinkingData.thinking === 'object' && thinkingData.thinking !== null) {
-          // オブジェクトからテキストを抽出
-          newThinking = this.findTextProperty(thinkingData.thinking) || "[思考中...]";
-        }
-        
-        if (process.env.NODE_ENV === 'development') {
-          console.log('thinking直接形式を検出しました');
-        }
-      }
-      // ***** 最終手段: オブジェクト全体を再帰的に探索 *****
-      else {
-        const textProperty = this.findTextProperty(thinkingData);
-        if (textProperty) {
-          newThinking = textProperty;
+        // オブジェクト型かつsummaryプロパティがある場合
+        if (typeof content === 'object' && 
+            content !== null && 
+            content.summary && 
+            typeof content.summary === 'object' && 
+            content.summary.text) {
+          
+          newThinking = content.summary.text;
           
           if (process.env.NODE_ENV === 'development') {
-            console.log('テキストプロパティを再帰的に抽出しました');
+            console.log('choices.delta.content.summary.text形式のデータを検出しました');
           }
         } else {
-          newThinking = "[思考中...]";
-          
+          // デバッグモードでログ出力
           if (process.env.NODE_ENV === 'development') {
-            console.log(`未知の形式: ${safeStringify(thinkingData, "<不明な形式>")}`);
+            console.log(`対応していない形式のcontentを検出: ${safeStringify(content, "<形式不明>")}`);
           }
+        }
+      } else {
+        // デバッグモードでログ出力
+        if (process.env.NODE_ENV === 'development') {
+          console.log(`choices.delta.content.summary.text形式ではありません: ${safeStringify(thinkingData, "<形式不明>")}`);
         }
       }
       
@@ -620,10 +470,9 @@ export class StreamingProcessor {
       if (typeof thinkingData.signature === 'string') {
         signature = thinkingData.signature;
       } else if (thinkingData.choices?.[0]?.delta?.signature && 
-                typeof thinkingData.choices[0].delta.signature === 'string') {
+                 typeof thinkingData.choices[0].delta.signature === 'string') {
         signature = thinkingData.choices[0].delta.signature;
       }
-      
     } catch (error) {
       // エラーログ
       console.error(`思考チャンクの処理中にエラー: ${getErrorMessage(error)}`);
@@ -631,8 +480,6 @@ export class StreamingProcessor {
       if (process.env.NODE_ENV === 'development') {
         console.error(`チャンクデータ: ${safeStringify(thinkingData, "<データエラー>")}`);
       }
-      
-      newThinking = "[思考データを処理中...]";
     }
     
     // 思考メッセージを構築して返す
@@ -646,129 +493,6 @@ export class StreamingProcessor {
     this.logThinkingProcess(thinkingMessage);
     
     return thinkingMessage;
-  }
-  
-  /**
-   * 思考データから有用なテキストプロパティを探す再帰的関数
-   * [object Object]を避けてテキストを探索する
-   * @param obj 探索対象のオブジェクト
-   * @param depth 現在の再帰深度（無限ループ防止用）
-   * @returns 見つかったテキストプロパティまたはnull
-   */
-  private static findTextProperty(obj: any, depth: number = 0): string | null {
-    // 無限ループや過度に深い再帰を防止
-    if (depth > 5) {
-      return null;
-    }
-    
-    // nullまたはundefinedの場合
-    if (obj === null || obj === undefined) {
-      return null;
-    }
-    
-    // 文字列の場合は直接返す
-    if (typeof obj === 'string') {
-      return obj;
-    }
-    
-    // オブジェクトの場合は再帰的に処理
-    if (typeof obj === 'object') {
-      // ===== 優先パターン1: choices[0].delta.content.summary.text形式 =====
-      if (obj.choices && 
-          Array.isArray(obj.choices) && 
-          obj.choices.length > 0 && 
-          obj.choices[0]?.delta?.content?.summary?.text) {
-        return obj.choices[0].delta.content.summary.text;
-      }
-      
-      // ===== 優先パターン2: content.summary.text形式 =====
-      if (obj.content?.summary?.text) {
-        return obj.content.summary.text;
-      }
-      
-      // ===== 優先パターン3: summary.text形式 =====
-      if (obj.summary?.text) {
-        return obj.summary.text;
-      }
-      
-      // ===== 優先パターン4: text直接形式 =====
-      if (obj.text && typeof obj.text === 'string') {
-        return obj.text;
-      }
-      
-      // ===== 優先パターン5: reasoning形式 =====
-      if (obj.reasoning) {
-        if (typeof obj.reasoning === 'string') {
-          return obj.reasoning;
-        } else if (typeof obj.reasoning === 'object' && obj.reasoning !== null) {
-          if (obj.reasoning.text) {
-            return obj.reasoning.text;
-          } else if (obj.reasoning.summary?.text) {
-            return obj.reasoning.summary.text;
-          }
-          
-          // reasoning内を再帰的に探索
-          const reasoningText = this.findTextProperty(obj.reasoning, depth + 1);
-          if (reasoningText) {
-            return reasoningText;
-          }
-        }
-      }
-      
-      // ===== 優先パターン6: thinking形式 =====
-      if (obj.thinking) {
-        if (typeof obj.thinking === 'string') {
-          return obj.thinking;
-        } else if (typeof obj.thinking === 'object' && obj.thinking !== null) {
-          // thinking内を再帰的に探索
-          const thinkingText = this.findTextProperty(obj.thinking, depth + 1);
-          if (thinkingText) {
-            return thinkingText;
-          }
-        }
-      }
-      
-      // 優先的に探すプロパティ名
-      const priorityProps = [
-        'text', 'content', 'summary', 'thinking', 'reasoning',
-        'delta', 'choices', 'message', 'value'
-      ];
-      
-      // 優先プロパティを先に確認
-      for (const prop of priorityProps) {
-        if (obj[prop] !== undefined) {
-          const result = this.findTextProperty(obj[prop], depth + 1);
-          if (result) {
-            return result;
-          }
-        }
-      }
-      
-      // 配列の場合は各要素を確認
-      if (Array.isArray(obj)) {
-        for (const item of obj) {
-          const result = this.findTextProperty(item, depth + 1);
-          if (result) {
-            return result;
-          }
-        }
-      }
-      
-      // その他のすべてのプロパティを確認
-      for (const key in obj) {
-        // 既にチェック済みのプロパティはスキップ
-        if (priorityProps.includes(key)) {
-          continue;
-        }
-        
-        const result = this.findTextProperty(obj[key], depth + 1);
-        if (result) {
-          return result;
-        }
-      }
-    }
-    
-    return null;
   }
 
   /**
@@ -1657,30 +1381,21 @@ export class StreamingProcessor {
           if (process.env.NODE_ENV === 'development') {
             try {
               // 思考チャンクの場合は特別な形式でログ出力
-              if (data.thinking) {
-                // thinking直接形式は使用せず、常にsummary.text形式として処理
-                console.log(`処理チャンク(thinking): ${safeStringify({
-                  type: 'thinking',
-                  has_thinking: !!data.thinking,
-                  has_signature: !!data.signature,
-                  has_delta: !!data.delta,
-                  has_choices: !!data.choices,
+              if (data.choices?.[0]?.delta?.content && 
+                  this.isContentObject(data.choices[0].delta.content) && 
+                  data.choices[0].delta.content.summary?.text) {
+                // 思考モードのコンテンツチャンク - summary.textフォーマットを表示
+                console.log(`処理チャンク(thinking_content): ${safeStringify({
+                  has_summary: true,
+                  summary_text: data.choices[0].delta.content.summary.text?.substring(0, 50)
                 }, "<不明なチャンク>")}`);
-              } else if (data.choices?.[0]?.delta?.content) {
-                if (typeof data.choices[0].delta.content === 'string') {
-                  // 通常のコンテンツチャンク
-                  console.log(`処理チャンク(content): ${safeStringify({
-                    content_length: data.choices[0].delta.content.length,
-                    content_snippet: data.choices[0].delta.content.substring(0, 50)
-                  }, "<不明なチャンク>")}`);
-                } else {
-                  // 思考モードのコンテンツチャンク - summary.textフォーマットに注目
-                  console.log(`処理チャンク(thinking_content): ${safeStringify({
-                    has_summary: this.isContentObject(data.choices[0].delta.content) && !!data.choices[0].delta.content.summary,
-                    summary_text: this.isContentObject(data.choices[0].delta.content) && 
-                                data.choices[0].delta.content.summary?.text?.substring(0, 50)
-                  }, "<不明なチャンク>")}`);
-                }
+              } else if (data.choices?.[0]?.delta?.content && 
+                         typeof data.choices[0].delta.content === 'string') {
+                // 通常のコンテンツチャンク
+                console.log(`処理チャンク(content): ${safeStringify({
+                  content_length: data.choices[0].delta.content.length,
+                  content_snippet: data.choices[0].delta.content.substring(0, 50)
+                }, "<不明なチャンク>")}`);
               } else if (data.choices?.[0]?.delta?.tool_calls) {
                 // ツール呼び出しチャンク
                 console.log(`処理チャンク(tool_calls): ${safeStringify({
@@ -1688,14 +1403,12 @@ export class StreamingProcessor {
                   first_tool: data.choices[0].delta.tool_calls[0]?.function?.name || '<名前なし>'
                 }, "<不明なチャンク>")}`);
               } else {
-                // その他のチャンク
-                console.log(`処理チャンク: ${safeStringify(data, "<不明なチャンク>")}`);
+                // その他のチャンク - 簡略化して表示
+                console.log(`処理チャンク: ${Object.keys(data).join(', ')}`);
               }
             } catch (e) {
               // ログ出力中のエラーは無視
               console.warn(`チャンクログ出力中にエラー: ${getErrorMessage(e)}`);
-              // エラーが発生しても基本情報だけを出力
-              console.log(`処理チャンク(基本情報のみ): ${Object.keys(data).join(', ')}`);
             }
           }
           
