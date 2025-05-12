@@ -77,6 +77,15 @@ export class StreamingProcessor {
   }
 
   /**
+   * 配列要素かどうかを確認するタイプガード
+   * @param content チェックする対象
+   * @returns 配列の場合true
+   */
+  private static isArrayContent(content: any): content is any[] {
+    return Array.isArray(content);
+  }
+
+  /**
    * ツール呼び出しを出力用に処理するヘルパー関数
    * ToolCall型とToolCallDelta型の互換性問題を解決します
    * 
@@ -172,175 +181,6 @@ export class StreamingProcessor {
   }
 
   /**
-   * Claude 3.7 Sonnetの思考モードデータを抽出する
-   * 実際のデータパス: choices[0].delta.content[0].summary[0].text
-   * @param chunk ストリーミングチャンク
-   * @returns 抽出した思考テキストとシグネチャ、または null
-   */
-  private static extractThinkingData(chunk: StreamingChunk): { text: string; signature?: string } | null {
-    // デバッグログ（開発モード時のみ）
-    if (process.env.NODE_ENV === 'development') {
-      console.log(`思考データ抽出: チャンク構造: ${safeStringify(chunk, "<不明なチャンク>")}`); 
-    }
-
-    // 基本チェック - choices配列が存在しない場合
-    if (!chunk?.choices || !Array.isArray(chunk.choices) || chunk.choices.length === 0) {
-      return null;
-    }
-    
-    // 思考データの抽出パスを確認
-    // パス1: choices[0].delta.content[0].summary[0].text
-    if (chunk.choices[0]?.delta?.content) {
-      const content = chunk.choices[0].delta.content;
-      
-      // 配列形式のcontent - 最も一般的な形式
-      if (Array.isArray(content) && content.length > 0) {
-        const firstContent = content[0];
-        
-        // type が "reasoning" で summary が配列の場合
-        if (typeof firstContent === 'object' && 
-            firstContent !== null && 
-            firstContent.type === "reasoning" && 
-            Array.isArray(firstContent.summary) && 
-            firstContent.summary.length > 0) {
-          
-          const summaryItem = firstContent.summary[0];
-          
-          // type が "summary_text" でテキストが存在する場合
-          if (typeof summaryItem === 'object' && 
-              summaryItem !== null && 
-              summaryItem.type === "summary_text" && 
-              typeof summaryItem.text === 'string') {
-            
-            console.log(`思考データを抽出しました: パス = choices[0].delta.content[0].summary[0].text`);
-            return {
-              text: summaryItem.text,
-              signature: summaryItem.signature || undefined
-            };
-          }
-        }
-      } 
-      // オブジェクト形式のcontent
-      else if (typeof content === 'object' && content !== null) {
-        // summary が配列の場合
-        if (Array.isArray(content.summary) && content.summary.length > 0) {
-          const summaryItem = content.summary[0];
-          
-          if (typeof summaryItem === 'object' && 
-              summaryItem !== null && 
-              typeof summaryItem.text === 'string') {
-            
-            console.log(`思考データを抽出しました: パス = choices[0].delta.content.summary[0].text`);
-            return {
-              text: summaryItem.text,
-              signature: summaryItem.signature || undefined
-            };
-          }
-        } 
-        // summary がオブジェクトの場合
-        else if (typeof content.summary === 'object' && 
-                content.summary !== null && 
-                typeof content.summary.text === 'string') {
-          
-          console.log(`思考データを抽出しました: パス = choices[0].delta.content.summary.text`);
-          return {
-            text: content.summary.text,
-            signature: chunk.choices[0].delta.signature || undefined
-          };
-        }
-      }
-    }
-    
-    // パス2: choices[0].message.content[0].summary[0].text（非ストリーミングレスポンス形式）
-    if (chunk.choices[0]?.message?.content) {
-      const content = chunk.choices[0].message.content;
-      
-      // 配列形式のcontent
-      if (Array.isArray(content) && content.length > 0) {
-        const firstContent = content[0];
-        
-        if (typeof firstContent === 'object' && 
-            firstContent !== null && 
-            firstContent.type === "reasoning" && 
-            Array.isArray(firstContent.summary) && 
-            firstContent.summary.length > 0) {
-          
-          const summaryItem = firstContent.summary[0];
-          
-          if (typeof summaryItem === 'object' && 
-              summaryItem !== null && 
-              summaryItem.type === "summary_text" && 
-              typeof summaryItem.text === 'string') {
-            
-            console.log(`思考データを抽出しました: パス = choices[0].message.content[0].summary[0].text`);
-            return {
-              text: summaryItem.text,
-              signature: summaryItem.signature || undefined
-            };
-          }
-        }
-      }
-    }
-
-    // パス3: choices[0].delta.reasoning（代替形式）
-    if (chunk.choices[0]?.delta?.reasoning) {
-      const reasoning = chunk.choices[0].delta.reasoning;
-      
-      // reasoningが文字列の場合
-      if (typeof reasoning === 'string') {
-        console.log(`思考データを抽出しました: パス = choices[0].delta.reasoning (string)`);
-        return {
-          text: reasoning
-        };
-      }
-      
-      // reasoningがオブジェクトの場合
-      if (typeof reasoning === 'object' && reasoning !== null) {
-        // text プロパティがある場合
-        if (typeof reasoning.text === 'string') {
-          console.log(`思考データを抽出しました: パス = choices[0].delta.reasoning.text`);
-          return {
-            text: reasoning.text,
-            signature: reasoning.signature || undefined
-          };
-        }
-        
-        // summary.text プロパティがある場合
-        if (typeof reasoning.summary?.text === 'string') {
-          console.log(`思考データを抽出しました: パス = choices[0].delta.reasoning.summary.text`);
-          return {
-            text: reasoning.summary.text,
-            signature: reasoning.signature || undefined
-          };
-        }
-      }
-    }
-    
-    // 代替パス - 直接のコンテンツパス
-    // パス4: content.summary.text（フラットな形式）
-    if (chunk.content && this.isContentObject(chunk.content) && 
-        chunk.content.summary?.text && typeof chunk.content.summary.text === 'string') {
-      console.log(`思考データを抽出しました: パス = content.summary.text`);
-      return {
-        text: chunk.content.summary.text,
-        signature: chunk.signature || undefined
-      };
-    }
-    
-    // パス5: summary.text（フラットな形式）
-    if (chunk.summary?.text && typeof chunk.summary.text === 'string') {
-      console.log(`思考データを抽出しました: パス = summary.text`);
-      return {
-        text: chunk.summary.text,
-        signature: chunk.signature || undefined
-      };
-    }
-    
-    // 思考データが見つからない場合
-    return null;
-  }
-
-  /**
    * ストリーミングチャンクを処理し、適切なメッセージを生成
    * @param chunk 処理するチャンク
    * @param currentMessage 現在のメッセージ
@@ -375,6 +215,9 @@ export class StreamingProcessor {
   } {
     // チャンクデータをログ出力（開発モードのみ）
     if (process.env.NODE_ENV === 'development') {
+      console.log(`処理チャンク: ${safeStringify(chunk, "<不明なチャンク>")}`);
+    } else {
+      // 本番環境でも基本情報はログ出力
       console.log(`処理チャンク: ${safeStringify(chunk, "<不明なチャンク>")}`);
     }
     
@@ -416,9 +259,9 @@ export class StreamingProcessor {
       return result;
     }
 
-    // *** 思考モード処理: choices[0].delta.content[0].summary[0].text 形式に対応 ***
-    // 思考データを抽出
-    const thinkingData = this.extractThinkingData(chunk);
+    // *** 思考モード処理 ***
+    // 思考データを抽出 - 共通ユーティリティを使用
+    const thinkingData = DatabricksHelpers.extractThinkingData(chunk);
     
     if (thinkingData) {
       // 思考メッセージを作成
@@ -429,15 +272,7 @@ export class StreamingProcessor {
       };
       
       // 思考テキストのみをログに出力
-      console.log(thinkingData.text);
-      
-      // 開発モードでは詳細情報も出力
-      if (process.env.NODE_ENV === 'development') {
-        console.log(`[思考プロセス] ${thinkingData.text.substring(0, 200)}${thinkingData.text.length > 200 ? '...' : ''}`);
-        if (thinkingData.signature) {
-          console.log(`[思考署名] ${thinkingData.signature.substring(0, 50)}${thinkingData.signature.length > 50 ? '...' : ''}`);
-        }
-      }
+      console.log(`[思考プロセス] ${thinkingData.text}`);
       
       // 処理結果に思考メッセージを設定
       result.thinkingMessage = thinkingMessage;
@@ -453,27 +288,17 @@ export class StreamingProcessor {
       // コンテンツデルタを処理
       const newContent = chunk.choices[0].delta.content;
       
-      // バッファリングされたコンテンツを処理
-      const { updatedMessage, shouldYield } = this.processBufferedContent(
-        newContent,
-        currentMessage,
-        this.persistentState.contentBuffer || ""
-      );
+      // extractContentAsStringを使用して安全に現在のコンテンツを取得
+      const currentContent = extractContentAsString(currentMessage.content);
       
-      result.updatedMessage = updatedMessage;
-      result.shouldYieldMessage = shouldYield;
+      // 安全に更新されたメッセージを作成
+      result.updatedMessage = {
+        ...currentMessage,
+        content: currentContent + newContent
+      };
       
-      // 状態を更新
-      if (shouldYield) {
-        // バッファをリセット
-        this.updatePersistentState({
-          contentBuffer: ""
-        });
-      } else {
-        this.updatePersistentState({
-          contentBuffer: (this.persistentState.contentBuffer || "") + newContent
-        });
-      }
+      // 更新はすぐに通知
+      result.shouldYieldMessage = true;
       
       return result;
     }
@@ -514,79 +339,6 @@ export class StreamingProcessor {
     }
 
     return result;
-  }
-
-  /**
-   * バッファリングされたコンテンツを処理して完全な文や段落を返す
-   * @param newContent 新しいコンテンツ
-   * @param currentMessage 現在のメッセージ
-   * @param contentBuffer 現在のコンテンツバッファ
-   * @returns 処理結果
-   */
-  private static processBufferedContent(
-    newContent: string,
-    currentMessage: ChatMessage,
-    contentBuffer: string
-  ): { updatedMessage: ChatMessage; shouldYield: boolean } {
-    // 引数の安全性チェック
-    const safeNewContent = newContent || "";
-    const safeContentBuffer = contentBuffer || "";
-    const combinedContent = safeContentBuffer + safeNewContent;
-    
-    // 空のバッファの場合は早期リターン
-    if (!combinedContent) {
-      return {
-        updatedMessage: currentMessage,
-        shouldYield: false
-      };
-    }
-    
-    // 文や段落の区切りを検出
-    const isSentenceOrParagraphEnd = this.isTextBlockEnd(combinedContent);
-    
-    // バッファが特定のサイズを超えた場合も表示する
-    const exceedsBufferThreshold = combinedContent.length >= BUFFER_SIZE_THRESHOLD;
-    
-    // 表示するべきか判定
-    const shouldActuallyYield = isSentenceOrParagraphEnd || exceedsBufferThreshold;
-    
-    // 現在のメッセージのコンテンツを更新
-    // extractContentAsStringを使用して安全に処理
-    const currentContent = extractContentAsString(currentMessage.content);
-    
-    // 既存のコンテンツにバッファの内容を追加（必要に応じて）
-    const updatedContent = shouldActuallyYield ? 
-      currentContent + combinedContent : 
-      currentContent;
-    
-    return {
-      updatedMessage: {
-        ...currentMessage,
-        content: updatedContent
-      },
-      shouldYield: shouldActuallyYield
-    };
-  }
-
-  /**
-   * テキストブロックの終了かどうかを判定
-   * @param text テキスト
-   * @returns テキストブロックの終了かどうか
-   */
-  private static isTextBlockEnd(text: string): boolean {
-    if (!text) return false;
-    
-    return (
-      text.endsWith(".") || 
-      text.endsWith("。") || 
-      text.endsWith("!") || 
-      text.endsWith("！") || 
-      text.endsWith("?") || 
-      text.endsWith("？") || 
-      text.endsWith("\n") ||
-      // 2行以上の改行がある場合は段落区切りとして扱う
-      text.includes("\n\n")
-    );
   }
 
   /**
@@ -1425,11 +1177,6 @@ export class StreamingProcessor {
         try {
           // チャンク数をカウント
           chunkCount++;
-          
-          // 開発モード時のデバッグログ
-          if (process.env.NODE_ENV === 'development') {
-            console.log(`処理チャンク: ${safeStringify(data, "<不明なチャンク>")}`);
-          }
           
           // チャンクを処理
           const result = this.processChunk(

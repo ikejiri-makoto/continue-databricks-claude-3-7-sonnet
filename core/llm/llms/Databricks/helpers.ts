@@ -1,6 +1,7 @@
-import { CompletionOptions } from "../../../index.js";
+import { ChatMessage, CompletionOptions } from "../../../index.js";
 import { DatabricksCompletionOptions } from "./types/types.js";
 import { safeStringify } from "../../utils/json.js";
+import { extractContentAsString } from "../../utils/messageUtils.js";
 
 /**
  * Databricks固有のヘルパー関数を提供するクラス
@@ -71,6 +72,9 @@ export class DatabricksHelpers {
         // extra_bodyから直接thinking設定を抽出
         console.log('思考モードパラメータをextra_bodyから抽出してルートに配置します');
         args.thinking = optionsAny.extra_body.thinking;
+      } else if (options.thinking) {
+        // thinking設定が直接存在する場合はそれを使用
+        args.thinking = options.thinking;
       } else {
         // デフォルトの思考モード設定
         args.thinking = {
@@ -251,19 +255,56 @@ export class DatabricksHelpers {
     
     // 各ツールを処理
     return tools.map(tool => {
-      // deep copyを作成して元のオブジェクトを変更しない
-      const processedTool = JSON.parse(JSON.stringify(tool));
+      // 標準的なtool形式を確保するために必要なプロパティのみを抽出
+      const processedTool: any = {
+        type: tool.type || "function"
+      };
       
-      // parallel_tool_callsパラメータがあれば削除
-      if ('parallel_tool_calls' in processedTool) {
-        delete processedTool.parallel_tool_calls;
+      // function情報の処理
+      if (tool.function) {
+        processedTool.function = {
+          name: tool.function.name,
+          description: tool.function.description
+        };
+        
+        // parametersの処理
+        if (tool.function.parameters) {
+          processedTool.function.parameters = { ...tool.function.parameters };
+        }
       }
-      
-      // サポートされていないパラメータをすべて削除
-      this.removeUnsupportedParameters(processedTool);
       
       return processedTool;
     });
+  }
+
+  /**
+   * APIエンドポイントURLを正規化する
+   * @param url APIエンドポイントのURL
+   * @returns 正規化されたURL
+   */
+  static normalizeApiUrl(url: string): string {
+    if (!url) {
+      return "";
+    }
+    
+    // 末尾のスラッシュを削除
+    let normalizedUrl = url.trim();
+    if (normalizedUrl.endsWith("/")) {
+      normalizedUrl = normalizedUrl.slice(0, -1);
+      console.log(`APIベースURL修正: 末尾のスラッシュを削除しました - ${normalizedUrl}`);
+    }
+    
+    // URLにserving-endpointsが含まれるが、/chat/completionsエンドポイントがない場合は追加
+    if (normalizedUrl.includes("serving-endpoints") && 
+        !normalizedUrl.includes("/chat/completions") && 
+        !normalizedUrl.includes("/invocations")) {
+      
+      // /invocationエンドポイントの追加
+      normalizedUrl = `${normalizedUrl}/invocations`;
+      console.log(`APIベースURL修正: /invocationsを追加しました - ${normalizedUrl}`);
+    }
+    
+    return normalizedUrl;
   }
 
   /**
@@ -280,11 +321,17 @@ export class DatabricksHelpers {
       
       if (loggableBody.messages && Array.isArray(loggableBody.messages)) {
         loggableBody.messages = loggableBody.messages.map((msg: any) => {
-          if (msg.content && typeof msg.content === 'string' && msg.content.length > 100) {
-            return {
-              ...msg,
-              content: `${msg.content.substring(0, 100)}... (${msg.content.length} characters)`
-            };
+          if (msg.content) {
+            const contentStr = typeof msg.content === 'string' 
+              ? msg.content 
+              : extractContentAsString(msg.content);
+            
+            if (contentStr.length > 100) {
+              return {
+                ...msg,
+                content: `${contentStr.substring(0, 100)}... (${contentStr.length} characters)`
+              };
+            }
           }
           return msg;
         });
@@ -321,12 +368,77 @@ export class DatabricksHelpers {
    * @param response Fetch API レスポンス
    * @returns 処理されたメッセージ
    */
-  static async processNonStreamingResponse(response: Response): Promise<any> {
-    const data = await response.json();
-    return { 
-      role: "assistant", 
-      content: data.choices?.[0]?.message?.content || ""
-    };
+  static async processNonStreamingResponse(response: Response): Promise<ChatMessage> {
+    try {
+      const data = await response.json();
+      
+      // 適切なレスポンス構造の確認と処理
+      if (data.choices && data.choices.length > 0 && data.choices[0].message) {
+        const message = data.choices[0].message;
+        
+        // content配列や思考データの処理
+        if (message.content && Array.isArray(message.content)) {
+          // contentが配列の場合の特別処理（thinking contentなど）
+          const processedContent = this.processNestedContent(message.content);
+          return { 
+            role: "assistant", 
+            content: processedContent
+          };
+        }
+        
+        return { 
+          role: "assistant", 
+          content: message.content || ""
+        };
+      }
+      
+      // 標準的な構造でない場合のフォールバック
+      return { 
+        role: "assistant", 
+        content: typeof data === 'string' ? data : JSON.stringify(data)
+      };
+    } catch (error) {
+      console.error("非ストリーミングレスポンスの処理中にエラー:", error);
+      return {
+        role: "assistant",
+        content: "レスポンスの処理中にエラーが発生しました。"
+      };
+    }
+  }
+
+  /**
+   * 入れ子になったコンテンツ構造を処理
+   * @param contentArray コンテンツ配列
+   * @returns 処理されたコンテンツ文字列
+   */
+  private static processNestedContent(contentArray: any[]): string {
+    if (!Array.isArray(contentArray)) {
+      return String(contentArray || "");
+    }
+    
+    // コンテンツ配列から適切なテキストを抽出
+    let processedContent = "";
+    
+    for (const item of contentArray) {
+      if (typeof item === 'string') {
+        processedContent += item;
+      } else if (item && typeof item === 'object') {
+        // テキスト要素の処理
+        if (item.type === 'text' && item.text) {
+          processedContent += item.text;
+        }
+        // 思考要素の処理
+        else if (item.type === 'reasoning' && item.summary) {
+          // 思考サマリーを処理
+          const summaryText = this.processThinkingSummary(item);
+          if (summaryText) {
+            processedContent += `\n[思考プロセス] ${summaryText}\n`;
+          }
+        }
+      }
+    }
+    
+    return processedContent;
   }
 
   /**
@@ -347,6 +459,14 @@ export class DatabricksHelpers {
     
     // オブジェクトの場合は適切なプロパティを探す
     if (typeof thinkingData === 'object') {
+      // summary配列の処理
+      if (Array.isArray(thinkingData.summary) && thinkingData.summary.length > 0) {
+        const summaryItem = thinkingData.summary[0];
+        if (summaryItem && typeof summaryItem === 'object' && summaryItem.type === 'summary_text') {
+          return summaryItem.text || "";
+        }
+      }
+      
       // 最優先形式: choices[0].delta.content.summary.text形式 - Databricksで最も一般的
       if (thinkingData.choices?.[0]?.delta?.content?.summary?.text) {
         return thinkingData.choices[0].delta.content.summary.text;
@@ -389,5 +509,120 @@ export class DatabricksHelpers {
     
     // どのプロパティも見つからない場合は[object Object]を避け、簡単なメッセージを返す
     return "[思考中...]";
+  }
+  
+  /**
+   * 部分的なテキストから思考データを抽出
+   * ストリーミングチャンクから送られてくる思考データのさまざまな形式に対応
+   * @param chunk ストリーミングチャンク
+   * @returns 抽出された思考テキストとシグネチャ（存在する場合）
+   */
+  static extractThinkingData(chunk: any): { text: string; signature?: string } | null {
+    if (!chunk) {
+      return null;
+    }
+    
+    // ストリーミングチャンクの構造をログ出力（デバッグ用）
+    console.log(`思考データ抽出: チャンク構造: ${safeStringify(chunk, "{}")}`);
+    
+    try {
+      // choices[0].delta.content[0].summary[0].text 形式 (Databricksの配列ベース形式)
+      if (chunk.choices?.[0]?.delta?.content && Array.isArray(chunk.choices[0].delta.content) && chunk.choices[0].delta.content.length > 0) {
+        const content = chunk.choices[0].delta.content[0];
+        
+        // 型安全なアクセス - reasoningタイプとsummary配列の確認
+        if (content && typeof content === 'object' && content.type === 'reasoning' && 
+            Array.isArray(content.summary) && content.summary.length > 0) {
+            
+          const summaryItem = content.summary[0];
+          // summary_textタイプの確認
+          if (summaryItem && typeof summaryItem === 'object' && 
+              summaryItem.type === 'summary_text' && typeof summaryItem.text === 'string') {
+            
+            console.log(`思考データを抽出しました: パス = choices[0].delta.content[0].summary[0].text`);
+            return {
+              text: summaryItem.text,
+              signature: summaryItem.signature || undefined
+            };
+          }
+        }
+      }
+      
+      // choices[0].delta.content.summary.text 形式 (オブジェクトベース形式)
+      if (chunk.choices?.[0]?.delta?.content?.summary?.text) {
+        console.log(`思考データを抽出しました: パス = choices[0].delta.content.summary.text`);
+        return {
+          text: chunk.choices[0].delta.content.summary.text,
+          signature: chunk.choices[0].delta.content.summary.signature
+        };
+      }
+      
+      // thinking.text 形式（直接のthinking形式）
+      if (chunk.thinking?.text) {
+        console.log(`思考データを抽出しました: パス = thinking.text`);
+        return {
+          text: chunk.thinking.text,
+          signature: chunk.thinking.signature
+        };
+      }
+      
+      // content.summary.text 形式
+      if (chunk.content?.summary?.text) {
+        console.log(`思考データを抽出しました: パス = content.summary.text`);
+        return {
+          text: chunk.content.summary.text,
+          signature: chunk.content.summary.signature
+        };
+      }
+      
+      // summary.text 形式
+      if (chunk.summary?.text) {
+        console.log(`思考データを抽出しました: パス = summary.text`);
+        return {
+          text: chunk.summary.text,
+          signature: chunk.summary.signature
+        };
+      }
+      
+      // choices[0].delta.reasoning 形式 (Databricksの一部のモデル用)
+      if (chunk.choices?.[0]?.delta?.reasoning) {
+        const reasoning = chunk.choices[0].delta.reasoning;
+        
+        // reasoningが文字列の場合
+        if (typeof reasoning === 'string') {
+          console.log(`思考データを抽出しました: パス = choices[0].delta.reasoning (string)`);
+          return {
+            text: reasoning
+          };
+        }
+        
+        // reasoningがオブジェクトの場合
+        if (typeof reasoning === 'object' && reasoning !== null) {
+          // 直接のtext形式
+          if (reasoning.text) {
+            console.log(`思考データを抽出しました: パス = choices[0].delta.reasoning.text`);
+            return {
+              text: reasoning.text,
+              signature: reasoning.signature
+            };
+          }
+          
+          // summary.text形式
+          if (reasoning.summary?.text) {
+            console.log(`思考データを抽出しました: パス = choices[0].delta.reasoning.summary.text`);
+            return {
+              text: reasoning.summary.text,
+              signature: reasoning.signature
+            };
+          }
+        }
+      }
+      
+      // いずれのパターンにも一致しない場合
+      return null;
+    } catch (error) {
+      console.error(`思考データの抽出中にエラー: ${error}`);
+      return null;
+    }
   }
 }

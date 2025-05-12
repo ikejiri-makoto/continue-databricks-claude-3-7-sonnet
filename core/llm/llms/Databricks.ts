@@ -4,11 +4,10 @@ import { BaseLLM } from "../index.js";
 import { DatabricksLLMOptions } from "./Databricks/types/types.js";
 
 // 共通ユーティリティをインポート - コード全体で使用する
-
-// 共通ユーティリティのインポート
 import { getErrorMessage, isConnectionError } from "../utils/errors.js";
 import { streamSse } from "../stream.js";
 import { safeStringify } from "../utils/json.js";
+import { extractContentAsString } from "../utils/messageUtils.js";
 
 // Databricks固有のモジュールインポート
 import { DatabricksConfig } from "./Databricks/config.js";
@@ -88,7 +87,8 @@ class Databricks extends BaseLLM {
     }
     
     // 設定管理モジュールを使用して常に正規化されたURLを取得
-    const endpoint = DatabricksConfig.getFullApiEndpoint(this.apiBase);
+    const normalizedUrl = DatabricksHelpers.normalizeApiUrl(this.apiBase);
+    const endpoint = DatabricksConfig.getFullApiEndpoint(normalizedUrl);
     
     if (!endpoint) {
       throw new Error("Failed to get valid Databricks API endpoint");
@@ -200,10 +200,8 @@ class Databricks extends BaseLLM {
       // リクエストパラメータの構築をヘルパーモジュールに委譲
       const args = DatabricksHelpers.convertArgs(options);
       
-      // システムメッセージの処理をメッセージ処理モジュールに委譲
-      const systemMessage = MessageProcessor.processSystemMessage(messages);
-      
       // メッセージのサニタイズと前処理
+      const systemMessage = MessageProcessor.processSystemMessage(messages);
       const sanitizedMessages = MessageProcessor.sanitizeMessages(messages);
       
       // メッセージ変換をメッセージ処理モジュールに委譲
@@ -234,17 +232,15 @@ class Databricks extends BaseLLM {
           console.log(`Databricksリクエスト: ツール名=${toolNames}`);
           
           // 開発モードでより詳細なツール情報をログ出力
-          if (process.env.NODE_ENV === 'development' || true) {
-            args.tools.forEach((tool: any, index: number) => {
-              const toolInfo = {
-                name: tool?.function?.name || 'unnamed',
-                type: tool?.type || 'unknown',
-                params_count: tool?.function?.parameters?.properties ? 
-                  Object.keys(tool.function.parameters.properties).length : 0
-              };
-              console.log(`ツール[${index}]: ${safeStringify(toolInfo, "{}")}`);
-            });
-          }
+          args.tools.forEach((tool: any, index: number) => {
+            const toolInfo = {
+              name: tool?.function?.name || 'unnamed',
+              type: tool?.type || 'unknown',
+              params_count: tool?.function?.parameters?.properties ? 
+                Object.keys(tool.function.parameters.properties).length : 0
+            };
+            console.log(`ツール[${index}]: ${safeStringify(toolInfo, "{}")}`);
+          });
         } catch (e) {
           console.log(`ツール情報のログ出力中にエラー: ${getErrorMessage(e)}`);
         }
@@ -258,9 +254,8 @@ class Databricks extends BaseLLM {
       // これにより元のオブジェクトの変更を防止する
       // deep copy の代わりに、直接プロパティを設定して型安全性を高める
       const requestBody = {
-        ...args,
         messages: formattedMessages,
-        system: systemMessage
+        ...args,
       }; 
       
       // リクエストのJSON化と最終チェック
