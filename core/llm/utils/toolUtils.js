@@ -174,6 +174,18 @@ export function repairToolArguments(args) {
     
     // 有効なJSONを抽出
     try {
+      // ブール値の修復を試みる - 重複パターンに対応
+      const fixedBooleanArgs = tryFixBrokenBooleanJson(args);
+      if (fixedBooleanArgs !== args) {
+        try {
+          JSON.parse(fixedBooleanArgs);
+          return fixedBooleanArgs; // ブール値修復後のJSONが有効ならそれを返す
+        } catch (e3) {
+          // 修復したがまだ無効な場合は次の方法を試す
+          console.log(`ブール修復後のJSON解析エラー: ${e3}`);
+        }
+      }
+      
       const { extractValidJson, repairDuplicatedJsonPattern } = require('./json.js');
       
       // 重複パターンの修復を試みる
@@ -184,13 +196,20 @@ export function repairToolArguments(args) {
           return repairedArgs; // 修復後のJSONが有効ならそれを返す
         } catch (e2) {
           // 修復したがまだ無効な場合は次の方法を試す
+          console.log(`重複修復後のJSON解析エラー: ${e2}`);
         }
       }
       
       // 有効なJSON部分の抽出を試みる
       const validJson = extractValidJson(args);
       if (validJson) {
-        return validJson; // 有効なJSON部分があればそれを返す
+        try {
+          JSON.parse(validJson);
+          return validJson; // 有効なJSON部分があればそれを返す
+        } catch (e4) {
+          // 無効な場合は引き続き処理
+          console.log(`抽出後のJSON解析エラー: ${e4}`);
+        }
       }
       
       // 特定のパターンに対する修正
@@ -198,12 +217,36 @@ export function repairToolArguments(args) {
       const doublePropertyPattern = /\{\s*"(\w+)"\s*:\s*"(.*?)"\s*\{\s*"\1"\s*:/;
       const match = args.match(doublePropertyPattern);
       if (match && match[1] && match[2]) {
-        return `{"${match[1]}": "${match[2]}"}`;
+        const fixedJson = `{"${match[1]}": "${match[2]}"}`;
+        try {
+          JSON.parse(fixedJson);
+          return fixedJson;
+        } catch (e5) {
+          console.log(`パターン修復後のJSON解析エラー: ${e5}`);
+        }
       }
       
       // パターン2: 不完全なJSONの閉じ括弧を追加
       if (args.includes('{') && !args.includes('}')) {
-        return args + '}';
+        const fixedJson = args + '}';
+        try {
+          JSON.parse(fixedJson);
+          return fixedJson;
+        } catch (e6) {
+          console.log(`括弧修復後のJSON解析エラー: ${e6}`);
+        }
+      }
+      
+      // パターン3: 特に対象となる "recursive": fffalsee パターンを直接修正
+      const falsePattern = /"(recursive|\w+)"\s*:\s*f+alse+([,}])/g;
+      if (falsePattern.test(args)) {
+        const fixedJson = args.replace(falsePattern, '"$1": false$2');
+        try {
+          JSON.parse(fixedJson);
+          return fixedJson;
+        } catch (e7) {
+          console.log(`ブール直接修復後のJSON解析エラー: ${e7}`);
+        }
       }
       
       // 他の修復方法が失敗した場合は元の文字列を返す
@@ -214,4 +257,46 @@ export function repairToolArguments(args) {
       return args;
     }
   }
+}
+
+/**
+ * 破損したブール値を含むJSONを修復する試み
+ * 特に "fffalsee" のような重複パターンや切断されたブール値を処理する
+ * 
+ * @param {string} text 修復する文字列
+ * @returns {string} 修復された文字列または元の文字列（修復できない場合）
+ */
+function tryFixBrokenBooleanJson(text) {
+  if (!text || typeof text !== 'string') {
+    return text;
+  }
+  
+  let result = text;
+
+  // 重複したブール値パターンの修復
+  // "fffalsee" -> "false" の修復 (falseが重複した場合)
+  result = result.replace(/([{,]\s*"\w+"\s*:)\s*f+alse+([,}])/g, '$1 false$2');
+  
+  // "ttruee" -> "true" の修復 (trueが重複した場合)
+  result = result.replace(/([{,]\s*"\w+"\s*:)\s*t+rue+([,}])/g, '$1 true$2');
+  
+  // "rue" -> "true" の修復 (trueが切断された場合)
+  result = result.replace(/([{,]\s*"\w+"\s*:)\s*rue([,}])/g, '$1 true$2');
+  
+  // "als" または "alse" -> "false" の修復 (falseが切断された場合)
+  result = result.replace(/([{,]\s*"\w+"\s*:)\s*als([,}])/g, '$1 false$2');
+  result = result.replace(/([{,]\s*"\w+"\s*:)\s*alse([,}])/g, '$1 false$2');
+  
+  // オブジェクト終了時の特殊ケース修復
+  // "fffalsee}" -> "false}" の修復
+  if (result.includes('fffalsee}')) {
+    result = result.replace(/fffalsee}/g, 'false}');
+  }
+  
+  // "falsee}" -> "false}" の修復
+  if (result.includes('falsee}')) {
+    result = result.replace(/falsee}/g, 'false}');
+  }
+  
+  return result;
 }

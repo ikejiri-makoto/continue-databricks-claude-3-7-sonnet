@@ -1,7 +1,7 @@
 import { ChatMessage } from "../../index.js";
 import { extractQueryContext } from "./messageUtils.js";
 import { PROVIDER_TOOL_SUPPORT } from "../toolSupport.js";
-import { safeJsonParse, extractValidJson, repairDuplicatedJsonPattern, isValidJson } from "./json.js";
+import { safeJsonParse, extractValidJson, repairDuplicatedJsonPattern, isValidJson, tryFixBrokenBooleanJson } from "./json.js";
 import { getErrorMessage } from "./errors.js";
 
 /**
@@ -179,6 +179,24 @@ export function repairToolArguments(args: string): string {
     // まず有効なJSONかどうかチェック
     if (isValidJson(args)) {
       return args;
+    }
+    
+    // 特殊修復: 破損したブール値を修復する
+    // tryFixBrokenBooleanJsonを使用して"fffalsee"などの破損したブール値を修復
+    const fixedBooleanJson = tryFixBrokenBooleanJson(args);
+    if (fixedBooleanJson !== args && isValidJson(fixedBooleanJson)) {
+      console.log(`ブール値修復が成功しました: ${args} -> ${fixedBooleanJson}`);
+      return fixedBooleanJson;
+    }
+    
+    // 特殊パターン: "recursive": fffalsee パターンに直接対応する正規表現ベースの修復
+    const falsePattern = /"(recursive|\w+)"\s*:\s*f+alse+([,}])/g;
+    if (falsePattern.test(args)) {
+      const directlyFixedJson = args.replace(falsePattern, '"$1": false$2');
+      if (isValidJson(directlyFixedJson)) {
+        console.log(`特殊パターン修復が成功しました: ${args} -> ${directlyFixedJson}`);
+        return directlyFixedJson;
+      }
     }
     
     // JSON抽出を試みる

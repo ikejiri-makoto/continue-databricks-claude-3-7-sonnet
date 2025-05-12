@@ -200,7 +200,8 @@ export function safeJsonParse<T>(text: string, defaultValue: T): T {
 
 /**
  * 破損したブール値を含むJSONを修復する試み
- * 特に "rue}" のようなtrueの断片や "als" のようなfalseの断片を処理する
+ * 特に "fffalsee" や "ttruee" のような重複したブール値や
+ * "rue}" のようなtrueの断片や "als" のようなfalseの断片を処理する
  * 
  * @param text 修復する文字列
  * @returns 修復された文字列または元の文字列（修復できない場合）
@@ -212,6 +213,13 @@ export function tryFixBrokenBooleanJson(text: string): string {
   
   let result = text;
 
+  // 重複したブール値パターンの修復
+  // "fffalsee" -> "false" の修復 (falseが重複した場合)
+  result = result.replace(/([{,]\s*"\w+"\s*:)\s*f+alse+([,}])/g, '$1 false$2');
+  
+  // "ttruee" -> "true" の修復 (trueが重複した場合)
+  result = result.replace(/([{,]\s*"\w+"\s*:)\s*t+rue+([,}])/g, '$1 true$2');
+  
   // "rue" -> "true" の修復 (trueが切断された場合)
   result = result.replace(/([{,]\s*"\w+"\s*:)\s*rue([,}])/g, '$1 true$2');
   
@@ -219,17 +227,28 @@ export function tryFixBrokenBooleanJson(text: string): string {
   result = result.replace(/([{,]\s*"\w+"\s*:)\s*als([,}])/g, '$1 false$2');
   result = result.replace(/([{,]\s*"\w+"\s*:)\s*alse([,}])/g, '$1 false$2');
   
-  // "rue}" -> "true}" の修復 (特定のケース)
+  // オブジェクト終了時の特殊ケース修復
+  // "rue}" -> "true}" の修復
   if (result.includes('rue}')) {
     result = result.replace(/rue}/g, 'true}');
   }
   
-  // "als}" -> "false}" の修復 (特定のケース)
+  // "fffalsee}" -> "false}" の修復
+  if (result.includes('fffalsee}')) {
+    result = result.replace(/fffalsee}/g, 'false}');
+  }
+  
+  // "falsee}" -> "false}" の修復
+  if (result.includes('falsee}')) {
+    result = result.replace(/falsee}/g, 'false}');
+  }
+  
+  // "als}" -> "false}" の修復
   if (result.includes('als}')) {
     result = result.replace(/als}/g, 'false}');
   }
   
-  // "alse}" -> "false}" の修復 (特定のケース)
+  // "alse}" -> "false}" の修復
   if (result.includes('alse}')) {
     result = result.replace(/alse}/g, 'false}');
   }

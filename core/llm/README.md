@@ -492,7 +492,21 @@ The framework has been enhanced with several improvements as of May 2025:
    - Automatic handling of both OpenAI-compatible client calls and direct REST API calls
    - Elimination of the `extra_body: Extra inputs are not permitted` error
    - Enhanced parameter validation and unsupported parameter filtering
+   - Proper handling of array-based content structure in thinking mode responses
+   - Improved type definitions for different response formats
+   - Type-safe access to properties not defined in type definitions using type assertion
+   - Complete exclusion of `parallel_tool_calls` parameter to prevent errors with Databricks endpoints
 
 10. **Provider-specific Parameter Management**: Added improved validation and filtering of unsupported parameters for various providers.
+
+11. **Enhanced Streaming Chunk Handling**: Updated type definitions to support various response formats:
+    - Support for array-based content structure in streaming responses
+    - Support for nested data structures in thinking mode responses
+    - Support for both streaming and non-streaming responses with a single type definition
+
+12. **Reconnection and State Management**: Added new type definitions and functionality to support recovery from connection errors:
+    - `PersistentStreamState` for maintaining state during reconnection
+    - `ReconnectionResult` for handling reconnection results
+    - State preservation during retries for streaming operations
 
 By following these best practices, you can ensure more robust and maintainable code across the LLM framework.
