@@ -142,6 +142,17 @@ export interface StreamingChunk {
         [key: string]: any;
       } | string;
     };
+    // 非ストリーミングレスポンス用のmessageプロパティを追加
+    message?: {
+      content?: any; // 配列やオブジェクト、文字列など様々な形式をサポート
+      role?: string;
+      tool_calls?: ToolCall[];
+      refusal?: any;
+      annotations?: any;
+      audio?: any;
+      function_call?: any;
+      [key: string]: any; // その他のプロパティもサポート
+    };
     finish_reason?: string | null;
   }>;
   // summary直接アクセス用

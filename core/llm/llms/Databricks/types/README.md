@@ -2,6 +2,123 @@
 
 This directory contains the type definitions used in the Databricks LLM integration. Type definitions play a crucial role in ensuring code safety, maintainability, and self-documentation.
 
+## Response Format Structure
+The Databricks Claude 3.7 Sonnet response structure follows this hierarchy:
+
+=== REQUEST ===
+URL: https://adb-1981899174914086.6.azuredatabricks.net/serving-endpoints/chat/completions
+Method: POST
+Request Body:
+```json
+{
+  "messages": [
+    {
+      "role": "system",
+      "content": "\u3042\u306a\u305f\u306f\u5f79\u7acb\u3064AI\u30a2\u30b7\u30b9\u30bf\u30f3\u30c8\u3067\u3059\u3002\u5fc5\u8981\u306b\u5fdc\u3058\u3066\u30c4\u30fc\u30eb\u3092\u4f7f\u7528\u3057\u3066\u304f\u3060\u3055\u3044\u3002"
+    },
+    {
+      "role": "user",
+      "content": "\u6771\u4eac\u306e\u73fe\u5728\u306e\u5929\u6c17\u3092\u6559\u3048\u3066\u304f\u3060\u3055\u3044\u3002"
+    }
+  ],
+  "model": "databricks-claude-3-7-sonnet",
+  "max_tokens": 20480,
+  "thinking": {
+    "type": "enabled",
+    "budget_tokens": 10240
+  },
+  "tools": [
+    {
+      "type": "function",
+      "function": {
+        "name": "get_weather",
+        "description": "\u6307\u5b9a\u3055\u308c\u305f\u5834\u6240\u306e\u73fe\u5728\u306e\u5929\u6c17\u60c5\u5831\u3092\u53d6\u5f97\u3057\u307e\u3059",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "location": {
+              "type": "string",
+              "description": "\u5929\u6c17\u60c5\u5831\u3092\u53d6\u5f97\u3057\u305f\u3044\u5834\u6240\uff08\u90fd\u5e02\u540d\u306a\u3069\uff09"
+            },
+            "unit": {
+              "type": "string",
+              "enum": [
+                "celsius",
+                "fahrenheit"
+              ],
+              "description": "\u6e29\u5ea6\u306e\u5358\u4f4d\uff08\u30c7\u30d5\u30a9\u30eb\u30c8\u306fcelsius\uff09"
+            }
+          },
+          "required": [
+            "location"
+          ]
+        }
+      }
+    }
+  ],
+  "tool_choice": "auto"
+}
+```
+
+=== RESPONSE ===
+```json
+{
+  "id": "msg_bdrk_01LYsYW3RFFdEPVAUedC8u9Z",
+  "choices": [
+    {
+      "finish_reason": "tool_calls",
+      "index": 0,
+      "logprobs": null,
+      "message": {
+        "content": [
+          {
+            "type": "reasoning",
+            "summary": [
+              {
+                "type": "summary_text",
+                "text": "ユーザーは東京の現在の天気情報を求めています。この要求に応えるために、`get_weather`関数を使用できます。\n\n必要なパラメータを確認します:\n- `location`: 天気情報を取得したい場所 - ここでは「東京」\n- `unit`: 温度の単位（オプション） - 特に指定がないのでデフォルトの「celsius」を使用します\n\nすべての必要なパラメータが揃っているので、関数を呼び出すことができます。",
+                "signature": "ErcBCkgIAxABGAIiQJRb7rpeYhLuVXSlxfIHPJFPotgUggyiJtTD/yrh9tbsalPfYlUxd19qGN8Mw0h9qtVYaKumTUV1+poeEJr+O84SDE0ulR1K6D1DdxhuohoMKALNPo8f58U2MwpCIjBdDBZlOh4Obw72bwTyCtrHWdfykx6BWTHIk4g7V2uw8Kq353TP6NBaEeFLd3cBnXoqHYWWziyouz6GV9yzilEcU26WC4uwKZb2S1MdqTQn"
+              }
+            ]
+          },
+          {
+            "type": "text",
+            "text": "東京の現在の天気情報を取得します。"
+          }
+        ],
+        "refusal": null,
+        "role": "assistant",
+        "annotations": null,
+        "audio": null,
+        "function_call": null,
+        "tool_calls": [
+          {
+            "id": "toolu_bdrk_01LMiseooSF8SyS9cUgheyUy",
+            "function": {
+              "arguments": "{\"location\":\"東京\"}",
+              "name": "get_weather"
+            },
+            "type": "function"
+          }
+        ]
+      }
+    }
+  ],
+  "created": 1747060157,
+  "model": "us.anthropic.claude-3-7-sonnet-20250219-v1:0",
+  "object": "chat.completion",
+  "service_tier": null,
+  "system_fingerprint": null,
+  "usage": {
+    "completion_tokens": 231,
+    "prompt_tokens": 703,
+    "total_tokens": 934,
+    "completion_tokens_details": null,
+    "prompt_tokens_details": null
+  }
+}
+```
+
 ## Important Notice
 
 **IMPORTANT**: Databricks endpoints do not support the `parallel_tool_calls` parameter. This parameter has been intentionally excluded from the Databricks type definitions, and using it will cause errors.
@@ -204,6 +321,17 @@ export interface StreamingChunk {
         signature?: string;
         [key: string]: any;
       } | string;
+    };
+    // Non-streaming response message property
+    message?: {
+      content?: any; // Support for arrays, objects, strings, etc.
+      role?: string;
+      tool_calls?: ToolCall[];
+      refusal?: any;
+      annotations?: any;
+      audio?: any;
+      function_call?: any;
+      [key: string]: any; // Support for other properties
     };
     finish_reason?: string | null;
   }>;
@@ -533,6 +661,17 @@ export interface StreamingChunk {
       content?: string | { summary?: { text?: string; }; };
       reasoning?: { text?: string; summary?: { text?: string; }; signature?: string; [key: string]: any; } | string;
     };
+    // Non-streaming response message property
+    message?: {
+      content?: any; // Support for arrays, objects, strings, etc.
+      role?: string;
+      tool_calls?: ToolCall[];
+      refusal?: any;
+      annotations?: any;
+      audio?: any;
+      function_call?: any;
+      [key: string]: any; // Support for other properties
+    };
     finish_reason?: string | null;
   }>;
 }
@@ -641,6 +780,25 @@ if (optionsAny.extra_body &&
 ```
 
 This approach allows us to maintain type safety while still supporting the required functionality.
+
+### 7. Added Support for Non-Streaming Responses
+
+With the May 2025 update, support has been added for non-streaming responses from Databricks endpoints. This is implemented through the addition of a `message` property in the `choices` array of the `StreamingChunk` interface:
+
+```typescript
+message?: {
+  content?: any; // Support for arrays, objects, strings, etc.
+  role?: string;
+  tool_calls?: ToolCall[];
+  refusal?: any;
+  annotations?: any;
+  audio?: any;
+  function_call?: any;
+  [key: string]: any; // Support for other properties
+};
+```
+
+This allows the implementation to handle both streaming responses (using the `delta` property) and non-streaming responses (using the `message` property) with a single interface, improving code maintainability and type safety.
 
 ## Type Safety Best Practices
 
@@ -753,6 +911,21 @@ const optionsAny = options as any;
 if (optionsAny.extra_body) {
   // ...
 }
+```
+
+### 5. `Property 'message' does not exist on type '{...}'`
+
+This error occurs when trying to access the `message` property in the `choices` array of a `StreamingChunk` object. The solution is to make sure the `message` property is defined in the interface:
+
+```typescript
+choices?: Array<{
+  // Other properties...
+  message?: {
+    content?: any;
+    // Other properties...
+  };
+  // ...
+}>;
 ```
 
 ## Future Type Definition Enhancements

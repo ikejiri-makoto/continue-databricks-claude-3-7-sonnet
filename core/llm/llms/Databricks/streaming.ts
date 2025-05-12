@@ -247,8 +247,7 @@ export class StreamingProcessor {
       return result;
     }
 
-    // 思考モード処理 - choices[0].delta.content.summary.text形式のみを優先的に処理
-    // === 優先的に choices.delta.content.summary.text 形式のみを処理 ===
+    // 思考モード処理: choices[0].delta.content.summary.text 形式のみを処理（ストリーミング時）
     if (chunk.choices && 
         Array.isArray(chunk.choices) && 
         chunk.choices.length > 0 && 

@@ -6,13 +6,13 @@ This directory contains utility modules that support the LLM integration functio
 
 ```
 core/llm/utils/
-├── errors.ts       (エラー処理)
-├── json.ts         (JSON処理)
-├── messageUtils.ts (メッセージ処理)
-├── sseProcessing.ts (SSE処理)
-├── streamProcessing.ts (ストリーム処理)
-├── toolUtils.ts     (ツールユーティリティ)
-└── typeUtils.ts     (型安全性ユーティリティ)
+├── errors.ts       (Error handling)
+├── json.ts         (JSON processing)
+├── messageUtils.ts (Message processing)
+├── sseProcessing.ts (SSE processing)
+├── streamProcessing.ts (Stream processing)
+├── toolUtils.ts     (Tool utilities)
+└── typeUtils.ts     (Type safety utilities)
 ```
 
 ## Core Utility Files
