@@ -294,10 +294,10 @@ To enable thinking mode for Claude 3.7 Sonnet models, the following parameters n
 
 #### Response Processing for Thinking Mode
 
-Claude 3.7 Sonnet's thinking mode returns data specifically in `choices[0].delta.content.summary.text` format when used with Databricks endpoints. Our implementation now focuses exclusively on processing this format for better reliability:
+Claude 3.7 Sonnet's thinking mode returns data specifically in `choices[0].delta.content.summary.text` format when used with Databricks endpoints. Our implementation focuses exclusively on processing this format for optimal reliability:
 
 ```typescript
-// Thinking mode processing - only handling choices[0].delta.content.summary.text format
+// Thinking mode processing - focusing on choices[0].delta.content.summary.text format
 if (chunk.choices && 
     Array.isArray(chunk.choices) && 
     chunk.choices.length > 0 && 
@@ -305,50 +305,75 @@ if (chunk.choices &&
   
   const content = chunk.choices[0].delta.content;
   
-  // Check if content is an object with a summary property
-  if (this.isContentObject(content) && 
-      content.summary && 
-      typeof content.summary === 'object' && 
-      content.summary.text) {
+  // Check if content is an object with a summary property (array or object format)
+  if (this.isContentObject(content)) {
+    // Handle array format: summary[0].text (primary format)
+    if (content.summary && 
+        Array.isArray(content.summary) && 
+        content.summary.length > 0 && 
+        content.summary[0]?.text) {
+      
+      const thinkingMessage: ThinkingChatMessage = {
+        role: "thinking",
+        content: content.summary[0].text,
+        signature: content.summary[0].signature || undefined
+      };
+      
+      // Log the thinking process text directly to console
+      console.log(content.summary[0].text);
+      
+      return { thinkingMessage };
+    }
     
-    // Create thinking message
-    const thinkingMessage: ThinkingChatMessage = {
-      role: "thinking",
-      content: content.summary.text,
-      signature: chunk.choices[0].delta.signature || undefined
-    };
-    
-    // Set thinking message in result
-    result.thinkingMessage = thinkingMessage;
-    
-    // Return result
-    return result;
+    // Handle object format: summary.text (fallback format)
+    if (content.summary && 
+        typeof content.summary === 'object' && 
+        content.summary.text) {
+      
+      const thinkingMessage: ThinkingChatMessage = {
+        role: "thinking",
+        content: content.summary.text,
+        signature: chunk.choices[0].delta.signature || undefined
+      };
+      
+      // Log the thinking process text directly to console
+      console.log(content.summary.text);
+      
+      return { thinkingMessage };
+    }
   }
 }
 ```
 
-This approach uses a type guard function to ensure type safety:
+This approach ensures reliable extraction and display of thinking process content with proper type safety:
+
+1. **Standardized Format Detection**: Focuses exclusively on the specific formats returned by Claude 3.7 Sonnet
+2. **Type-Safe Property Access**: Uses the `isContentObject` type guard function to ensure type safety
+3. **Direct Console Output**: Streamlined process to output just the thinking text to the console
+4. **Fallback Support**: Handles both array-based and object-based summary formats
+
+The implementation uses a type guard function for type safety:
 
 ```typescript
 /**
  * Type guard function to check if content is an object
  */
-private static isContentObject(content: any): content is { summary?: { text?: string } } {
+private static isContentObject(content: any): content is { summary?: any } {
   return typeof content === 'object' && content !== null;
 }
 ```
 
 ### Solving the `[object Object]` Display Problem
 
-The `[object Object]` display problem occurs due to the interaction between TypeScript's type system and JavaScript's object stringification. It's resolved using the following approaches:
+The `[object Object]` display problem has been resolved using several techniques:
 
-1. **Flexible Type Definitions**: Enhanced `ThinkingChunk` interface to accommodate various data structures
-2. **Type Guard Functions**: Added `isContentObject()` type guard for safe type checking
-3. **Hierarchical Property Access**: Using optional chaining (`?.`) to safely extract text from all data formats
-4. **Safe Stringification**: Using common utilities like `extractContentAsString` and `safeStringify` for safe stringification
-5. **Appropriate Fallbacks**: Providing explicit fallback text when text can't be extracted via any method
+1. **Simplified Property Access**: Direct extraction of the text property from the structured response
+2. **Type Guard Functions**: Usage of `isContentObject()` for safe type checking
+3. **Optional Chaining**: Consistent use of optional chaining (`?.`) to safely navigate nested properties
+4. **Content Extraction Utility**: Using `extractContentAsString()` for message content handling
+5. **Direct Console Output**: Simplified approach that directly outputs the text content
 
-Similar measures are applied when logging thinking processes:
+For thinking process logging, the enhanced implementation:
 
 ```typescript
 private static logThinkingProcess(thinkingMessage: ThinkingChatMessage): void {
@@ -358,44 +383,32 @@ private static logThinkingProcess(thinkingMessage: ThinkingChatMessage): void {
   }
   
   try {
-    // Use extractContentAsString to safely extract content
-    const contentAsString = extractContentAsString(thinkingMessage.content) || "";
+    // Extract content as string using utility function
+    const contentAsString = extractContentAsString(thinkingMessage.content);
     
-    // Add safe type checking
-    if (contentAsString === undefined || contentAsString === null) {
-      console.log('[Thinking Process] No data');
-      return;
+    // Directly output the thinking content text
+    if (contentAsString) {
+      console.log(contentAsString);
+    } else {
+      console.log('[思考プロセス] データがありません');
     }
     
-    // Truncate long thinking process for display
-    const truncatedThinking = contentAsString.length > 200 
-      ? contentAsString.substring(0, 200) + '...' 
-      : contentAsString;
-    
-    // Log as simple text to prevent [object Object] display
-    console.log('[Thinking Process]', truncatedThinking);
+    // Additional debug info in development mode
+    if (process.env.NODE_ENV === 'development') {
+      const truncatedThinking = contentAsString?.length > 200 
+        ? contentAsString.substring(0, 200) + '...' 
+        : contentAsString || '';
+        
+      console.log('[思考プロセス(開発モード)]', truncatedThinking);
+    }
   } catch (error) {
     // Skip logging errors to continue functionality
-    console.log('[Thinking Process] データを処理中...');
+    console.log('[思考プロセス] データを処理中...');
   }
 }
 ```
 
-For thinking mode to work correctly, appropriate parameters must be set in the request:
-
-```typescript
-// For Databricks endpoint - parameters directly at root level
-{
-  "model": "databricks-claude-3-7-sonnet",
-  "messages": [...],
-  "thinking": {
-    "type": "enabled",
-    "budget_tokens": thinkingBudgetTokens,
-  }
-}
-```
-
-Note that thinking mode is only supported by Claude 3.7 Sonnet models.
+This approach ensures the thinking process text is displayed directly without additional formatting or structure information, making it more readable and useful.
 
 ## May 2025 Updates
 
@@ -421,12 +434,13 @@ The May 2025 update includes several important improvements to parameter handlin
 
 ### Thinking Mode Processing Enhancements
 
-With the May 2025 update, we've simplified thinking mode processing logic to focus exclusively on the `choices[0].delta.content.summary.text` format. This leads to several benefits:
+With the May 2025 update, we've simplified thinking mode processing logic to focus exclusively on the standard formats returned by Claude 3.7 Sonnet. This leads to several benefits:
 
-1. **Improved Type Safety**: By focusing on one specific format with well-defined type guards, we avoid TypeScript compilation errors
+1. **Improved Type Safety**: By focusing on specific formats with well-defined type guards, we avoid TypeScript compilation errors
 2. **Reduced Complexity**: The simplified approach makes the code easier to understand and maintain
 3. **Better Error Resilience**: The focused approach is less prone to edge cases and error conditions
-4. **More Predictable Behavior**: By standardizing on one format, the behavior is more consistent
+4. **More Predictable Behavior**: By standardizing on specific formats, the behavior is more consistent
+5. **Simplified Console Output**: Direct output of thinking text for better readability
 
 ### Type Guard Functions for Safe Property Access
 
@@ -434,7 +448,7 @@ Using type guard functions is crucial for type-safe code:
 
 ```typescript
 // Type guard for safely checking object properties
-private static isContentObject(content: any): content is { summary?: { text?: string } } {
+private static isContentObject(content: any): content is { summary?: any } {
   return typeof content === 'object' && content !== null;
 }
 
