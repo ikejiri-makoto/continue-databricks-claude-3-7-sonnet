@@ -72,9 +72,10 @@ export class DatabricksHelpers {
         // extra_bodyから直接thinking設定を抽出
         console.log('思考モードパラメータをextra_bodyから抽出してルートに配置します');
         args.thinking = optionsAny.extra_body.thinking;
-      } else if (options.thinking) {
+      } else if (optionsAny.thinking) {
         // thinking設定が直接存在する場合はそれを使用
-        args.thinking = options.thinking;
+        // 型アサーションを使用してthinkingプロパティにアクセス
+        args.thinking = optionsAny.thinking;
       } else {
         // デフォルトの思考モード設定
         args.thinking = {

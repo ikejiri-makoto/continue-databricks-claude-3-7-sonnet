@@ -521,4 +521,61 @@ The framework has been enhanced with several improvements as of May 2025:
     - Structured conditional type narrowing
     - Prevention of "Property does not exist on type 'never'" errors
 
+### Special Updates for Databricks Claude 3.7 Sonnet Integration
+
+The Databricks Claude 3.7 Sonnet integration has seen significant improvements:
+
+1. **Support for Streaming Thinking Mode**: Added robust support for streaming thinking mode data with the unique array-based content structure used by Databricks endpoints:
+   ```json
+   {
+     "choices": [{
+       "delta": {
+         "content": [{
+           "type": "reasoning",
+           "summary": [{
+             "type": "summary_text",
+             "text": "分析を始めます。\n1. まず問題を確認します。\n2. 次に..."
+           }]
+         }]
+       }
+     }]
+   }
+   ```
+
+2. **Special Parameter Handling**: Added specialized handling for parameters that aren't explicitly defined in type definitions:
+   - Extracting `thinking` parameters from `extra_body` and placing them at the root level
+   - Completely excluding `parallel_tool_calls` parameter to prevent errors
+   - Handling both OpenAI-compatible client calls and direct REST API calls
+
+3. **Type-Safe Data Access**: Improved type safety for accessing nested properties in complex data structures:
+   - Type guard functions for safe property access
+   - Conditional narrowing for nested object properties
+   - Safe handling of array-based content structure
+
+4. **Enhanced Debugging and Logging**: Improved logging for debugging:
+   - Always using `safeStringify` for object logging to prevent `[object Object]` issues
+   - Safe property access with optional chaining for logging
+   - Exception handling for logging operations
+
+5. **Consistent Response Processing**: Unified approach to handling different response formats:
+   - Support for streaming and non-streaming responses with a single type definition
+   - Automated extraction of thinking text from various data structures
+   - Consistent handling of tool calls in both streaming and non-streaming contexts
+
+6. **Parameter Validation and Normalization**: Enhanced parameter handling:
+   - API URL normalization and validation
+   - Automatic removal of unsupported parameters
+   - Parameter type checking and conversion
+
+7. **Documentation Updates**: Comprehensive documentation of:
+   - Request and response formats
+   - Parameter constraints and requirements
+   - Error handling and troubleshooting
+   - Type definition best practices
+
+For more details on the Databricks Claude 3.7 Sonnet integration, see the specific README files in:
+- `llms/Databricks/README.md`
+- `llms/Databricks/types/README.md`
+- `utils/README.md`
+
 By following these best practices, you can ensure more robust and maintainable code across the LLM framework.
