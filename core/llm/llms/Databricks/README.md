@@ -1,259 +1,440 @@
 # Databricks LLM Integration for Continue
 
-このディレクトリには、Continue VS Code拡張機能からDatabricksのLLMサービス（特にClaude 3.7 Sonnet）に接続するための実装が含まれています。Databricksホステッドモデルへのアクセスを可能にし、コードの補完、説明、リファクタリングなどの機能をContinue拡張機能内で提供します。
+This directory contains the implementation for connecting Continue VS Code extension to Databricks LLM services, particularly Claude 3.7 Sonnet. It enables access to Databricks-hosted models for code completion, explanation, refactoring, and other features within the Continue extension.
 
-## Databricks固有の制限事項
+## Databricks-Specific Limitations
 
-### parallel_tool_callsパラメータについて
+### API Parameter Differences for Claude's Thinking Mode
 
-**重要**: Databricksのエンドポイントは`parallel_tool_calls`パラメータをサポートしていません。このパラメータは、他のプロバイダー（OpenAI等）ではツール呼び出しを並列に処理するために使用されますが、Databricksエンドポイントではこのパラメータを認識せず、エラーの原因となる可能性があります。
+**IMPORTANT**: Databricks endpoints require different API parameter placement for Claude's thinking mode compared to direct Anthropic API calls. The key differences are:
 
-この問題に対して、以下の対策を実装しています：
+1. Databricks requires the `thinking` parameter to be placed inside the `extra_body` object, not at the top level
+2. Model names need a `databricks-` prefix (e.g., `databricks-claude-3-7-sonnet` instead of `claude-3-7-sonnet-20240219`)
+3. When disabling thinking mode, the `budget_tokens` parameter must be completely excluded (partial settings are not allowed)
 
-1. **型定義レベルでの除外**: `DatabricksCompletionOptions`インターフェースと`DatabricksLLMOptions`インターフェースからこのパラメータを意図的に除外し、型安全性を確保
-2. **パラメータ設定の回避**: `DatabricksHelpers.convertArgs()`メソッドでこのパラメータを設定しないよう修正
-3. **安全なアクセス**: `requestBody`オブジェクトの代わりに、正しく型定義された`args`オブジェクトからツール情報を取得するように修正
-4. **詳細なログ出力**: ツール関連の処理について詳細なログを出力し、デバッグを容易に
-5. **エラー検知と処理**: 特殊なエラーパターンを検出し、適切に対処するためのエラーハンドリングを強化
-6. **安全値の確認と削除**: リクエスト送信前に最終確認を行い、`parallel_tool_calls`パラメータが設定されている場合は自動的に削除
-7. **多重防御**: `convertArgs()`内のチェックとリクエストボディ構築時の再チェックによる多重防御
+Example comparison:
+```typescript
+// Anthropic direct API
+const response = await anthropicClient.messages.create({
+  model: "claude-3-7-sonnet-20240219",
+  thinking: {
+    type: "enabled",
+    budget_tokens: 10240
+  },
+  // Other parameters
+});
 
-これらの対策により、Databricksエンドポイントとのツール呼び出し機能の互換性が向上し、エラーを防止しています。
+// Databricks API
+const response = await client.chat.completions.create({
+  model: "databricks-claude-3-7-sonnet",
+  // IMPORTANT: thinking parameter inside extra_body object
+  extra_body: {
+    thinking: {
+      type: "enabled",
+      budget_tokens: 10240
+    }
+  },
+  // Other parameters
+});
+```
 
-### デバッグとロギングのベストプラクティス
+These parameter structure differences have been handled in the implementation to ensure compatibility with Databricks endpoints.
 
-**重要**: Databricksモジュールのデバッグ時に`[object Object]`が表示される問題を防止するため、以下のベストプラクティスに従ってください：
+### About the `parallel_tool_calls` Parameter
 
-1. **オブジェクトのログ出力時は必ず文字列化する**:
+**IMPORTANT**: Databricks endpoints do not support the `parallel_tool_calls` parameter. This parameter is used by other providers (like OpenAI) to process tool calls in parallel, but Databricks endpoints do not recognize this parameter and it may cause errors.
+
+The following measures have been implemented to address this issue:
+
+1. **Exclusion at Type Definition Level**: Intentionally excluded this parameter from the `DatabricksCompletionOptions` and `DatabricksLLMOptions` interfaces to ensure type safety
+2. **Parameter Setting Avoidance**: Modified `DatabricksHelpers.convertArgs()` to avoid setting this parameter
+3. **Safe Access**: Modified to access tool information directly from properly typed `args` object instead of `requestBody` object
+4. **Detailed Logging**: Added detailed logging for tool-related processing to facilitate debugging
+5. **Error Detection and Handling**: Enhanced error handling to detect and handle special error patterns
+6. **Safe Value Checking and Removal**: Added final validation before sending requests to automatically remove the `parallel_tool_calls` parameter if present
+7. **Multiple Lines of Defense**: Multiple checkpoints through `convertArgs()` and request body construction
+
+These measures improve compatibility with Databricks endpoints for tool calling functionality and prevent errors.
+
+### Debugging and Logging Best Practices
+
+**IMPORTANT**: To prevent issues with `[object Object]` appearing in the debug logs for the Databricks module, follow these best practices:
+
+1. **Always Stringify Objects When Logging**:
    ```typescript
-   // 悪い例 - [object Object]と表示される
-   console.log(`ツール情報:`, tool);
+   // Bad - will show [object Object]
+   console.log(`Tool info:`, tool);
    
-   // 良い例 - プロパティが適切に表示される
+   // Good - properties will be properly displayed
    import { safeStringify } from "../../utils/json.js";
-   console.log(`ツール情報:`, safeStringify(tool, "<invalid>"));
+   console.log(`Tool info:`, safeStringify(tool, "<invalid>"));
    ```
 
-2. **オブジェクトプロパティへの安全なアクセス**:
+2. **Safe Access to Object Properties**:
    ```typescript
-   // 悪い例 - プロパティが存在しない場合にエラー
+   // Bad - may error if property doesn't exist
    const toolName = tool.function.name;
    
-   // 良い例 - オプショナルチェイニングでnullセーフに
+   // Good - null-safe with optional chaining
    const toolName = tool?.function?.name || "<unnamed>";
    ```
 
-3. **デバッグログの例外処理**:
+3. **Exception Handling for Debug Logs**:
    ```typescript
-   // デバッグ時の例外処理
+   // Exception handling for debug logging
    try {
-     // ツール名などのログ出力処理
+     // Tool name logging etc.
      const toolNames = args.tools
        .map((t: any) => t?.function?.name || 'unnamed')
        .join(', ');
-     console.log(`ツール名: ${toolNames}`);
+     console.log(`Tool names: ${toolNames}`);
    } catch (e) {
-     console.log(`ログ出力中にエラー: ${getErrorMessage(e)}`);
+     console.log(`Error while logging: ${getErrorMessage(e)}`);
    }
    ```
 
-4. **リクエストボディのログ出力改善**:
+4. **Improved Request Body Logging**:
    ```typescript
-   // リクエストボディの安全なログ出力
+   // Safe request body logging
    const truncatedBody = {
      model: requestBody.model,
      tools_count: requestBody.tools?.length || 0,
      messages_count: requestBody.messages?.length || 0
    };
-   console.log('リクエスト概要:', safeStringify(truncatedBody, "{}"));
+   console.log('Request summary:', safeStringify(truncatedBody, "{}"));
    ```
 
-5. **開発モードの詳細ログ**:
+5. **Detailed Logging in Development Mode**:
    ```typescript
-   // 開発モードでのみ詳細ログを出力
+   // Only output detailed logs in development mode
    if (process.env.NODE_ENV === 'development') {
-     // 詳細情報のログ出力
+     // Detailed information logging
    }
    ```
 
-これらのベストプラクティスにより、デバッグ中に`[object Object]`が表示される問題を防止し、より有用な情報がログに出力されるようになります。
+These best practices prevent `[object Object]` issues in logs and ensure more useful information is being logged.
 
-### 思考モード(Thinking Mode)の処理
+### Thinking Mode Processing
 
-Claude 3.7 Sonnetの思考モードは、複数の異なる形式でデータが返される場合があります。ストリーミングモードでは、この思考データは以下のようなさまざまな形式で送信されることがあります：
+Claude 3.7 Sonnet's thinking mode can return data in multiple different formats. In streaming mode, this thinking data may be sent in various formats:
 
-1. `thinking`プロパティとして直接送信される場合
-2. `choices[0].delta.content.summary.text`形式で送信される場合（Databricksエンドポイントで最も一般的）
-3. `content.summary.text`形式で送信される場合
-4. `summary.text`形式で送信される場合
+1. Directly sent as a `thinking` property
+2. Sent in `choices[0].delta.content.summary.text` format (most common for Databricks endpoints)
+3. Sent in `content.summary.text` format
+4. Sent in `summary.text` format
+5. Sent in `reasoning` object or string format (Databricks-specific alternative)
 
-これらの異なる形式に対応するため、`processThinkingChunk`メソッドは以下の戦略を使用しています：
+To handle these different formats, the `processThinkingChunk` method uses a hierarchical processing approach with clear prioritization:
 
 ```typescript
 private static processThinkingChunk(thinkingData: ThinkingChunk): ChatMessage {
-  // 思考内容を適切にシリアライズ
+  // Initialize variables for thinking content and signature
   let newThinking = "";
   let signature: string | undefined = undefined;
   
   try {
-    // ***** 最優先: choices[0].delta.content.summary.text形式 *****
-    if (thinkingData.choices?.[0]?.delta?.content?.summary?.text) {
+    // ***** HIGHEST PRIORITY: choices[0].delta.content.summary.text format *****
+    if (thinkingData.choices && 
+        Array.isArray(thinkingData.choices) && 
+        thinkingData.choices.length > 0 && 
+        thinkingData.choices[0]?.delta?.content?.summary?.text) {
+      
       newThinking = thinkingData.choices[0].delta.content.summary.text;
+      
+      if (process.env.NODE_ENV === 'development') {
+        console.log('Detected highest priority format (choices.delta.content.summary.text)');
+      }
     }
-    // ***** 次優先: content.summary.text形式 *****
+    // ***** NEXT PRIORITY: choices[0].delta.content.summary format (object) *****
+    else if (thinkingData.choices?.[0]?.delta?.content?.summary && 
+           typeof thinkingData.choices[0].delta.content.summary === 'object') {
+      const summaryObj = thinkingData.choices[0].delta.content.summary;
+      if (summaryObj && typeof summaryObj === 'object' && summaryObj.text) {
+        newThinking = summaryObj.text;
+        // Debug log omitted for brevity
+      } else {
+        // Explore for text properties instead of string conversion
+        const extractedText = this.findTextProperty(summaryObj);
+        if (extractedText) {
+          newThinking = extractedText;
+          // Debug log omitted for brevity
+        } else {
+          newThinking = "[Thinking...]";
+        }
+      }
+    }
+    // ***** NEXT PRIORITY: content.summary.text format *****
     else if (thinkingData.content?.summary?.text) {
       newThinking = thinkingData.content.summary.text;
+      // Debug log omitted for brevity
     }
-    // ***** 次優先: summary.text形式 *****
+    // ***** NEXT PRIORITY: summary.text format *****
     else if (thinkingData.summary?.text) {
       newThinking = thinkingData.summary.text;
+      // Debug log omitted for brevity
     }
-    // ***** 次優先: thinking形式（直接文字列または内部オブジェクト） *****
+    // ***** NEXT PRIORITY: reasoning format (Databricks-specific) *****
+    else if (typeof thinkingData === 'object' && 
+             thinkingData !== null && 
+             'reasoning' in thinkingData) {
+      
+      const reasoningData = thinkingData.reasoning;
+      // Processing logic for reasoning format...
+    }
+    // ***** NEXT PRIORITY: thinking format (direct string or internal object) *****
     else if (thinkingData.thinking) {
-      // 思考データの処理...
+      // Processing logic for thinking property format...
     }
-    // ***** 最終手段: 再帰的にオブジェクト内のテキストプロパティを探す *****
+    // ***** LAST RESORT: recursively search for text properties in the object *****
     else {
       const textProperties = this.findTextProperty(thinkingData);
       if (textProperties) {
         newThinking = textProperties;
+        // Debug log omitted for brevity
       } else {
-        newThinking = "[思考内容を処理中...]";
+        // No text found anywhere in the object
+        newThinking = "[Processing thinking content...]";
+        
+        // Debug mode only - log details of unprocessable data
+        if (process.env.NODE_ENV === 'development') {
+          console.log(`Unprocessable thinking data format: ${safeStringify(thinkingData, "<unknown format>")}`);
+        }
       }
     }
     
-    // 署名情報の取得
-    signature = thinkingData.signature || 
-               (thinkingData.choices?.[0]?.delta?.signature) ||
-               undefined;
+    // Get signature information - process safely with type checking
+    if (typeof thinkingData.signature === 'string') {
+      signature = thinkingData.signature;
+    } else if (thinkingData.choices?.[0]?.delta?.signature && 
+                typeof thinkingData.choices[0].delta.signature === 'string') {
+      signature = thinkingData.choices[0].delta.signature;
+    }
+    
   } catch (error) {
-    // エラー処理...
-    newThinking = `[思考データを処理中...]`;
+    // Handle error and continue processing
+    console.error(`Error processing thinking chunk: ${getErrorMessage(error)}`);
+    
+    // Debug mode only - log detailed error information
+    if (process.env.NODE_ENV === 'development') {
+      console.error(`Chunk data: ${safeStringify(thinkingData, "<data error>")}`);
+    }
+    
+    newThinking = `[Processing thinking data...]`;
   }
   
-  // 思考メッセージを返す
+  // Create and return thinking message
   const thinkingMessage: ThinkingChatMessage = {
     role: "thinking",
     content: newThinking,
     signature: signature
   };
   
-  // 思考プロセスをログ出力
+  // Log thinking process to console
   this.logThinkingProcess(thinkingMessage);
   
   return thinkingMessage;
 }
 ```
 
-### 思考データの検出
+### Enhanced Text Property Discovery
 
-思考データの検出も重要です。Databricksエンドポイントの場合、主に`choices[0].delta.content`オブジェクトに`summary`プロパティが含まれていることで思考データを検出します：
+To find text content within complex nested objects, a recursive exploration function is implemented:
 
 ```typescript
-// choices[0].delta.content.summary.text形式の思考チャンクの処理
-if (chunk.choices && 
-    chunk.choices[0]?.delta?.content) {
-  
-  // 思考データ形式であるかをチェック
-  const hasThinkingData = 
-    chunk.choices[0].delta.content.summary || 
-    (typeof chunk.choices[0].delta.content === 'object' && 
-     chunk.choices[0].delta.content.hasOwnProperty('summary'));
-      
-  if (hasThinkingData) {
-    try {
-      // 思考データを適切な形式に変換
-      const thinkingData: ThinkingChunk = {
-        content: {
-          summary: chunk.choices[0].delta.content.summary
-        }
-      };
-      
-      // choices配列のフォーマットでも追加
-      thinkingData.choices = [{
-        delta: {
-          content: {
-            summary: chunk.choices[0].delta.content.summary
-          }
-        }
-      }];
-      
-      const thinkingMessage = this.processThinkingChunk(thinkingData);
-      result.thinkingMessage = thinkingMessage;
-      return result;
-    } catch (e) {
-      console.warn(`思考データ形式の処理中にエラー: ${getErrorMessage(e)}`);
-    }
+private static findTextProperty(obj: any, depth: number = 0): string | null {
+  // Prevent infinite loops or excessive recursion
+  if (depth > 5) {
+    return null;
   }
+  
+  // Handle null or undefined
+  if (obj === null || obj === undefined) {
+    return null;
+  }
+  
+  // Return directly if a string
+  if (typeof obj === 'string') {
+    return obj;
+  }
+  
+  // Recursively process for objects
+  if (typeof obj === 'object') {
+    // Prioritize Databricks-specific thinking mode formats
+    
+    // choices[0].delta.content.summary.text format (most common)
+    if (obj.choices && 
+        Array.isArray(obj.choices) && 
+        obj.choices.length > 0 && 
+        obj.choices[0]?.delta?.content?.summary?.text) {
+      return obj.choices[0].delta.content.summary.text;
+    }
+    
+    // Array format checking (more formats omitted for brevity)
+    
+    // Priority property names to check first
+    const textPropertyNames = [
+      'text', 'content', 'summary', 'thinking', 'reasoning',
+      'message', 'description', 'value', 'delta', 'choices'
+    ];
+    
+    // Check priority properties first
+    for (const propName of textPropertyNames) {
+      if (propName in obj) {
+        const result = this.findTextProperty(obj[propName], depth + 1);
+        if (result) {
+          return result;
+        }
+      }
+    }
+    
+    // Check all other properties if not found in priority props
+    // Array handling logic omitted for brevity
+  }
+  
+  return null;
 }
 ```
 
-この拡張された検出ロジックにより、従来の方法では検出されなかった思考データも正しく処理できるようになります。
+### Solving the `[object Object]` Display Problem
 
-### `[object Object]`表示問題の解決
+The `[object Object]` display problem occurs due to the interaction between TypeScript's type system and JavaScript's object stringification. It's resolved using the following approaches:
 
-`[object Object]`表示問題は、TypeScriptの型システムとJavaScriptのオブジェクト文字列化の相互作用によって発生します。以下の方法で解決しています：
+1. **Flexible Type Definitions**: Enhanced `ThinkingChunk` interface to accommodate various data structures
+2. **Type Guard Functions**: Added `isContentObject()` type guard for safe type checking
+3. **Hierarchical Property Access**: Using optional chaining (`?.`) to safely extract text from all data formats
+4. **Recursive Property Exploration**: Using `findTextProperty` method to explore for text in deeply nested objects
+5. **Safe Stringification**: Using common utilities like `extractContentAsString` and `safeStringify` for safe stringification
+6. **Appropriate Fallbacks**: Providing explicit fallback text when text can't be extracted via any method
 
-1. **柔軟な型定義**: `ThinkingChunk`インターフェースを拡張して、様々なデータ構造に対応
-2. **階層アクセス**: オプショナルチェイニング(`?.`)を使用して、すべてのデータ形式でテキストを安全に抽出
-3. **再帰的なプロパティ探索**: `findTextProperty`メソッドを使用して、深いネストのオブジェクト内からもテキストを探索
-4. **安全な文字列化**: `extractContentAsString`や`safeStringify`などの共通ユーティリティを使用して、文字列化を安全に行う
-5. **適切なフォールバック**: どの方法でもテキストが抽出できない場合の明示的な代替テキスト提供
-
-思考プロセスのログ出力時も、同様の対策を適用しています：
+Similar measures are applied when logging thinking processes:
 
 ```typescript
 private static logThinkingProcess(thinkingMessage: ThinkingChatMessage): void {
+  // Null check
   if (!thinkingMessage) {
     return;
   }
   
   try {
-    // extractContentAsStringを使用して安全にコンテンツを抽出
+    // Use extractContentAsString to safely extract content
     const content = extractContentAsString(thinkingMessage.content) || "";
     
-    // 安全な型チェックを追加
+    // Add safe type checking
     if (content === undefined || content === null) {
-      console.log('[思考プロセス] データがありません');
+      console.log('[Thinking Process] No data');
       return;
     }
     
-    // 長い思考プロセスは省略して表示(常に文字列を使用)
-    const truncatedThinking = content.length > 200 
-      ? content.substring(0, 200) + '...' 
-      : content;
+    // Ensure text content is properly extracted
+    let thinkingText = content;
     
-    // シンプルにテキストとしてログ出力
-    console.log('[思考プロセス]', truncatedThinking);
+    // If content is an object, attempt to extract text (avoid [object Object])
+    if (typeof content === 'object') {
+      // Process different format patterns
+      // Processing logic omitted for brevity
+      
+      // Use safeStringify as a last resort
+      thinkingText = safeStringify(content, "[Thinking...]");
+    }
+    
+    // Truncate long thinking process for display
+    const truncatedThinking = thinkingText.length > 200 
+      ? thinkingText.substring(0, 200) + '...' 
+      : thinkingText;
+    
+    // Log as simple text to prevent [object Object] display
+    console.log('[Thinking Process]', truncatedThinking);
+    
+    // Additional signature logging omitted for brevity
   } catch (error) {
-    // ログ出力中のエラーはスキップして機能を継続
-    console.log('[思考プロセス] データを処理中...');
+    // Skip logging errors to continue functionality
+    // Error handling omitted for brevity
   }
 }
 ```
 
-思考モードが正しく動作するためには、リクエスト時に適切なパラメータが設定されている必要があります：
+For thinking mode to work correctly, appropriate parameters must be set in the request:
 
 ```typescript
+// For direct Anthropic API
 finalOptions.thinking = {
   type: "enabled",
   budget_tokens: thinkingBudgetTokens,
 };
+
+// For Databricks endpoint
+finalOptions.extra_body = {
+  thinking: {
+    type: "enabled",
+    budget_tokens: thinkingBudgetTokens,
+  }
+};
 ```
 
-また、思考モードはClaude 3.7 Sonnetモデルのみでサポートされていることに注意してください。
+Note that thinking mode is only supported by Claude 3.7 Sonnet models.
 
-## モジュール間の関係と連携
+## JSON Processing for Streaming Content
 
-Databricksインテグレーションは、メインの`Databricks.ts`クラスと、`Databricks/`ディレクトリ内の複数の特化したモジュールから構成されています。モジュール化された設計により、責任を明確に分離し、共通ユーティリティを最大限に活用しています。
+When working with streaming JSON data, the implementation uses various techniques to handle partial or malformed JSON. For Databricks endpoints with Claude 3.7 Sonnet's thinking mode, additional complexity arises due to nested JSON structure. These issues are addressed with:
 
-### アーキテクチャ概要
+1. **JSON Buffer Management**: Accumulating JSON fragments to reconstruct complete objects
+2. **Delta-based JSON Processing**: Using `processJsonDelta` to incrementally build JSON objects
+3. **JSON Validation and Repair**: Techniques for validating and repairing malformed JSON
 
-以下の図はDatabricks統合のモジュール間の関係と依存関係を示しています：
+```typescript
+// Building an accumulatng buffer 
+class JSONStreamParser {
+  private buffer = '';
+  
+  // Process chunks and try to extract complete JSON objects
+  processChunk(chunk: string): any[] {
+    this.buffer += chunk;
+    const results: any[] = [];
+    
+    // Look for multiple complete JSON objects
+    let startIdx = 0;
+    while (true) {
+      try {
+        const endIdx = this.findJsonEnd(this.buffer, startIdx);
+        if (endIdx === -1) break;
+        
+        const jsonStr = this.buffer.substring(startIdx, endIdx + 1);
+        const parsed = JSON.parse(jsonStr);
+        results.push(parsed);
+        
+        startIdx = endIdx + 1;
+      } catch (e) {
+        break; // Parsing error - wait for more data
+      }
+    }
+    
+    // Remove processed portions from buffer
+    if (startIdx > 0) {
+      this.buffer = this.buffer.substring(startIdx);
+    }
+    
+    return results;
+  }
+  
+  // Find end position of JSON object
+  private findJsonEnd(str: string, startPos: number): number {
+    // Implementation details for finding JSON object boundaries
+    // ...
+  }
+}
+```
+
+## Module Relationships and Coordination
+
+The Databricks integration consists of the main `Databricks.ts` class and multiple specialized modules in the `Databricks/` directory. This modularized design clearly separates responsibilities and maximizes the use of common utilities.
+
+### Architecture Overview
+
+The following diagram shows the relationships and dependencies between modules in the Databricks integration:
 
 ```
 ┌────────────────────────────────────────────────────────────────────┐
-│                       Continue コアフレームワーク                    │
+│                        Continue Core Framework                      │
 │  ┌─────────────┐ ┌─────────────┐ ┌─────────────┐ ┌─────────────┐  │
 │  │   BaseLLM   │ │ LLMOptions  │ │ChatMessage  │ │stream.js    │  │
 │  └─────────────┘ └─────────────┘ └─────────────┘ └─────────────┘  │
@@ -265,26 +446,26 @@ Databricksインテグレーションは、メインの`Databricks.ts`クラス�
 │              │                    │                  │             │
 │  ┌───────────┴────────────┐       │                  │             │
 │  │     Databricks.ts      │◄──────┘                  │             │
-│  │   (オーケストレーター)   │◄─────────────────────────┘             │
+│  │    (Orchestrator)      │◄─────────────────────────┘             │
 │  └───────────┬────────────┘                                        │
 │              │                                                     │
 │              ▼                                                     │
 │  ┌──────────────────────────────────────────────────────────┐      │
-│  │                        モジュール層                        │      │
+│  │                        Module Layer                       │      │
 │  │ ┌─────────────┐ ┌─────────────┐ ┌─────────────┐          │      │
 │  │ │  config.ts  │ │  errors.ts  │ │ helpers.ts  │          │      │
-│  │ │ 設定管理     │ │ エラー処理   │ │ ヘルパー関数 │          │      │
+│  │ │Config Mgmt  │ │Error Handling│ │Helper Funcs │          │      │
 │  │ └─────────────┘ └─────────────┘ └─────────────┘          │      │
 │  │                                                           │      │
 │  │ ┌─────────────┐ ┌─────────────┐ ┌─────────────┐          │      │
 │  │ │ messages.ts │ │streaming.ts │ │ toolcalls.ts│          │      │
-│  │ │メッセージ変換 │ │ストリーム処理│ │ツール呼び出し│          │      │
+│  │ │Msg Conversion│ │Stream Process│ │Tool Calling │          │      │
 │  │ └─────────────┘ └─────────────┘ └─────────────┘          │      │
 │  └──────────────────────────────────────────────────────────┘      │
 │                              ▲                                      │
 │                              │                                      │
 │  ┌──────────────────────────────────────────────────────────┐      │
-│  │                        型定義層                            │      │
+│  │                       Type Definition Layer               │      │
 │  │ ┌─────────────────┐ ┌─────────────────┐ ┌───────────────┐ │      │
 │  │ │    types.ts     │ │  extension.d.ts  │ │   index.ts    │ │      │
 │  │ │                 │ │                  │ │               │ │      │
@@ -297,7 +478,7 @@ Databricksインテグレーションは、メインの`Databricks.ts`クラス�
 ┌─────────────────────────────┼─────────────────────────────────────┐
 │                             │                                     │
 │  ┌──────────────────────────────────────────────────────────┐     │
-│  │                  共通ユーティリティ                        │     │
+│  │                  Common Utilities                         │     │
 │  │ ┌─────────────┐ ┌─────────────┐ ┌─────────────┐          │     │
 │  │ │  errors.js  │ │   json.js   │ │messageUtils │          │     │
 │  │ │             │ │             │ │     .js      │          │     │
@@ -312,448 +493,166 @@ Databricksインテグレーションは、メインの`Databricks.ts`クラス�
 └────────────────────────────────────────────────────────────────────┘
 ```
 
-### オーケストレーターパターンに基づくモジュール構造
+### Module Structure Based on the Orchestrator Pattern
 
 ```
 core/
-├── index.js                   (ChatMessage, CompletionOptions, LLMOptionsなどの基本型定義)
+├── index.js                   (Basic type definitions: ChatMessage, CompletionOptions, LLMOptions etc.)
 ├── util/
-│   └── messageContent.js      (チャットメッセージのレンダリング関数)
+│   └── messageContent.js      (Chat message rendering functions)
 └── llm/
-    ├── index.js               (BaseLLMクラス - すべてのLLM実装の基底クラス)
-    ├── stream.js              (streamSse関数 - ストリーミングレスポンスの処理)
-    ├── types/                 (共通型定義の拡張 - 適切な型安全性の確保)
-    │   └── databricks-extensions.d.ts (Databricks用の拡張型定義)
-    ├── utils/                 (共通ユーティリティ関数)
-    │   ├── errors.js          (エラー処理 - getErrorMessage, isConnectionErrorを提供)
-    │   ├── json.js            (JSON処理 - processJsonDelta等の関数を提供)
-    │   ├── messageUtils.js    (メッセージ処理 - extractContentAsString等の関数)
-    │   └── toolUtils.js       (ツール処理 - repairToolArgumentsなどの関数)
+    ├── index.js               (BaseLLM class - base class for all LLM implementations)
+    ├── stream.js              (streamSse function - streaming response processing)
+    ├── types/                 (Common type definition extensions - ensuring proper type safety)
+    │   └── databricks-extensions.d.ts (Extension types for Databricks)
+    ├── utils/                 (Common utility functions)
+    │   ├── errors.js          (Error handling - provides getErrorMessage, isConnectionError)
+    │   ├── json.js            (JSON processing - provides processJsonDelta and other functions)
+    │   ├── messageUtils.js    (Message processing - provides extractContentAsString and other functions)
+    │   └── toolUtils.js       (Tool processing - provides repairToolArguments and other functions)
     ├── llms/
-    │   ├── Databricks.ts       (オーケストレーター - 各モジュールの統合・調整)
+    │   ├── Databricks.ts       (Orchestrator - integrates and coordinates all modules)
     │   └── Databricks/
-    │       ├── config.ts       (設定管理 - API接続情報とタイムアウト設定の管理)
-    │       ├── errors.ts       (エラー処理 - 専用エラー処理とリトライロジック)
-    │       ├── helpers.ts      (ヘルパー関数 - リクエストパラメータ構築と初期化)
-    │       ├── messages.ts     (メッセージ変換 - 標準化されたメッセージフォーマット)
-    │       ├── streaming.ts    (ストリーム処理 - ストリーミングレスポンスの処理)
-    │       ├── toolcalls.ts    (ツールコール処理 - ツール呼び出しの管理)
-    │       └── types/          (型定義 - インターフェースと型の定義)
-    │           ├── index.ts        (型定義のエントリーポイント - すべての型をエクスポート)
-    │           └── extension.d.ts  (型拡張定義 - コア型をDatabricks固有の要件で拡張)
+    │       ├── config.ts       (Configuration management - handles API connection info and timeout settings)
+    │       ├── errors.ts       (Error handling - dedicated error handling and retry logic)
+    │       ├── helpers.ts      (Helper functions - request parameter construction and initialization)
+    │       ├── messages.ts     (Message conversion - standardized message formatting)
+    │       ├── streaming.ts    (Stream processing - handling streaming responses)
+    │       ├── toolcalls.ts    (Tool call processing - handling tool invocations)
+    │       └── types/          (Type definitions - interfaces and types)
+    │           ├── index.ts        (Type definition entry point - exports all types)
+    │           └── extension.d.ts  (Type extension definitions - extends core types with Databricks-specific requirements)
 ```
 
-### 各モジュールの明確な責任
+### Clear Module Responsibilities
 
-**1. `Databricks.ts` - オーケストレーター**
-- BaseLLMを継承、公開APIを実装
-- 各専門モジュールの調整と連携
-- リクエストのルーティング
-- 高レベルのエラー処理
-- 責任を適切なモジュールに委譲
-- ツール呼び出し制御の設定管理
-- 各モジュール間の通信を調整
-- 全体的なフローの制御と実行順序の管理
-- トップレベルのAPI実装（_streamChat、_streamComplete）
-- ストリーミング処理のライフサイクル管理
-- **新機能**: API要求の統一管理のための`getApiEndpoint()`メソッド
+**1. `Databricks.ts` - Orchestrator**
+- Inherits BaseLLM, implements public API
+- Coordinates specialized modules
+- Routes requests
+- High-level error handling
+- Delegates responsibilities to appropriate modules
+- Manages tool call control settings
+- Coordinates communication between modules
+- Controls overall flow and execution order
+- Implements top-level APIs (_streamChat, _streamComplete)
+- Manages streaming process lifecycle
+- **New Feature**: `getApiEndpoint()` method for unified API request management
 
-**2. `config.ts` - 設定管理**
-- API設定の読み込みと検証
-- URLの正規化
-- タイムアウト設定の処理
-- 設定の検証ロジック
-- 設定ファイルからの値の読み取り
-- 環境設定の一元管理
-- APIエンドポイントの正規化と検証
-- タイムアウトコントローラの設定と管理
-- **新機能**: 完全なAPIエンドポイントURLを提供する`getFullApiEndpoint()`メソッド
+**2. `config.ts` - Configuration Management**
+- Loads and validates API configuration
+- Normalizes URLs
+- Handles timeout settings
+- Implements validation logic
+- Reads configuration values from settings
+- Centralizes environment settings
+- Normalizes and validates API endpoints
+- Sets up and manages timeout controllers
+- **New Feature**: `getFullApiEndpoint()` method for complete API endpoint URL
 
-**3. `errors.ts` - エラー処理**
-- Databricks固有のエラー処理
-- エラーレスポンスのパース
-- リトライロジックの実装
-- 接続エラーとタイムアウトの管理
-- 状態保持リトライメカニズムの提供
-- 一時的エラーの検出と自動回復
-- 型安全なエラー処理インターフェース
-- 汎用的なリトライユーティリティの提供
-- リトライ戦略の設定と実行
-- エラー統計の収集と分析
+**3. `errors.ts` - Error Handling**
+- Databricks-specific error handling
+- Parses error responses
+- Implements retry logic
+- Handles connection errors and timeouts
+- Provides state-preserving retry mechanisms
+- Detects transient errors and auto-recovery
+- Type-safe error handling interfaces
+- Provides generic retry utilities
+- Configures and executes retry strategies
+- Collects and analyzes error statistics
 
-**4. `helpers.ts` - ヘルパー関数**
-- リクエストパラメータの構築
-- ストリーミング状態の初期化
-- 共通定数と初期値の管理
-- ユーティリティ関数
-- OpenAI互換形式への変換
-- 非ストリーミングレスポンスの処理
-- JSONの有効性検証
-- コンテンツデルタの処理
-- リクエストボディのログ出力
-- テキストブロックの終了判定
-- **新機能**: Claude 3.7モデル自動検出と専用設定
-- **改善**: 拡張されたエラーロギングとデバッグ機能
-- **更新**: 共通ユーティリティを活用した型安全なコンテンツ処理
-- **追加**: `thinking`プロパティの適切な型定義と処理
-- **新機能**: `processThinkingSummary()`メソッドによる思考データの抽出
-- **新機能**: `removeUnsupportedParameters()`による不要パラメータ削除
+**4. `helpers.ts` - Helper Functions**
+- Constructs request parameters
+- Initializes streaming state
+- Manages common constants and initial values
+- Provides utility functions
+- Converts to OpenAI-compatible format
+- Processes non-streaming responses
+- Validates JSON validity
+- Processes content deltas
+- Logs request bodies
+- Detects text block completion
+- **New Feature**: Claude 3.7 model auto-detection and dedicated configuration
+- **Improvement**: Enhanced error logging and debugging
+- **Update**: Type-safe content processing using common utilities
+- **Addition**: Proper type definition and handling for `thinking` property
+- **New Feature**: `processThinkingSummary()` method for thinking data extraction
+- **New Feature**: `removeUnsupportedParameters()` for removing unnecessary parameters
 
-**5. `messages.ts` - メッセージ変換**
-- 標準メッセージフォーマットの変換
-- Claude 3.7 Sonnet固有のメッセージ処理
-- システムメッセージとユーザーメッセージの処理
-- 思考プロセスメッセージの統合
-- Databricks固有のメッセージ前処理
-- 複合コンテンツ（テキスト+画像）の処理
-- メッセージのフォーマット変換（Continue → OpenAI形式）
-- メッセージのサニタイズと標準化
-- 日本語コンテンツの検出と特別処理
-- 空のメッセージの処理と検証
-- **新機能**: `processSystemMessage()`メソッドによるシステムメッセージの専用処理
+**5. `messages.ts` - Message Conversion**
+- Converts standard message formats
+- Handles Claude 3.7 Sonnet-specific message processing
+- Processes system and user messages
+- Integrates thinking process messages
+- Databricks-specific message preprocessing
+- Handles composite content (text + images)
+- Converts message formats (Continue → OpenAI format)
+- Sanitizes and standardizes messages
+- Detects and handles Japanese content
+- Processes and validates empty messages
+- **New Feature**: `processSystemMessage()` method for dedicated system message processing
 
-**6. `streaming.ts` - ストリーム処理**
-- ストリーミングレスポンスの処理
-- 思考プロセスのストリーム処理
-- JSONフラグメントの累積処理
-- ツール呼び出しのストリーミング処理
-- 接続エラーからの回復
-- 共通ユーティリティを使用したJSONデルタベース処理
-- 部分的なJSONの効率的な処理
-- モジュール化されたメソッドによる責任の明確な分離
-- 明確な状態管理と再接続メカニズム
-- 共通の`processContentDelta`や`processJsonDelta`を活用した一貫した処理
-- メッセージコンテンツ型の適切な処理: `extractContentAsString`を使用した型安全な処理
-- 状態の永続化と復元
-- 再接続時の処理
-- 最終ストリーム処理とクリーンアップ
-- **改善**: 思考モードの複数データ形式の適切な処理
-- **新機能**: `findTextProperty()`による再帰的なテキストプロパティ探索
-- **新機能**: 思考データ形式検出の強化
-- **更新**: `processThinkingChunk()`メソッドの階層的優先処理
+**6. `streaming.ts` - Stream Processing**
+- Processes streaming responses
+- Handles thinking process streaming
+- Accumulates JSON fragments
+- Processes streaming tool calls
+- Recovers from connection errors
+- Uses common utilities for JSON delta-based processing
+- Efficiently handles partial JSON
+- Clearly separates responsibilities with modularized methods
+- Implements clear state management and reconnection mechanisms
+- Leverages common `processContentDelta` and `processJsonDelta` for consistent processing
+- Properly handles message content types using `extractContentAsString` for type-safe handling
+- Persists and restores state
+- Handles reconnection
+- Finalizes stream processing and cleanup
+- **Improvement**: Proper handling of multiple thinking mode data formats
+- **New Feature**: `findTextProperty()` for recursive text property exploration
+- **New Feature**: Enhanced thinking data format detection
+- **Update**: Hierarchical priority processing in `processThinkingChunk()` method
+- **Fix**: Type-safe handling of object property access to prevent TypeScript errors
 
-**7. `toolcalls.ts` - ツールコール処理**
-- ツール呼び出しの処理と標準化
-- ツール呼び出し引数の処理と修復
-- ツール結果の統合
-- 検索ツールの特別処理
-- ツール呼び出し後のメッセージ前処理
-- 共通ユーティリティを使用したJSONデルタベースツール引数処理
-- 二重化されたJSONパターンの検出と修復
-- ツール呼び出しと結果の前後処理
-- ツール引数のデルタ処理と累積
-- 共通ユーティリティ `repairToolArguments` を活用したツール引数の修復
-- インターフェースを実装して責任境界を明確化
+**7. `toolcalls.ts` - Tool Call Processing**
+- Processes and standardizes tool calls
+- Handles and repairs tool call arguments
+- Integrates tool results
+- Provides special handling for search tools
+- Preprocesses messages after tool calls
+- Uses common utilities for JSON delta-based tool argument processing
+- Detects and repairs duplicated JSON patterns
+- Pre- and post-processes tool calls and results
+- Delta-processes and accumulates tool arguments
+- Leverages common utility `repairToolArguments` for tool argument repair
+- Implements interfaces for clear responsibility boundaries
 
-**8. `types/` - 型定義**
-- 厳密な型インターフェースの定義
-- 型安全なコードのサポート
-- 共通型定義の拡張
-- JSON処理関連の型定義強化
-- エラー処理関連の型定義
-- 型の一貫性と相互運用性の確保
-- モジュール間の型インターフェースの標準化
-- 型アサーションとガードの提供
-- 標準ライブラリ型の拡張
-- 型安全なエラー処理のサポート
-- 責任分担を明確にするためのモジュールインターフェース型の提供
-- メソッド宣言のための明示的な型定義
-- 戻り値の型安全性向上
-- **改善**: `ThinkingChunk`インターフェースの拡張と柔軟化
-- **追加**: 思考モードに対応した複数フォーマットをサポートする型定義
-- **更新**: `ResponseDelta`の拡張によるオブジェクト形式のコンテンツサポート
+**8. `types/` - Type Definitions**
+- Defines strict type interfaces
+- Supports type-safe code
+- Extends common type definitions
+- Enhances JSON processing-related type definitions
+- Provides error handling-related type definitions
+- Ensures type consistency and interoperability
+- Standardizes type interfaces between modules
+- Provides type assertions and guards
+- Extends standard library types
+- Supports type-safe error handling
+- Provides module interface types for clear responsibility separation
+- Defines explicit types for method declarations
+- Enhances return type safety
+- **Improvement**: Expanded and flexible `ThinkingChunk` interface
+- **Addition**: Type definitions supporting multiple formats for thinking mode
+- **Update**: Extended `ResponseDelta` to support object-format content
 
-## モジュール間の効果的な連携
+## Configuration
 
-オーケストレーター（`Databricks.ts`）は、各専門モジュールを調整し、フローを制御します：
+To use the Databricks integration, the following configuration is needed:
 
-```typescript
-// Databricks.ts（オーケストレーター）
-protected async *_streamChat(messages: ChatMessage[], signal: AbortSignal, options: DatabricksCompletionOptions): AsyncGenerator<ChatMessage> {
-  // 設定の検証を設定管理モジュールに委譲
-  DatabricksConfig.validateApiConfig(this.apiKey, this.apiBase);
-  
-  // メッセージの前処理をツール処理モジュールに委譲
-  const processedMessages = ToolCallProcessor.preprocessToolCallsAndResults(messages);
-  
-  // リトライループ
-  while (retryCount <= MAX_RETRIES) {
-    try {
-      // リクエスト処理を実行
-      const result = await this.processStreamingRequest(processedMessages, signal, options, retryCount);
-      
-      // 結果を返す（正常終了）
-      if (result.success) {
-        for (const message of result.messages) {
-          yield message;
-        }
-        break;
-      } else {
-        // エラー処理とリトライをエラーハンドラモジュールに委譲
-        retryCount++;
-        const errorToPass = result.error || new Error("Unknown error");
-        await DatabricksErrorHandler.handleRetry(retryCount, errorToPass, result.state);
-      }
-    } catch (error) {
-      // 予期しないエラーの処理もエラーハンドラモジュールに委譲
-      retryCount++;
-      await DatabricksErrorHandler.handleRetry(retryCount, error);
-    }
-  }
-}
+1. **API Base URL**: The connection URL to the Databricks endpoint
+2. **API Key**: The Databricks API key for authentication
 
-// メインの処理メソッドも責任を委譲
-private async processStreamingRequest(
-  messages: ChatMessage[], 
-  signal: AbortSignal, 
-  options: DatabricksCompletionOptions,
-  retryCount: number
-): Promise<{
-  success: boolean;
-  messages: ChatMessage[];
-  error?: Error;
-  state?: StreamingState;
-}> {
-  try {
-    // リクエストパラメータの構築をヘルパーモジュールに委譲
-    const args = DatabricksHelpers.convertArgs(options);
-    
-    // システムメッセージの処理をメッセージ処理モジュールに委譲
-    const systemMessage = MessageProcessor.processSystemMessage(messages);
-    
-    // メッセージ変換をメッセージ処理モジュールに委譲
-    const formattedMessages = MessageProcessor.convertToOpenAIFormat(
-      messages, MessageProcessor.sanitizeMessages(messages)
-    );
-    
-    // 統一された方法でAPIエンドポイントを取得
-    const apiEndpoint = this.getApiEndpoint();
-    
-    // デバッグログ - 常にリクエスト詳細を記録
-    console.log(`Databricksリクエスト: エンドポイント=${apiEndpoint}`);
-    
-    // ツール関連のログを追加（argsから直接取得して型安全に）
-    if (args.tools && Array.isArray(args.tools)) {
-      console.log(`Databricksリクエスト: ツール数=${args.tools.length}`);
-      try {
-        // ツール名を安全に取得して結合
-        const toolNames = args.tools
-          .map((t: any) => t?.function?.name || 'unnamed')
-          .join(', ');
-        console.log(`Databricksリクエスト: ツール名=${toolNames}`);
-        
-        // 開発モードでより詳細なツール情報をログ出力
-        if (process.env.NODE_ENV === 'development') {
-          args.tools.forEach((tool: any, index: number) => {
-            const toolInfo = {
-              name: tool?.function?.name || 'unnamed',
-              description: tool?.function?.description ? 
-                `${tool.function.description.substring(0, 30)}...` : 'no description'
-            };
-            console.log(`ツール[${index}]: ${safeStringify(toolInfo, "{}")}`);
-          });
-        }
-      } catch (e) {
-        console.log(`ツール情報のログ出力中にエラー: ${getErrorMessage(e)}`);
-      }
-    }
-    
-    // タイムアウトコントローラ設定を設定管理モジュールに委譲
-    const { timeoutController, timeoutId, combinedSignal } = 
-      DatabricksConfig.setupTimeoutController(signal, options);
-    
-    // APIリクエスト実行
-    const response = await this.fetch(apiEndpoint, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "Authorization": `Bearer ${this.apiKey}`,
-      },
-      body: safeStringify({
-        ...args,
-        messages: formattedMessages,
-        system: systemMessage,
-      }),
-      signal: combinedSignal,
-    });
-    
-    // 非ストリーミングレスポンス処理をヘルパーモジュールに委譲
-    if (options.stream === false) {
-      const message = await DatabricksHelpers.processNonStreamingResponse(response);
-      return { success: true, messages: [message] };
-    }
-    
-    // ストリーミングレスポンス処理をストリーミングモジュールに委譲
-    return await StreamingProcessor.processStreamingResponse(
-      response, messages, retryCount, this.alwaysLogThinking
-    );
-  } catch (error) {
-    // エラー結果の構築
-    return { 
-      success: false, 
-      messages: [], 
-      error: error instanceof Error ? error : new Error(getErrorMessage(error)) 
-    };
-  }
-}
-```
-
-## 2025年5月の主要な改善点
-
-### 1. 思考モード処理の完全対応
-
-2025年5月の最も重要な改善点は、Claude 3.7 Sonnetの思考モードに完全に対応したことです：
-
-1. **複数の思考データ形式に対応**: 様々な形式で送信される思考データをすべて適切に処理できるようになりました。特に主要な形式である`choices[0].delta.content.summary.text`形式を優先的に処理します。
-
-2. **階層的なプロパティアクセス**: オプショナルチェイニング（`?.`）やnullセーフなプロパティアクセスにより、すべての形式の思考データから安全にテキストを抽出できるようになりました。
-
-3. **再帰的なテキスト抽出**: `findTextProperty`メソッドを導入し、複雑なネスト構造からもテキストを抽出できるようになりました。これにより、従来の方法では処理できなかった形式の思考データも適切に処理できます。
-
-4. **思考データの検出改善**: 複数の検出方法を導入し、思考データの様々な形式を確実に検出できるようになりました。
-
-5. **適切な思考データのログ出力**: `logThinkingProcess`メソッドを改善し、思考データを適切に文字列化してログ出力できるようになりました。
-
-6. **エラーに強い実装**: 様々なエラーケースに対応する例外処理を追加し、思考データの処理中にエラーが発生しても、処理を継続できるようになりました。
-
-### 2. parallel_tool_callsパラメータの完全除去と型安全性の向上
-
-Databricksエンドポイントが`parallel_tool_calls`パラメータをサポートしていないため、このパラメータを型レベルから完全に除外し、コードの安全性を向上させました：
-
-1. **型定義からの除外**: `DatabricksLLMOptions`および`DatabricksCompletionOptions`インターフェースからパラメータを削除し、明示的なコメントを追加
-2. **パラメータ設定停止**: `DatabricksHelpers.convertArgs()`メソッドでこのパラメータを設定しないよう修正
-3. **安全なアクセス**: `requestBody`オブジェクトの代わりに`args`オブジェクトから直接ツール情報を取得するよう修正し、型エラーを回避
-4. **デフォルトオプションの更新**: `Databricks.ts`のデフォルトオプションからも関連プロパティを削除
-5. **詳細なログ出力の追加**: ツール関連のログ出力を強化し、問題の早期発見を可能に
-6. **リクエスト前の検証強化**: マップの型階層全体で整合性を確保
-7. **専用関数の追加**: `removeUnsupportedParameters`メソッドを追加し、不要なパラメータの削除を一元化
-
-これらの改修により、Databricksのエンドポイントに対するツール呼び出し機能が安定して動作するようになりました。
-
-### 3. API URL問題の根本的解決
-
-Databricks統合の最も重要な改善点は、APIリクエストが常に正しいDatabricksエンドポイントに送信されるよう保証する仕組みを実装したことです。以前は一部のコードパスでAnthropicのAPIエンドポイント（`https://api.anthropic.com/v1/messages`）に誤ってリクエストが送信されていました。
-
-この問題を根本的に解決するため、以下の改善を行いました：
-
-1. **統一されたエンドポイント管理**: `Databricks.ts`クラスに`getApiEndpoint()`メソッドを追加して、すべてのAPIリクエストが同一の仕組みを通してエンドポイントを取得するようにしました。
-
-```typescript
-// 統一されたAPIエンドポイント取得メソッド
-private getApiEndpoint(): string {
-  if (!this.apiBase) {
-    throw new Error("API base URL is not defined");
-  }
-  
-  // 設定管理モジュールを使用して常に正規化されたURLを取得
-  const endpoint = DatabricksConfig.getFullApiEndpoint(this.apiBase);
-  
-  if (!endpoint) {
-    throw new Error("Failed to get valid Databricks API endpoint");
-  }
-  
-  return endpoint;
-}
-```
-
-2. **拡張ログ出力**: すべてのAPIリクエスト前に詳細なログを出力することで、URLの取得と正規化のプロセスを追跡できるようになりました。
-
-3. **URL正規化機能の拡張**: `config.ts`に`getFullApiEndpoint()`メソッドを追加し、URL正規化を担当するロジックを集中化しました。
-
-4. **APIエンドポイント検証の強化**: URLが`/invocations`で終わっていることを確認し、正しいDatabricksエンドポイントフォーマットになっているか検証します。
-
-### 4. メッセージコンテンツ型の厳密な型安全性
-
-`MessageContent`型が`string`または`MessagePart[]`のユニオン型であることに起因する型エラーを解消するため、`extractContentAsString`共通ユーティリティ関数を徹底的に活用するようにしました。これにより型安全性が向上し、コードの堅牢性が高まりました。
-
-```typescript
-// 変更前 - 型エラーが発生
-lastYieldedMessageContent = currentMessage.content;
-
-// 変更後 - 共通ユーティリティを使用した型安全な処理
-import { extractContentAsString } from "../../utils/messageUtils.js";
-
-// extractContentAsStringを使用して現在のメッセージ内容を文字列として取得
-const currentContentAsString = extractContentAsString(currentMessage.content);
-
-// 型安全な比較と代入
-if (currentContentAsString !== lastYieldedMessageContent) {
-  // メッセージを処理...
-  lastYieldedMessageContent = currentContentAsString;
-}
-```
-
-### 5. `[object Object]`表示問題の根本的解決
-
-`[object Object]`表示問題を根本的に解決するために、以下の改善を実装しました：
-
-1. **階層的な思考データ処理**: 優先順位を明確にして階層的に思考データを処理し、適切な形式からテキストを抽出します。
-
-```typescript
-// ***** 最優先: choices[0].delta.content.summary.text形式 *****
-if (thinkingData.choices?.[0]?.delta?.content?.summary?.text) {
-  newThinking = thinkingData.choices[0].delta.content.summary.text;
-}
-// ***** 次優先: content.summary.text形式 *****
-else if (thinkingData.content?.summary?.text) {
-  newThinking = thinkingData.content.summary.text;
-}
-// ***** 次優先: summary.text形式 *****
-else if (thinkingData.summary?.text) {
-  newThinking = thinkingData.summary.text;
-}
-```
-
-2. **再帰的テキスト探索**: オブジェクト内の任意の深さからテキストプロパティを探索する機能を追加しました。
-
-```typescript
-private static findTextProperty(obj: any, depth: number = 0): string | null {
-  // 無限ループや過度に深い再帰を防止
-  if (depth > 5) {
-    return null;
-  }
-  
-  // nullまたはundefinedの場合
-  if (obj === null || obj === undefined) {
-    return null;
-  }
-  
-  // 文字列の場合は直接返す
-  if (typeof obj === 'string') {
-    return obj;
-  }
-  
-  // オブジェクトの場合は再帰的に処理
-  if (typeof obj === 'object') {
-    // 優先して探すべきプロパティ名のリスト
-    const textPropertyNames = [
-      'text', 'content', 'summary', 'thinking',
-      'message', 'description', 'value'
-    ];
-    
-    // 優先プロパティを先に確認...
-  }
-  
-  return null;
-}
-```
-
-3. **安全なオブジェクト文字列化**: `safeStringify`ユーティリティを使用して、オブジェクトを安全に文字列化します。
-
-```typescript
-console.log("思考データ:", safeStringify(thinkingData, "<データなし>"));
-```
-
-これらの改善により、`[object Object]`が不適切に表示される問題が解消され、常に適切なテキスト表示が行われるようになりました。
-
-## 設定方法
-
-Databricksインテグレーションを使用するには、以下の設定が必要です：
-
-1. **APIベースURL**: Databricksのエンドポイントへの接続先URL
-2. **APIキー**: 認証に使用するDatabricks APIキー
-
-これらは`config.yaml`ファイルで設定できます：
+These can be configured in the `config.yaml` file:
 
 ```yaml
 models:
@@ -764,11 +663,11 @@ models:
     model: "databricks-claude-3-7-sonnet"
 ```
 
-重要: APIベースURLは常に`/invocations`で終わる必要があります。URLが正しく設定されているかどうかは、コンソールログを確認して`DatabricksConfig.normalizeApiUrl`と`DatabricksConfig.getFullApiEndpoint`によるURL変換過程を追跡できます。
+Important: The API base URL must always end with `/invocations`. You can verify if the URL is correctly configured by checking the console logs, which show the URL transformation process via `DatabricksConfig.normalizeApiUrl` and `DatabricksConfig.getFullApiEndpoint`.
 
-## Claude 3.7 Sonnetの思考モード設定
+## Claude 3.7 Sonnet Thinking Mode Configuration
 
-Claude 3.7 Sonnetモデルは思考モード（thinking mode）をサポートしており、より詳細で段階的な推論を行うことができます。このモードを有効にするには、以下のように設定します：
+Claude 3.7 Sonnet models support thinking mode, which provides more detailed step-by-step reasoning. To enable this mode, configure as follows:
 
 ```yaml
 models:
@@ -780,100 +679,193 @@ models:
     completionOptions:
       thinking:
         type: "enabled"
-        budget_tokens: 50000  # オプション: トークン予算を指定（デフォルトはmax_tokensの半分）
+        budget_tokens: 50000  # Optional: specify token budget (default is half of max_tokens)
 ```
 
-思考モードは自動的に検出され、Claude 3.7モデルに対しては常に有効化されます。モデル名に「claude-3-7」が含まれている場合、以下の特別な処理が行われます：
+Thinking mode is automatically detected and always enabled for Claude 3.7 models. When the model name includes "claude-3-7", the following special processing occurs:
 
-1. **思考モードの有効化**: `thinking: { type: "enabled", budget_tokens: <budget> }`がリクエストに追加されます
-2. **温度の固定**: 思考モードの最適な動作のため、温度パラメータが1.0に固定されます
-3. **トークン予算の自動計算**: 明示的に指定されない場合、`max_tokens`の半分（最大64000）が思考プロセスのトークン予算として割り当てられます
+1. **Thinking Mode Activation**: `thinking: { type: "enabled", budget_tokens: <budget> }` is added to the request
+2. **Temperature Fixing**: The temperature parameter is fixed at 1.0 for optimal thinking mode performance
+3. **Automatic Token Budget Calculation**: If not explicitly specified, half of `max_tokens` (up to 64000) is allocated as the token budget for the thinking process
 
-この設定により、Claude 3.7 Sonnetがより詳細な思考過程を表示し、より質の高い応答を生成できるようになります。
+This configuration allows Claude 3.7 Sonnet to display more detailed thinking processes and generate higher quality responses.
 
-## トラブルシューティング
+## Type-safe JSON Access and "choices" Property Error Solution
 
-### parallel_tool_callsエラーが発生した場合
+When working with Databricks endpoints, you may encounter the error: "Property 'choices' does not exist on type 'never'". This happens when TypeScript can't correctly understand the API response type. To solve this:
 
-エラーログに以下のようなエラーメッセージが表示される場合：
+### 1. Type Guard + Validation for Safe LLM Response Processing
+
+```typescript
+// Define API response type
+interface DatabricksClaudeResponse {
+  choices?: Array<{
+    message?: {
+      content?: string;
+    };
+    thinking?: string;
+  }>;
+}
+
+// Type guard function
+function isValidClaudeResponse(response: any): response is DatabricksClaudeResponse {
+  return (
+    response &&
+    Array.isArray(response.choices) &&
+    response.choices.length > 0
+  );
+}
+
+// Safe access approach
+async function getCompletionWithThinking() {
+  const response = await fetchFromAPI();
+  
+  if (isValidClaudeResponse(response)) {
+    // Type-safe access now possible
+    const thinking = response.choices[0]?.thinking || '';
+    const content = response.choices[0]?.message?.content || '';
+    return { thinking, content };
+  }
+  
+  throw new Error('Invalid API response');
+}
+```
+
+### 2. Optional Chaining and Nullish Coalescing
+
+```typescript
+// Use optional chaining (?.) and nullish coalescing (??) for safe access
+const thinking = response?.choices?.[0]?.thinking ?? '';
+const content = response?.choices?.[0]?.message?.content ?? 'No response content';
+```
+
+### 3. Zod for Runtime Validation
+
+For complex response structures, validation libraries like Zod are effective:
+
+```typescript
+import { z } from 'zod';
+
+// Define Claude response schema
+const ClaudeResponseSchema = z.object({
+  choices: z.array(
+    z.object({
+      message: z.object({
+        content: z.string().optional()
+      }).optional(),
+      thinking: z.string().optional()
+    })
+  ).nonempty()
+});
+
+async function getValidatedCompletion() {
+  const response = await api.fetchCompletion();
+  
+  // Validate and get strongly typed data
+  const validated = ClaudeResponseSchema.parse(response);
+  
+  // Safe access - Zod guarantees structure
+  return {
+    thinking: validated.choices[0]?.thinking || '',
+    content: validated.choices[0]?.message?.content || ''
+  };
+}
+```
+
+## Troubleshooting
+
+### If parallel_tool_calls Errors Occur
+
+If you see error messages like this in the error logs:
 
 ```
 Property 'tools' does not exist on type '{ messages: any[]; system: string; }'
 ```
 
-以下のことを確認してください：
+Check the following:
 
-1. 最新バージョンのコードを使用しているか（2025年5月以降の更新が反映されているか）
-2. `Databricks.ts`ファイルで`requestBody.tools`の代わりに`args.tools`を使用しているか
-3. `DatabricksHelpers.convertArgs()`メソッドで`parallel_tool_calls`パラメータが設定されていないか
+1. Whether you're using the latest code version (with May 2025 updates applied)
+2. Whether `Databricks.ts` file is using `args.tools` instead of `requestBody.tools`
+3. Whether `DatabricksHelpers.convertArgs()` method is not setting the `parallel_tool_calls` parameter
 
-これらの問題が解決しない場合は、詳細なデバッグログを有効にして問題を特定してください：
+If these issues persist, enable detailed debug logging to identify the problem:
 
 ```typescript
-// デバッグログを有効にする（config.yamlに追加）
+// Enable debug logging (add to config.yaml)
 debug: true
 ```
 
-### `[object Object]`が表示される場合
+### If `[object Object]` is Displayed
 
-コンソールログに`[object Object]`が表示される場合は、オブジェクトを適切に文字列化する処理が必要です：
+If `[object Object]` appears in the console logs, proper object stringification is needed:
 
-1. `safeStringify`関数を使用してオブジェクトをログ出力
-2. オブジェクトのプロパティに安全にアクセスするためのチェックを追加
-3. ログ出力周りにtry-catch処理を追加
+1. Use `safeStringify` function to log objects
+2. Add checks for safe access to object properties
+3. Add try-catch blocks around logging code
 
-詳細は「デバッグとロギングのベストプラクティス」セクションを参照してください。
+See the "Debugging and Logging Best Practices" section for details.
 
-また、思考データの処理に関する問題の場合は、以下の点も確認してください：
+For thinking data processing issues, also check:
 
-1. **正しい思考データ形式の検出**: `StreamingProcessor.processChunk`メソッド内で正しく思考データを検出できているか
-2. **適切な思考データ抽出**: `processThinkingChunk`メソッドで適切にテキストを抽出できているか
-3. **思考データの形式**: 実際にDatabricksエンドポイントから返される思考データの形式を確認（コンソールログを確認）
+1. **Proper Thinking Data Format Detection**: Whether `StreamingProcessor.processChunk` method correctly detects thinking data
+2. **Appropriate Thinking Data Extraction**: Whether `processThinkingChunk` method properly extracts text
+3. **Thinking Data Format**: Check the actual thinking data format returned from the Databricks endpoint (check console logs)
 
-### エラー処理に関する問題 - 思考モードのストリーミング
+### Type Definition Issues
 
-思考モードのストリーミング中にエラーが発生する場合、以下の点を確認してください：
+If TypeScript compilation errors occur, check:
 
-1. **思考データの形式**: 思考データが様々な形式で送信される可能性があるため、すべての形式に対応できるよう`processThinkingChunk`メソッドが適切に実装されているか確認します。
-2. **オプショナルチェイニング**: プロパティへのアクセス時に`?.`を使用して、存在しないプロパティへのアクセスを防止します。
-3. **例外処理**: 思考データの処理中に例外が発生した場合、適切なフォールバック処理が実装されているか確認します。
+1. **Type Guards**: Ensure proper type guard functions are used to safely check object properties
+2. **Optional Chaining**: Use optional chaining (`?.`) and nullish coalescing (`??`) operators for safe property access
+3. **ContentObject Pattern**: Use the `isContentObject` type guard for safely checking object properties
+4. **Content Extraction**: Use `extractContentAsString` to safely handle `MessageContent` type, which can be string or object
 
-### 型定義に関する問題
+### Fixed TypeScript Errors with Type Guards
 
-TypeScriptのコンパイルエラーが発生する場合、以下の点を確認してください：
+The TypeScript errors in `streaming.ts` have been resolved by implementing proper type guards and hierarchical property access:
 
-1. **適切な型インポート**: 必要な型がすべて正しくインポートされているか確認します。
-2. **拡張型の定義**: `extension.d.ts`ファイルが適切に参照されているか確認します。
-3. **型互換性**: `ToolCall`と`ToolCallDelta`など、関連する型の互換性を確認します。
+```typescript
+// Type guard for safely checking object properties
+private static isContentObject(content: any): content is { summary?: { text?: string } } {
+  return typeof content === 'object' && content !== null;
+}
 
-## オーケストレーターパターンの利点
+// Using type guard and in operator for safe property access
+if (this.isContentObject(content) && (content.summary !== undefined || 'summary' in content)) {
+  // Now TypeScript knows content is an object with a potentially defined summary property
+  const thinkingData: ThinkingChunk = {
+    content: {
+      summary: content.summary
+    }
+  };
+  
+  // Safe access with properly typed objects
+  thinkingData.choices = [{
+    delta: {
+      content: {
+        summary: content.summary
+      }
+    }
+  }];
+  
+  const thinkingMessage = this.processThinkingChunk(thinkingData);
+  // ...
+}
+```
 
-Databricksの実装では、オーケストレーターパターンを採用することで以下の利点を実現しています：
+By using proper type guards and carefully structured conditional checks, we can ensure TypeScript correctly narrows types and prevents "Property does not exist on type 'never'" errors, which commonly happen when TypeScript loses track of an object's structure in complex conditionals.
 
-1. **責任の明確な分離**: 各モジュールが特定の責任領域に集中し、コードの理解と保守が容易になる
-2. **再利用性の向上**: 共通の機能を共有し、モジュール間で重複コードを減らす
-3. **テスト容易性**: 各モジュールを独立してテスト可能
-4. **拡張性の向上**: 新機能や変更が必要な場合、影響するモジュールのみを修正すれば良い
-5. **エラー処理の一元化**: 標準化されたエラー処理アプローチを適用
-6. **型安全性の強化**: 明確なインターフェース定義による型チェックの強化
-7. **依存関係の明示**: モジュール間の関係が明示的になり、変更の影響範囲が把握しやすい
-8. **機能の組み合わせ容易性**: 異なるモジュールの機能を組み合わせて新機能を容易に構築可能
-9. **ドキュメント性の向上**: コード構造自体がドキュメントとして機能し、システムの理解を助ける
-10. **並行開発の促進**: 複数の開発者が異なるモジュールを同時に開発可能
+## Future Improvement Plans
 
-このアプローチはDatabricksの実装だけでなく、他の複雑なLLMプロバイダー統合にも適用でき、コアLLMフレームワーク全体の設計原則として採用されています。
+1. **Performance Optimization**: Further optimize request processing and response parsing performance
+2. **Improved Buffer Management**: More efficient JSON buffer management for improved stability in large streaming
+3. **Enhanced Context Management**: Improved context management considering token limits
+4. **Increased Type Safety**: Stricter type definitions and checks for improved safety
+5. **Improved Parallel Processing**: Optimized resource sharing between multiple requests
+6. **Enhanced Error Handling**: More detailed error analysis and automatic recovery
+7. **Documentation Improvements**: Enhanced user documentation and in-code comments
+8. **Support for New Features**: Support for future Claude 3.7/3.8 features
+9. **Performance Metrics Collection**: Detailed performance measurement and metrics collection for optimization
+10. **Expanded Automated Testing**: More comprehensive automated testing for quality assurance
 
-## 今後の改善計画
-
-1. **パフォーマンス最適化**: リクエスト処理とレスポンスパースのパフォーマンスをさらに最適化
-2. **バッファ管理の改善**: より効率的なJSONバッファ管理による大規模ストリーミングの安定性向上
-3. **コンテキスト管理の強化**: トークン制限を考慮したコンテキスト管理の改善
-4. **型安全性の向上**: より厳密な型定義とチェックによる安全性の向上
-5. **並列処理の改善**: 複数のリクエスト間でのリソース共有の最適化
-6. **エラーハンドリングの拡充**: より詳細なエラー分析と自動回復機能の強化
-7. **ドキュメント整備**: ユーザー向けドキュメントとコード内コメントの充実
-8. **新機能のサポート**: 将来のClaude 3.7/3.8拡張機能への対応
-9. **パフォーマンスメトリクスの収集**: 詳細なパフォーマンス測定と最適化のためのメトリクス収集
-10. **自動テスト拡充**: より包括的な自動テストによる品質保証
-
-このモジュール化されたアーキテクチャにより、拡張機能の安定性と保守性が大幅に向上し、将来のAPI変更にも容易に対応できるようになりました。2025年5月の改善で、特にURLルーティングの問題が解消され、型安全性と共通ユーティリティの活用が大きく進みました。そして最も重要な改善点として、Claude 3.7 Sonnetの思考モードを正しく処理できるようになり、[object Object]問題が解消されました。
+This modularized architecture significantly improves the extension's stability and maintainability, making it easier to adapt to future API changes. The May 2025 improvements have resolved URL routing issues, improved type safety and common utility usage. Most importantly, Claude 3.7 Sonnet's thinking mode is now correctly processed with robust support for various data formats and the [object Object] issue has been resolved.

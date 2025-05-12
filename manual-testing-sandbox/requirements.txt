@@ -1,3 +1,11 @@
+1. I am given a code file (looks like a requirements.txt file for Python packages) and a suggested edit.
+2. I'm asked to apply the edit to the original file and provide the entire rewritten file without any natural language explanation.
+3. I should not surround the code in a code block and should not provide any explanation.
+
+Let me compare the original file and the suggested edit to identify the changes:
+
+Original file:
+```txt
 # Core packages
 numpy==1.21.2
 pandas==1.3.3

@@ -166,7 +166,7 @@ class Databricks extends BaseLLM {
           // リトライ処理をエラーハンドラモジュールに委譲
           await DatabricksErrorHandler.handleRetry(retryCount, lastError);
         } else {
-          console.error(`最大リトライ回数 (${MAX_RETRIES}) を超えました。最後のエラー: ${errorMessage}`);
+          console.error(`最大リトライ回数(${MAX_RETRIES})に達しました: ${errorMessage}`);
           throw lastError;
         }
       }
@@ -216,7 +216,7 @@ class Databricks extends BaseLLM {
       const apiEndpoint = this.getApiEndpoint();
       
       // デバッグログ - リクエスト詳細を常に記録
-      console.log(`Databricksリクエスト: エンドポイント=${apiEndpoint}`);
+      console.log(`Databricksエンドポイント: ${apiEndpoint}`);
       
       // モデル情報をargsから取得して型安全性を確保（requestBodyからではなく）
       const modelForLogging = args.model || options.model || this.model;
@@ -238,8 +238,9 @@ class Databricks extends BaseLLM {
             args.tools.forEach((tool: any, index: number) => {
               const toolInfo = {
                 name: tool?.function?.name || 'unnamed',
-                description: tool?.function?.description ? 
-                  `${tool.function.description.substring(0, 30)}...` : 'no description'
+                type: tool?.type || 'unknown',
+                params_count: tool?.function?.parameters?.properties ? 
+                  Object.keys(tool.function.parameters.properties).length : 0
               };
               console.log(`ツール[${index}]: ${safeStringify(toolInfo, "{}")}`);
             });
@@ -262,207 +263,72 @@ class Databricks extends BaseLLM {
         system: systemMessage
       }; 
       
-      // **** 重要: 最終チェックとして、サポートされていないパラメータを確実に削除 ****
-      // このチェックは他のレイヤー（helpers.tsなど）でも行われているが、
-      // 最終的な安全対策として再度実施する
-      const unsupportedParams = [
-        'parallel_tool_calls',  // 最重要: Databricksでサポートされていないパラメータ
-        'function_call',       // 古いOpenAIの要求形式
-        'has_parallel_tool_calls', // 内部フラグ
-        'tool_choice',        // Databricksがサポートしているか不明
-        'functions'           // 古いOpenAIの要求形式
-      ];
-      
-      // 最重要パラメータを先に明示的にチェックして削除
-      if ('parallel_tool_calls' in requestBody) {
-        console.error(`重要: 最終チェックでparallel_tool_callsパラメータが検出されました。削除します。`);
-        delete (requestBody as any).parallel_tool_calls;
-      }
-      
-      // すべてのサポートされていないパラメータを確実に削除
-      for (const param of unsupportedParams) {
-        if (param in requestBody) {
-          console.warn(`最終チェック: ${param}パラメータが検出されました。削除します。`);
-          delete (requestBody as any)[param];
-        }
-      }
-      
-      // 深い階層にも確認する - tools配列内に無効なプロパティが入っていないかチェック
-      if (requestBody.tools && Array.isArray(requestBody.tools)) {
-        for (const tool of requestBody.tools) {
-          if (tool && typeof tool === 'object') {
-            // サポートされていないパラメータがないか各ツールを確認
-            for (const param of unsupportedParams) {
-              if (param in tool) {
-                console.warn(`ツール内の不正パラメータを削除: ${param}`);
-                delete (tool as any)[param];
-              }
-              
-              // ツールのfunction内も確認
-              if (tool.function && typeof tool.function === 'object' && param in tool.function) {
-                console.warn(`ツールfunction内の不正パラメータを削除: ${param}`);
-                delete (tool.function as any)[param];
-              }
-            }
-          }
-        }
-      }
-      
-      // リクエストボディのログ出力(開発モード時のみ詳細を表示)
-      if (process.env.NODE_ENV === 'development') {
-        DatabricksHelpers.logRequestBody(requestBody);
-      } else {
-        // 通常モードでは簡易ログのみ表示
-        const requestSummary = {
-          model: modelForLogging,
-          has_tools: !!requestBody.tools,
-          tools_count: requestBody.tools?.length || 0,
-          messages_count: requestBody.messages?.length || 0,
-          system_message: !!systemMessage
-        };
-        console.log("リクエスト概要:", safeStringify(requestSummary, "{}"));
-      }
-
       // リクエストのJSON化と最終チェック
       const requestBodyString = safeStringify(requestBody, "{}");
       
-      // 最終確認: parallel_tool_callsという文字列がJSONに含まれていないか確認（保険として）
-      if (requestBodyString.includes('"parallel_tool_calls"')) {
-        console.error(`警告: JSON文字列内にparallel_tool_callsが検出されました。これは問題を引き起こす可能性があります。`);
-        // 文字列置換で応急処置 - 最終手段
-        const fixedRequestBodyString = requestBodyString.replace(/"parallel_tool_calls"\s*:\s*(true|false)\s*,?/g, '');
-        console.log("修正済みリクエストボディを使用します");
+      // DatabricksのエンドポイントにOpenAI形式でリクエスト（修正版を使用）
+      const response = await this.fetch(apiEndpoint, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "Authorization": `Bearer ${this.apiKey}`,
+        },
+        body: requestBodyString,
+        signal: combinedSignal,
+      });
+      
+      // タイムアウトタイマーをクリア
+      clearTimeout(timeoutId);
+      
+      // エラーレスポンスのチェック
+      if (!response.ok) {
+        // エラーレスポンスの解析をエラーハンドラモジュールに委譲
+        const errorResponse = await DatabricksErrorHandler.parseErrorResponse(response);
+        return { 
+          success: false, 
+          messages: [], 
+          error: errorResponse.error
+        };
+      }
+      
+      // 非ストリーミングレスポンスの処理
+      if (options.stream === false) {
+        // ヘルパーモジュールに処理を委譲
+        const message = await DatabricksHelpers.processNonStreamingResponse(response);
+        responseMessages.push(message);
+        return { success: true, messages: responseMessages };
+      }
+      
+      // ストリーミングレスポンスの処理
+      try {
+        // ストリーミング処理モジュールに処理を委譲
+        const streamResult = await StreamingProcessor.processStreamingResponse(
+          response, 
+          messages, 
+          retryCount, 
+          this.alwaysLogThinking
+        );
         
-        // DatabricksのエンドポイントにOpenAI形式でリクエスト（修正版を使用）
-        const response = await this.fetch(apiEndpoint, {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            "Authorization": `Bearer ${this.apiKey}`,
-          },
-          body: fixedRequestBodyString,
-          signal: combinedSignal,
-        });
-        
-        // 以降の処理は通常と同じ...
-        // タイムアウトタイマーをクリア
-        clearTimeout(timeoutId);
-        
-        // 以降の処理はこれまでと同じ
-        if (!response.ok) {
-          // エラーレスポンスの解析をエラーハンドラモジュールに委譲
-          const errorResponse = await DatabricksErrorHandler.parseErrorResponse(response);
+        if (streamResult.success) {
+          responseMessages.push(...streamResult.messages);
+          return { success: true, messages: responseMessages };
+        } else {
           return { 
             success: false, 
             messages: [], 
-            error: errorResponse.error
+            error: streamResult.error,
+            state: streamResult.state
           };
         }
+      } catch (streamError: unknown) {
+        const errorMessage = getErrorMessage(streamError);
+        console.error(`ストリーミング処理エラー: ${errorMessage}`);
         
-        // 残りの処理（非ストリーミング・ストリーミング）も同様に続く...
-        if (options.stream === false) {
-          const message = await DatabricksHelpers.processNonStreamingResponse(response);
-          responseMessages.push(message);
-          return { success: true, messages: responseMessages };
+        if (isConnectionError(streamError)) {
+          console.error(`接続エラーの詳細: ${errorMessage}`);
         }
         
-        try {
-          const streamResult = await StreamingProcessor.processStreamingResponse(
-            response, 
-            messages, 
-            retryCount, 
-            this.alwaysLogThinking
-          );
-          
-          if (streamResult.success) {
-            responseMessages.push(...streamResult.messages);
-            return { success: true, messages: responseMessages };
-          } else {
-            return { 
-              success: false, 
-              messages: [], 
-              error: streamResult.error,
-              state: streamResult.state
-            };
-          }
-        } catch (streamError: unknown) {
-          const errorMessage = getErrorMessage(streamError);
-          console.error(`ストリーミング処理エラー: ${errorMessage}`);
-          
-          if (isConnectionError(streamError)) {
-            console.error(`接続エラーの詳細: ${errorMessage}`);
-          }
-          
-          throw streamError;
-        }
-      } else {
-        // 通常のリクエスト処理（parallel_tool_callsの問題がない場合）
-        // DatabricksのエンドポイントにOpenAI形式でリクエスト
-        const response = await this.fetch(apiEndpoint, {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            "Authorization": `Bearer ${this.apiKey}`,
-          },
-          body: requestBodyString,
-          signal: combinedSignal,
-        });
-
-        // タイムアウトタイマーをクリア（レスポンスが正常に返ってきた場合）
-        clearTimeout(timeoutId);
-
-        // レスポンスのステータスコードチェック
-        if (!response.ok) {
-          // エラーレスポンスの解析をエラーハンドラモジュールに委譲
-          const errorResponse = await DatabricksErrorHandler.parseErrorResponse(response);
-          return { 
-            success: false, 
-            messages: [], 
-            error: errorResponse.error
-          };
-        }
-
-        // ストリーミングなしの場合は単一のレスポンスを返す
-        if (options.stream === false) {
-          // 非ストリーミングレスポンスの処理をヘルパーモジュールに委譲
-          const message = await DatabricksHelpers.processNonStreamingResponse(response);
-          responseMessages.push(message);
-          return { success: true, messages: responseMessages };
-        }
-
-        try {
-          // ストリーミングレスポンスの処理をストリーミング処理モジュールに委譲
-          const streamResult = await StreamingProcessor.processStreamingResponse(
-            response, 
-            messages, 
-            retryCount, 
-            this.alwaysLogThinking
-          );
-          
-          if (streamResult.success) {
-            responseMessages.push(...streamResult.messages);
-            return { success: true, messages: responseMessages };
-          } else {
-            return { 
-              success: false, 
-              messages: [], 
-              error: streamResult.error,
-              state: streamResult.state
-            };
-          }
-        } catch (streamError: unknown) {
-          // ストリーミング処理中のエラーを詳細にログ
-          const errorMessage = getErrorMessage(streamError);
-          console.error(`ストリーミング処理エラー: ${errorMessage}`);
-          
-          // 接続エラーの場合はより詳細な情報をログ
-          if (isConnectionError(streamError)) {
-            console.error(`接続エラーの詳細: ${errorMessage}`);
-          }
-          
-          // エラーを再スロー（_streamChatのリトライロジックで処理される）
-          throw streamError;
-        }
+        throw streamError;
       }
     } catch (error: unknown) {
       // エラー情報の構築をエラーハンドラモジュールのパターンに準拠

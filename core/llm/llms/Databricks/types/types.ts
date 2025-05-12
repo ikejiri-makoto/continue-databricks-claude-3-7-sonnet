@@ -85,6 +85,7 @@ export interface ToolCallDelta {
 
 /**
  * ストリーミングレスポンスデルタ
+ * Claude 3.7 Sonnetの思考モードとreasoning型に対応
  */
 export interface ResponseDelta {
   tool_calls?: ToolCallDelta[];
@@ -94,17 +95,36 @@ export interface ResponseDelta {
     };
   };
   signature?: string;
+  // reasoning型をサポート（Databricksエンドポイント特有の思考データ形式）
+  reasoning?: {
+    text?: string;
+    summary?: {
+      text?: string;
+    };
+    signature?: string;
+    [key: string]: any; // その他のプロパティもサポート
+  } | string;
 }
 
 /**
  * ストリーミングチャンク型
+ * Databricksエンドポイントからの様々な応答形式に対応
  */
 export interface StreamingChunk {
   id?: string;
   object?: string;
   created?: number;
   model?: string;
+  signature?: string; // 署名情報を追加
   thinking?: any; // 思考データは様々な形式で来る可能性があるためany型
+  // content型をサポート - どのレベルにもオブジェクト形式のデータが来る可能性がある
+  content?: {
+    summary?: {
+      text?: string;
+    };
+    [key: string]: any;
+  } | string;
+  // 思考データを含む可能性のあるchoices配列
   choices?: Array<{
     index?: number;
     delta?: ResponseDelta & {
@@ -113,9 +133,22 @@ export interface StreamingChunk {
           text?: string;
         };
       }; // content.summary.textなどの入れ子構造に対応
+      reasoning?: {
+        text?: string;
+        summary?: {
+          text?: string;
+        };
+        signature?: string;
+        [key: string]: any;
+      } | string;
     };
     finish_reason?: string | null;
   }>;
+  // summary直接アクセス用
+  summary?: {
+    text?: string;
+    [key: string]: any;
+  };
 }
 
 /**
@@ -130,13 +163,16 @@ export interface ThinkingChunk {
   /** summary.text形式の思考データ */
   summary?: { 
     text?: string;
+    [key: string]: any;
   };
   
   /** content.summary.text形式の思考データ */
-  content?: { 
+  content?: string | { 
     summary?: { 
       text?: string;
+      [key: string]: any;
     };
+    [key: string]: any;
   };
   
   /** 思考データの署名情報 */
@@ -145,17 +181,40 @@ export interface ThinkingChunk {
   /** デルタ形式の思考データ */
   delta?: any;
   
+  /** reasoning形式の思考データ (Databricks固有) */
+  reasoning?: {
+    text?: string;
+    summary?: {
+      text?: string;
+    };
+    [key: string]: any;
+  } | string;
+  
   /** choices[0].delta.content.summary.text形式の思考データ（最優先）*/
   choices?: Array<{
     delta?: {
       content?: {
         summary?: {
           text?: string;
+          [key: string]: any;
         };
+        [key: string]: any;
       };
+      reasoning?: {
+        text?: string;
+        summary?: {
+          text?: string;
+        };
+        [key: string]: any;
+      } | string;
       signature?: string;
+      [key: string]: any;
     };
+    [key: string]: any;
   }>;
+  
+  /** その他の未知のプロパティにも対応 */
+  [key: string]: any;
 }
 
 /**

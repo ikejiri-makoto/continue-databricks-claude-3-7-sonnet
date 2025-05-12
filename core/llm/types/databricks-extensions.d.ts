@@ -51,9 +51,13 @@ declare module "../index" {
      */
     alwaysLogThinking?: boolean;
     
-    // 注意: Databricksエンドポイントはparallel_tool_callsパラメータをサポートしていません
-    // このパラメータを含めるとエラーが発生します
-    // parallel_tool_callsパラメータを意図的にコメントアウト
+    /**
+     * 重要: Databricksエンドポイントはparallel_tool_callsパラメータをサポートしていません。
+     * このパラメータを含めるとDatabricksエンドポイントでエラーが発生します。
+     * Databricksの場合はこのパラメータを完全に除外する必要があります。
+     * 
+     * @deprecated - Databricksエンドポイントでは使用しないでください
+     */
     // parallelToolCalls?: boolean;
   }
 

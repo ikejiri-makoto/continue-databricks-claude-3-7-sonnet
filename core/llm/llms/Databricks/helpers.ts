@@ -12,11 +12,14 @@ export class DatabricksHelpers {
    * Databricksエンドポイントで使用できないパラメータ
    */
   private static UNSUPPORTED_PARAMETERS = [
+    // 最優先でチェックするパラメータ（重要度の高い順）
     'parallel_tool_calls',  // 最重要: Databricksでサポートされていないパラメータ
+    'parallelToolCalls',    // キャメルケース形式もチェック
     'function_call',        // 古いOpenAIの要求形式
     'has_parallel_tool_calls', // 内部フラグ
     'tool_choice',          // Databricksがサポートしているか不明
-    'functions'             // 古いOpenAIの要求形式
+    'functions',            // 古いOpenAIの要求形式
+    'reasoning'             // Databricksではエラーになるパラメータ（追加）
   ];
 
   /**
@@ -31,7 +34,9 @@ export class DatabricksHelpers {
     // Claude 3.7モデルかどうかを検出
     const isClaude37 = modelName.toLowerCase().includes("claude-3-7");
     
-    console.log(`Claude 3.7 Sonnet model detected - applying special configuration`);
+    if (isClaude37) {
+      console.log(`Claude 3.7 Sonnet model detected - applying special configuration`);
+    }
     
     // 基本パラメータの準備
     const args: any = {
@@ -47,34 +52,23 @@ export class DatabricksHelpers {
     }
     
     // 思考モード設定の追加（Claude 3.7モデルの場合のみ）
-    if (isClaude37 && !(options as DatabricksCompletionOptions).thinking) {
-      // デフォルトの思考モード設定を追加
-      // Databricksでは特に重要！
-      // Claudeの思考モードは正しい形式で送信する必要があり
-      // {"type":"thinking",...}の形式は使用せず、常に次の形式を使用する
-      args.thinking = {
-        type: "enabled",
-        budget_tokens: Math.min(options.maxTokens ? Math.floor(options.maxTokens / 2) : 32000, 64000)
+    if (isClaude37) {
+      // 思考モードバジェットを計算
+      const thinkingBudgetTokens = Math.min(options.maxTokens ? Math.floor(options.maxTokens / 2) : 32000, 64000);
+      
+      // 温度を1.0に設定（思考モードが最適に機能する値）
+      args.temperature = 1.0;
+      
+      console.log(`Token settings - max_tokens: ${args.max_tokens}, thinking budget: ${thinkingBudgetTokens}`);
+      
+      // 重要: Databricksエンドポイントで思考モードを使用するには、extra_bodyに配置する必要がある
+      // reasoningパラメータの代わりにthinkingパラメータをextra_body内に配置
+      args.extra_body = {
+        thinking: {
+          type: "enabled",
+          budget_tokens: thinkingBudgetTokens
+        }
       };
-      
-      // 温度をチェック - 思考モードは温度=1で最も良く機能する
-      if (args.temperature !== 1.0) {
-        console.log(`警告: 思考モードは温度=1.0で最適化されています。温度を調整しました。`);
-        args.temperature = 1.0;
-      }
-      
-      console.log(`Token settings - max_tokens: ${args.max_tokens}, thinking budget: ${args.thinking.budget_tokens}`);
-    } else if (isClaude37 && (options as DatabricksCompletionOptions).thinking) {
-      // ユーザー指定の思考モード設定を使用
-      args.thinking = (options as DatabricksCompletionOptions).thinking;
-      
-      // 温度をチェック - 思考モードは温度=1で最も良く機能する
-      if (args.temperature !== 1.0) {
-        console.log(`警告: 思考モードは温度=1.0で最適化されています。温度を調整しました。`);
-        args.temperature = 1.0;
-      }
-      
-      console.log(`Token settings - max_tokens: ${args.max_tokens}, thinking budget: ${args.thinking.budget_tokens || 'default'}`);
     }
     
     // ツール設定の処理
@@ -110,10 +104,14 @@ export class DatabricksHelpers {
       delete args.parallel_tool_calls;
     }
     
-    // Databricksエンドポイントに送信するパラメータのログ
-    if (process.env.NODE_ENV === 'development') {
-      console.log(`Databricksに送信するパラメータ: ${Object.keys(args).join(', ')}`);
+    // reasoningパラメータの最終確認
+    if ('reasoning' in args) {
+      console.error(`警告: reasoningパラメータが削除されていません。強制的に削除します。`);
+      delete args.reasoning;
     }
+    
+    // Databricksエンドポイントに送信するパラメータのログ
+    console.log(`Databricksに送信するパラメータ: ${Object.keys(args).join(', ')}`);
     
     return args;
   }
@@ -129,10 +127,31 @@ export class DatabricksHelpers {
     
     console.log("Databricksエンドポイントではサポートされていないパラメータを除外しています");
     
-    // 最重要なパラメータを明示的にチェック
+    // 最重要なパラメータを明示的にチェック - parallel_tool_calls
     if ('parallel_tool_calls' in obj) {
-      console.log("確認: パラメータparallel_tool_callsはDatabricksエンドポイントでサポートされていないため、送信しません");
       delete obj.parallel_tool_calls;
+    }
+    
+    // キャメルケース版もチェック - parallelToolCalls
+    if ('parallelToolCalls' in obj) {
+      delete obj.parallelToolCalls;
+    }
+    
+    // reasoningパラメータを削除
+    if ('reasoning' in obj) {
+      delete obj.reasoning;
+    }
+    
+    // thinking関連パラメータを確認し、適切に処理
+    if (obj.thinking && typeof obj.thinking === 'object' && obj.thinking.type === 'enabled') {
+      // Databricksエンドポイントでは直接thinkingパラメータを使用せず、
+      // thinkingパラメータはextra_body内で設定される必要がある
+      // ただし、変換はconvertArgs関数で一括して行うため、ここでは削除のみを行う
+      
+      // バッファリング中にthinkingパラメータが見つかった場合は削除
+      if (!('extra_body' in obj)) {
+        delete obj.thinking;
+      }
     }
     
     // その他のサポートされていないパラメータも削除
@@ -229,9 +248,13 @@ export class DatabricksHelpers {
       console.log(`Request body (truncated): ${bodyString.substring(0, 500)}${bodyString.length > 500 ? '...' : ''}`);
       
       // 重要: サポートされていないパラメータがリクエストボディに含まれていないか最終確認
-      // 特にparallel_tool_callsパラメータは重要なので明示的に確認
+      // 特にparallel_tool_callsとreasoingパラメータは重要なので明示的に確認
       if (bodyString.includes('"parallel_tool_calls"')) {
         console.error(`警告: リクエストボディ内にparallel_tool_callsが検出されました。これは問題を引き起こす可能性があります。`);
+      }
+      
+      if (bodyString.includes('"reasoning"')) {
+        console.error(`警告: リクエストボディ内にreasoningが検出されました。これは問題を引き起こす可能性があります。`);
       }
     } catch (e) {
       console.log("リクエストボディのログ出力に失敗しました");
@@ -269,7 +292,7 @@ export class DatabricksHelpers {
     
     // オブジェクトの場合は適切なプロパティを探す
     if (typeof thinkingData === 'object') {
-      // choices[0].delta.content.summary.text形式 - Databricksで最も一般的
+      // 最優先形式: choices[0].delta.content.summary.text形式 - Databricksで最も一般的
       if (thinkingData.choices?.[0]?.delta?.content?.summary?.text) {
         return thinkingData.choices[0].delta.content.summary.text;
       }
@@ -310,11 +333,6 @@ export class DatabricksHelpers {
     }
     
     // どのプロパティも見つからない場合は[object Object]を避け、簡単なメッセージを返す
-    try {
-      // 直接オブジェクトを文字列化せず、固定メッセージを返す
-      return "[思考中...]";
-    } catch (e) {
-      return "[思考データの処理中...]";
-    }
+    return "[思考中...]";
   }
 }
