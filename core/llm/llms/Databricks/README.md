@@ -447,6 +447,34 @@ if (this.isContentObject(content) && content.summary) {
 
 By using proper type guards and carefully structured conditional checks, we ensure TypeScript correctly narrows types and prevents "Property does not exist on type 'never'" errors, which commonly happen when TypeScript loses track of an object's structure in complex conditionals.
 
+### Support for Both Streaming and Non-Streaming Responses
+
+The May 2025 update adds support for properly handling both streaming and non-streaming responses with a single type definition. The `StreamingChunk` interface now includes a `message` property in the `choices` array to support non-streaming responses, while maintaining the `delta` property for streaming responses:
+
+```typescript
+choices?: Array<{
+  index?: number;
+  delta?: ResponseDelta & {
+    content?: string | { summary?: { text?: string; }; };
+    reasoning?: { text?: string; summary?: { text?: string; }; signature?: string; [key: string]: any; } | string;
+  };
+  // Non-streaming response message property
+  message?: {
+    content?: any; // Support for arrays, objects, strings, etc.
+    role?: string;
+    tool_calls?: ToolCall[];
+    refusal?: any;
+    annotations?: any;
+    audio?: any;
+    function_call?: any;
+    [key: string]: any; // Support for other properties
+  };
+  finish_reason?: string | null;
+}>;
+```
+
+This dual support ensures robust handling of different API response formats with a single implementation.
+
 ## JSON Processing for Streaming Content
 
 When working with streaming JSON data, the implementation uses various techniques to handle partial or malformed JSON. For Databricks endpoints with Claude 3.7 Sonnet's thinking mode, additional complexity arises due to nested JSON structure. These issues are addressed with:
