@@ -119,6 +119,55 @@ Request Body:
 }
 ```
 
+### Streaming Response Format for Thinking Mode
+
+When using thinking mode with streaming responses, the data structure differs from non-streaming responses. The specific format for streaming thinking mode data in Databricks Claude 3.7 Sonnet is as follows:
+
+```json
+{
+  "model": "us.anthropic.claude-3-7-sonnet-20250219-v1:0",
+  "choices": [
+    {
+      "delta": {
+        "role": "assistant",
+        "content": [
+          {
+            "type": "reasoning",
+            "summary": [
+              {
+                "type": "summary_text",
+                "text": "分析を始めます。\n1. まず問題を確認します。\n2. 次に...",
+                "signature": ""
+              }
+            ]
+          }
+        ]
+      },
+      "index": 0,
+      "finish_reason": null
+    }
+  ],
+  "usage": {
+    "prompt_tokens": 2067,
+    "completion_tokens": null,
+    "total_tokens": null
+  },
+  "object": "chat.completion.chunk",
+  "id": "msg_bdrk_01TarMA3TeEzQDfx6L4DFCLb",
+  "created": 1747066395
+}
+```
+
+The critical path for extracting thinking mode text in streaming responses is:
+`choices[0].delta.content[0].summary[0].text`
+
+Note the key differences from non-streaming responses:
+1. `content` is an array, not an object
+2. `summary` is also an array
+3. Each element has type identifiers (`"type": "reasoning"` and `"type": "summary_text"`)
+
+This structure must be properly handled to correctly extract and display thinking mode content.
+
 ## Important Notice
 
 **IMPORTANT**: Databricks endpoints do not support the `parallel_tool_calls` parameter. This parameter has been intentionally excluded from the Databricks type definitions, and using it will cause errors.
@@ -677,14 +726,54 @@ export interface StreamingChunk {
 }
 ```
 
-### 2. Extended `ResponseDelta` Interface
+### 2. Support for Array-based Content Structure
+
+Added support for the array-based content structure used in streaming thinking mode responses:
+
+```typescript
+// Updated StreamingChunk interface
+export interface StreamingChunk {
+  // ...existing properties
+  
+  // Support for array-based content structure
+  choices?: Array<{
+    delta?: {
+      content?: string | any[] | { // Added array type to support content as array
+        summary?: {
+          text?: string;
+        };
+      };
+    };
+  }>;
+}
+
+// Type guard for array-based content
+function isArrayContent(content: any): content is any[] {
+  return Array.isArray(content);
+}
+
+// Helper function for extracting text from array-based content
+function extractThinkingText(content: any[]): string | null {
+  if (content.length > 0 && 
+      typeof content[0] === 'object' && 
+      content[0]?.type === 'reasoning' && 
+      Array.isArray(content[0]?.summary) && 
+      content[0].summary.length > 0 && 
+      content[0].summary[0]?.type === 'summary_text') {
+    return content[0].summary[0].text;
+  }
+  return null;
+}
+```
+
+### 3. Extended `ResponseDelta` Interface
 
 Added `reasoning` property to the `ResponseDelta` interface to support Databricks endpoint-specific thinking data format:
 
 ```typescript
 export interface ResponseDelta {
   tool_calls?: ToolCallDelta[];
-  content?: string | { summary?: { text?: string; }; };
+  content?: string | { summary?: { text?: string; }; } | any[]; // Added array type
   signature?: string;
   
   // Added reasoning type (Databricks-specific thinking data format)
@@ -697,7 +786,7 @@ export interface ResponseDelta {
 }
 ```
 
-### 3. More Flexible `ThinkingChunk` Interface
+### 4. More Flexible `ThinkingChunk` Interface
 
 The `ThinkingChunk` interface has been significantly extended to accommodate multiple data formats returned by Claude 3.7 Sonnet's thinking mode:
 
@@ -705,7 +794,7 @@ The `ThinkingChunk` interface has been significantly extended to accommodate mul
 export interface ThinkingChunk {
   thinking?: any;
   summary?: { text?: string; [key: string]: any; };
-  content?: string | { summary?: { text?: string; [key: string]: any; }; [key: string]: any; };
+  content?: string | any[] | { summary?: { text?: string; [key: string]: any; }; [key: string]: any; }; // Added array type
   signature?: string;
   delta?: any;
   reasoning?: { text?: string; summary?: { text?: string; }; [key: string]: any; } | string;
@@ -716,13 +805,13 @@ export interface ThinkingChunk {
 
 This flexible type definition allows for properly handling various thinking data formats, specifically supporting:
 
-1. `choices[0].delta.content.summary.text` format (most common)
-2. `content.summary.text` format
+1. `choices[0].delta.content[0].summary[0].text` format (streaming format)
+2. `choices[0].delta.content.summary.text` format (alternative format)
 3. `summary.text` format
 4. `reasoning` object or string
 5. Format with direct `thinking` property
 
-### 4. Types for Reconnection and State Management
+### 5. Types for Reconnection and State Management
 
 Added new type definitions to support recovery from connection errors during streaming:
 
@@ -746,7 +835,7 @@ export interface PersistentStreamState {
 }
 ```
 
-### 5. Complete Exclusion of `parallel_tool_calls` Parameter
+### 6. Complete Exclusion of `parallel_tool_calls` Parameter
 
 Since Databricks endpoints don't support the `parallel_tool_calls` parameter, it has been completely excluded from the type definitions:
 
@@ -763,7 +852,7 @@ interface LLMOptions {
 
 This change prevents type errors during use and improves code safety.
 
-### 6. Handling for Parameters Not Defined in Type Definitions
+### 7. Handling for Parameters Not Defined in Type Definitions
 
 For some parameters like `extra_body` that are needed for compatibility but aren't officially supported by Databricks endpoints, we use type assertion in the implementation:
 
@@ -781,7 +870,7 @@ if (optionsAny.extra_body &&
 
 This approach allows us to maintain type safety while still supporting the required functionality.
 
-### 7. Added Support for Non-Streaming Responses
+### 8. Added Support for Non-Streaming Responses
 
 With the May 2025 update, support has been added for non-streaming responses from Databricks endpoints. This is implemented through the addition of a `message` property in the `choices` array of the `StreamingChunk` interface:
 
@@ -836,7 +925,7 @@ content?: {
 Type unions are used when either string or object type may be received:
 
 ```typescript
-content?: string | { summary?: { text?: string; }; [key: string]: any; };
+content?: string | any[] | { summary?: { text?: string; }; [key: string]: any; }; // String, array, or object
 reasoning?: { /* ... */ } | string;
 ```
 
@@ -847,6 +936,10 @@ Type guard functions are implemented to safely determine types:
 ```typescript
 private static isContentObject(content: any): content is { summary?: { text?: string } } {
   return typeof content === 'object' && content !== null;
+}
+
+private static isArrayContent(content: any): content is any[] {
+  return Array.isArray(content);
 }
 ```
 
@@ -926,6 +1019,14 @@ choices?: Array<{
   };
   // ...
 }>;
+```
+
+### 6. `Type 'any[]' is not assignable to type 'string | { summary?: { text?: string; }; }'`
+
+This error occurs when trying to handle array-based content structure. The solution is to update the type definition to include array type:
+
+```typescript
+content?: string | any[] | { summary?: { text?: string; }; [key: string]: any; };
 ```
 
 ## Future Type Definition Enhancements

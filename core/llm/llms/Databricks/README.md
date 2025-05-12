@@ -119,6 +119,55 @@ Request Body:
 }
 ```
 
+### Streaming Response Format for Thinking Mode
+
+When using thinking mode with streaming responses, the data structure differs from non-streaming responses. The specific format for streaming thinking mode data in Databricks Claude 3.7 Sonnet is as follows:
+
+```json
+{
+  "model": "us.anthropic.claude-3-7-sonnet-20250219-v1:0",
+  "choices": [
+    {
+      "delta": {
+        "role": "assistant",
+        "content": [
+          {
+            "type": "reasoning",
+            "summary": [
+              {
+                "type": "summary_text",
+                "text": "分析を始めます。\n1. まず問題を確認します。\n2. 次に...",
+                "signature": ""
+              }
+            ]
+          }
+        ]
+      },
+      "index": 0,
+      "finish_reason": null
+    }
+  ],
+  "usage": {
+    "prompt_tokens": 2067,
+    "completion_tokens": null,
+    "total_tokens": null
+  },
+  "object": "chat.completion.chunk",
+  "id": "msg_bdrk_01TarMA3TeEzQDfx6L4DFCLb",
+  "created": 1747066395
+}
+```
+
+The critical path for extracting thinking mode text in streaming responses is:
+`choices[0].delta.content[0].summary[0].text`
+
+Note the key differences from non-streaming responses:
+1. `content` is an array, not an object
+2. `summary` is also an array
+3. Each element has type identifiers (`"type": "reasoning"` and `"type": "summary_text"`)
+
+This structure must be properly handled to correctly extract and display thinking mode content.
+
 ## Databricks-Specific Limitations
 
 ### API Parameter Differences for Claude's Thinking Mode
@@ -294,121 +343,90 @@ To enable thinking mode for Claude 3.7 Sonnet models, the following parameters n
 
 #### Response Processing for Thinking Mode
 
-Claude 3.7 Sonnet's thinking mode returns data specifically in `choices[0].delta.content.summary.text` format when used with Databricks endpoints. Our implementation focuses exclusively on processing this format for optimal reliability:
-
-```typescript
-// Thinking mode processing - focusing on choices[0].delta.content.summary.text format
-if (chunk.choices && 
-    Array.isArray(chunk.choices) && 
-    chunk.choices.length > 0 && 
-    chunk.choices[0]?.delta?.content) {
-  
-  const content = chunk.choices[0].delta.content;
-  
-  // Check if content is an object with a summary property (array or object format)
-  if (this.isContentObject(content)) {
-    // Handle array format: summary[0].text (primary format)
-    if (content.summary && 
-        Array.isArray(content.summary) && 
-        content.summary.length > 0 && 
-        content.summary[0]?.text) {
-      
-      const thinkingMessage: ThinkingChatMessage = {
-        role: "thinking",
-        content: content.summary[0].text,
-        signature: content.summary[0].signature || undefined
-      };
-      
-      // Log the thinking process text directly to console
-      console.log(content.summary[0].text);
-      
-      return { thinkingMessage };
-    }
-    
-    // Handle object format: summary.text (fallback format)
-    if (content.summary && 
-        typeof content.summary === 'object' && 
-        content.summary.text) {
-      
-      const thinkingMessage: ThinkingChatMessage = {
-        role: "thinking",
-        content: content.summary.text,
-        signature: chunk.choices[0].delta.signature || undefined
-      };
-      
-      // Log the thinking process text directly to console
-      console.log(content.summary.text);
-      
-      return { thinkingMessage };
-    }
-  }
-}
-```
-
-This approach ensures reliable extraction and display of thinking process content with proper type safety:
-
-1. **Standardized Format Detection**: Focuses exclusively on the specific formats returned by Claude 3.7 Sonnet
-2. **Type-Safe Property Access**: Uses the `isContentObject` type guard function to ensure type safety
-3. **Direct Console Output**: Streamlined process to output just the thinking text to the console
-4. **Fallback Support**: Handles both array-based and object-based summary formats
-
-The implementation uses a type guard function for type safety:
+For streaming responses in thinking mode, the implementation uses a specialized extraction function to handle the nested data structure:
 
 ```typescript
 /**
- * Type guard function to check if content is an object
+ * Claude 3.7 Sonnetの思考モードデータを抽出する
+ * 実際のデータパス: choices[0].delta.content[0].summary[0].text
+ * @param chunk ストリーミングチャンク
+ * @returns 抽出した思考テキストとシグネチャ、または null
  */
-private static isContentObject(content: any): content is { summary?: any } {
-  return typeof content === 'object' && content !== null;
+private static extractThinkingData(chunk: StreamingChunk): { text: string; signature?: string } | null {
+  if (!chunk?.choices?.[0]?.delta?.content) {
+    return null;
+  }
+  
+  // content が配列の場合
+  const content = chunk.choices[0].delta.content;
+  
+  if (Array.isArray(content) && content.length > 0) {
+    const firstContent = content[0];
+    
+    // type が "reasoning" で summary が配列の場合
+    if (typeof firstContent === 'object' && 
+        firstContent !== null && 
+        firstContent.type === "reasoning" && 
+        Array.isArray(firstContent.summary) && 
+        firstContent.summary.length > 0) {
+      
+      const summaryItem = firstContent.summary[0];
+      
+      // type が "summary_text" でテキストが存在する場合
+      if (typeof summaryItem === 'object' && 
+          summaryItem !== null && 
+          summaryItem.type === "summary_text" && 
+          typeof summaryItem.text === 'string') {
+        
+        return {
+          text: summaryItem.text,
+          signature: summaryItem.signature || undefined
+        };
+      }
+    }
+  }
+  
+  // フォールバック処理も含む...
 }
 ```
+
+This approach ensures reliable extraction and direct console output of thinking text:
+
+```typescript
+// Extract thinking data
+const thinkingData = this.extractThinkingData(chunk);
+
+if (thinkingData) {
+  // Create thinking message
+  const thinkingMessage: ThinkingChatMessage = {
+    role: "thinking",
+    content: thinkingData.text,
+    signature: thinkingData.signature
+  };
+  
+  // Output thinking text directly to console
+  console.log(thinkingData.text);
+  
+  // Process result...
+}
+```
+
+The implementation ensures that newlines (`\n`) in the thinking text are properly interpreted by the console, resulting in readable, formatted output.
 
 ### Solving the `[object Object]` Display Problem
 
 The `[object Object]` display problem has been resolved using several techniques:
 
-1. **Simplified Property Access**: Direct extraction of the text property from the structured response
-2. **Type Guard Functions**: Usage of `isContentObject()` for safe type checking
-3. **Optional Chaining**: Consistent use of optional chaining (`?.`) to safely navigate nested properties
-4. **Content Extraction Utility**: Using `extractContentAsString()` for message content handling
-5. **Direct Console Output**: Simplified approach that directly outputs the text content
+1. **Specialized Extraction Function**: Direct extraction of the text property from the structured response
+2. **Type-Safe Property Access**: Careful navigation of nested properties with type checking
+3. **Direct Console Output**: Simplified approach that directly outputs the text content
 
-For thinking process logging, the enhanced implementation:
+For thinking text display, the implementation:
 
-```typescript
-private static logThinkingProcess(thinkingMessage: ThinkingChatMessage): void {
-  // Null check
-  if (!thinkingMessage) {
-    return;
-  }
-  
-  try {
-    // Extract content as string using utility function
-    const contentAsString = extractContentAsString(thinkingMessage.content);
-    
-    // Directly output the thinking content text
-    if (contentAsString) {
-      console.log(contentAsString);
-    } else {
-      console.log('[思考プロセス] データがありません');
-    }
-    
-    // Additional debug info in development mode
-    if (process.env.NODE_ENV === 'development') {
-      const truncatedThinking = contentAsString?.length > 200 
-        ? contentAsString.substring(0, 200) + '...' 
-        : contentAsString || '';
-        
-      console.log('[思考プロセス(開発モード)]', truncatedThinking);
-    }
-  } catch (error) {
-    // Skip logging errors to continue functionality
-    console.log('[思考プロセス] データを処理中...');
-  }
-}
-```
-
-This approach ensures the thinking process text is displayed directly without additional formatting or structure information, making it more readable and useful.
+1. Properly extracts the text from the nested structure
+2. Directly outputs it to the console using `console.log()`
+3. Preserves formatting including newlines (`\n`)
+4. Outputs just the text without additional formatting or structure information
 
 ## May 2025 Updates
 
@@ -434,13 +452,12 @@ The May 2025 update includes several important improvements to parameter handlin
 
 ### Thinking Mode Processing Enhancements
 
-With the May 2025 update, we've simplified thinking mode processing logic to focus exclusively on the standard formats returned by Claude 3.7 Sonnet. This leads to several benefits:
+With the May 2025 update, we've improved the thinking mode processing logic to handle the specific response structure used by Databricks Claude 3.7 Sonnet:
 
-1. **Improved Type Safety**: By focusing on specific formats with well-defined type guards, we avoid TypeScript compilation errors
-2. **Reduced Complexity**: The simplified approach makes the code easier to understand and maintain
-3. **Better Error Resilience**: The focused approach is less prone to edge cases and error conditions
-4. **More Predictable Behavior**: By standardizing on specific formats, the behavior is more consistent
-5. **Simplified Console Output**: Direct output of thinking text for better readability
+1. **Accurate Data Structure Handling**: Added proper handling for the nested array structure
+2. **Type Checking**: Added detailed type checking for each level of the data structure
+3. **Direct Text Output**: Simplified the output of thinking text to the console
+4. **Preservation of Formatting**: Ensured that newlines and other formatting in the thinking text are properly preserved
 
 ### Type Guard Functions for Safe Property Access
 
@@ -636,8 +653,8 @@ See the "Debugging and Logging Best Practices" section for details.
 
 For thinking data processing issues, also check:
 
-1. **Proper Thinking Data Format Detection**: Whether `StreamingProcessor.processChunk` method correctly detects thinking data
-2. **Appropriate Thinking Data Extraction**: Whether thinking data is properly extracted
+1. **Proper Thinking Data Format Detection**: Whether `StreamingProcessor.extractThinkingData` method correctly detects thinking data
+2. **Appropriate Thinking Data Extraction**: Whether thinking data is properly extracted from the nested structure
 3. **Thinking Data Format**: Check the actual thinking data format returned from the Databricks endpoint (check console logs)
 
 ### Type Definition Issues

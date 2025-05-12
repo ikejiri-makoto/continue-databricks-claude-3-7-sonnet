@@ -68,15 +68,6 @@ export class StreamingProcessor {
   private static lastStateUpdateTime = 0;
 
   /**
-   * contentがオブジェクト型かどうかを判定する型ガード関数
-   * @param content 判定する対象
-   * @returns オブジェクト型であればtrue、そうでなければfalse
-   */
-  private static isContentObject(content: any): content is { summary?: { text?: string } } {
-    return typeof content === 'object' && content !== null;
-  }
-
-  /**
    * ツール呼び出しを出力用に処理するヘルパー関数
    * ToolCall型とToolCallDelta型の互換性問題を解決します
    * 
@@ -172,6 +163,80 @@ export class StreamingProcessor {
   }
 
   /**
+   * Claude 3.7 Sonnetの思考モードデータを抽出する
+   * 実際のデータパス: choices[0].delta.content[0].summary[0].text
+   * @param chunk ストリーミングチャンク
+   * @returns 抽出した思考テキストとシグネチャ、または null
+   */
+  private static extractThinkingData(chunk: StreamingChunk): { text: string; signature?: string } | null {
+    if (!chunk?.choices?.[0]?.delta?.content) {
+      return null;
+    }
+    
+    // content が配列の場合
+    const content = chunk.choices[0].delta.content;
+    
+    if (Array.isArray(content) && content.length > 0) {
+      const firstContent = content[0];
+      
+      // type が "reasoning" で summary が配列の場合
+      if (typeof firstContent === 'object' && 
+          firstContent !== null && 
+          firstContent.type === "reasoning" && 
+          Array.isArray(firstContent.summary) && 
+          firstContent.summary.length > 0) {
+        
+        const summaryItem = firstContent.summary[0];
+        
+        // type が "summary_text" でテキストが存在する場合
+        if (typeof summaryItem === 'object' && 
+            summaryItem !== null && 
+            summaryItem.type === "summary_text" && 
+            typeof summaryItem.text === 'string') {
+          
+          return {
+            text: summaryItem.text,
+            signature: summaryItem.signature || undefined
+          };
+        }
+      }
+    }
+    
+    // フォールバック: non-array content 対応
+    if (typeof content === 'object' && 
+        content !== null && 
+        !Array.isArray(content)) {
+      
+      // summary が配列の場合（非配列 content with 配列 summary）
+      if (Array.isArray(content.summary) && content.summary.length > 0) {
+        const summaryItem = content.summary[0];
+        
+        if (typeof summaryItem === 'object' && 
+            summaryItem !== null && 
+            typeof summaryItem.text === 'string') {
+          
+          return {
+            text: summaryItem.text,
+            signature: summaryItem.signature || undefined
+          };
+        }
+      } 
+      // summary がオブジェクトの場合（非配列 content with 非配列 summary）
+      else if (typeof content.summary === 'object' && 
+               content.summary !== null && 
+               typeof content.summary.text === 'string') {
+        
+        return {
+          text: content.summary.text,
+          signature: chunk.choices[0].delta.signature || undefined
+        };
+      }
+    }
+    
+    return null;
+  }
+
+  /**
    * ストリーミングチャンクを処理し、適切なメッセージを生成
    * @param chunk 処理するチャンク
    * @param currentMessage 現在のメッセージ
@@ -247,66 +312,34 @@ export class StreamingProcessor {
       return result;
     }
 
-    // *** 思考モード処理: choices.delta.content.summary.text 形式に特化 ***
-    // Claude 3.7 Sonnetの思考モードに対応したフォーマットのみを処理
-    if (chunk.choices && 
-        Array.isArray(chunk.choices) && 
-        chunk.choices.length > 0 && 
-        chunk.choices[0]?.delta?.content) {
+    // *** 思考モード処理: choices[0].delta.content[0].summary[0].text 形式に対応 ***
+    // 思考データを抽出
+    const thinkingData = this.extractThinkingData(chunk);
+    
+    if (thinkingData) {
+      // 思考メッセージを作成
+      const thinkingMessage: ThinkingChatMessage = {
+        role: "thinking",
+        content: thinkingData.text,
+        signature: thinkingData.signature
+      };
       
-      const content = chunk.choices[0].delta.content;
+      // 思考テキストのみをログに出力
+      console.log(thinkingData.text);
       
-      // オブジェクト型かつsummaryプロパティがある場合
-      if (this.isContentObject(content) && 
-          content.summary && 
-          Array.isArray(content.summary) && 
-          content.summary.length > 0 && 
-          content.summary[0]?.text) {
-        
-        // 思考メッセージを作成
-        const thinkingMessage: ThinkingChatMessage = {
-          role: "thinking",
-          content: content.summary[0].text,
-          signature: content.summary[0].signature || undefined
-        };
-        
-        // 思考プロセスをログ出力
-        this.logThinkingProcess(thinkingMessage);
-        
-        // 処理結果に思考メッセージを設定
-        result.thinkingMessage = thinkingMessage;
-        
-        // 処理を完了して結果を返す
-        return result;
-      }
-      
-      // フォールバック: 直接的なtextプロパティがあれば思考データとして扱う
-      if (this.isContentObject(content) && 
-          content.summary && 
-          typeof content.summary === 'object' && 
-          content.summary.text) {
-        
-        // 思考メッセージを作成
-        const thinkingMessage: ThinkingChatMessage = {
-          role: "thinking",
-          content: content.summary.text,
-          signature: chunk.choices[0].delta.signature || undefined
-        };
-        
-        // 思考プロセスをログ出力
-        this.logThinkingProcess(thinkingMessage);
-        
-        // 処理結果に思考メッセージを設定
-        result.thinkingMessage = thinkingMessage;
-        
-        // 開発モードでデータ形式をログ出力
-        if (process.env.NODE_ENV === 'development') {
-          console.log("choices.delta.content.summary.text 形式から思考データを検出しました");
+      // 開発モードでは詳細情報も出力
+      if (process.env.NODE_ENV === 'development') {
+        console.log(`[思考プロセス] ${thinkingData.text.substring(0, 200)}${thinkingData.text.length > 200 ? '...' : ''}`);
+        if (thinkingData.signature) {
+          console.log(`[思考署名] ${thinkingData.signature.substring(0, 50)}${thinkingData.signature.length > 50 ? '...' : ''}`);
         }
-        
-        // 処理を完了して結果を返す
-        return result;
       }
+      
+      // 処理結果に思考メッセージを設定
+      result.thinkingMessage = thinkingMessage;
+      
+      // 処理を完了して結果を返す
+      return result;
     }
     
     // 通常のメッセージコンテンツの処理（思考モードではない場合）
@@ -450,57 +483,6 @@ export class StreamingProcessor {
       // 2行以上の改行がある場合は段落区切りとして扱う
       text.includes("\n\n")
     );
-  }
-
-  /**
-   * 思考プロセスのログ出力
-   * choices.delta.content.summary.textから抽出した思考テキストをログに出力
-   * @param thinkingMessage 思考メッセージ
-   */
-  private static logThinkingProcess(thinkingMessage: ThinkingChatMessage): void {
-    // 思考メッセージのnullチェック
-    if (!thinkingMessage) {
-      return;
-    }
-    
-    try {
-      // extractContentAsStringを使用して安全にコンテンツを抽出
-      const contentAsString = extractContentAsString(thinkingMessage.content);
-      
-      // 空のコンテンツチェック
-      if (!contentAsString) {
-        console.log('[思考プロセス] データがありません');
-        return;
-      }
-      
-      // choices.delta.content.summary.textの内容をログに出力
-      console.log(contentAsString);
-      
-      // 開発モードでは追加情報を表示
-      if (process.env.NODE_ENV === 'development') {
-        // 長い思考プロセスは省略して表示
-        const truncatedThinking = contentAsString.length > 200 
-          ? contentAsString.substring(0, 200) + '...' 
-          : contentAsString;
-        
-        console.log('[思考プロセス(開発モード)]', truncatedThinking);
-        
-        // 署名情報があれば表示
-        if (thinkingMessage.signature) {
-          // 署名情報を文字列として安全に表示
-          const signatureString = typeof thinkingMessage.signature === 'string' 
-            ? thinkingMessage.signature.substring(0, 50) + (thinkingMessage.signature.length > 50 ? '...' : '')
-            : '';
-          
-          if (signatureString) {
-            console.log('[思考署名]', signatureString);
-          }
-        }
-      }
-    } catch (error) {
-      // ログ出力中のエラーはスキップして機能を継続
-      console.log('[思考プロセス] データ処理エラー: データを処理中...');
-    }
   }
 
   /**
@@ -1342,42 +1324,7 @@ export class StreamingProcessor {
           
           // 開発モード時のデバッグログ
           if (process.env.NODE_ENV === 'development') {
-            try {
-              // 思考チャンクの場合は特別な形式でログ出力
-              if (data.choices?.[0]?.delta?.content && 
-                  this.isContentObject(data.choices[0].delta.content) && 
-                  data.choices[0].delta.content.summary) {
-                // 思考モードのコンテンツチャンク - summary[0].textまたはsummary.textフォーマットを表示
-                const summaryText = Array.isArray(data.choices[0].delta.content.summary) && 
-                                   data.choices[0].delta.content.summary.length > 0 ? 
-                                   data.choices[0].delta.content.summary[0]?.text :
-                                   data.choices[0].delta.content.summary?.text;
-                
-                console.log(`処理チャンク(thinking_content): ${safeStringify({
-                  has_summary: true,
-                  summary_text: summaryText?.substring(0, 50) || '<テキストなし>'
-                }, "<不明なチャンク>")}`);
-              } else if (data.choices?.[0]?.delta?.content && 
-                         typeof data.choices[0].delta.content === 'string') {
-                // 通常のコンテンツチャンク
-                console.log(`処理チャンク(content): ${safeStringify({
-                  content_length: data.choices[0].delta.content.length,
-                  content_snippet: data.choices[0].delta.content.substring(0, 50)
-                }, "<不明なチャンク>")}`);
-              } else if (data.choices?.[0]?.delta?.tool_calls) {
-                // ツール呼び出しチャンク
-                console.log(`処理チャンク(tool_calls): ${safeStringify({
-                  tool_calls_count: data.choices[0].delta.tool_calls.length,
-                  first_tool: data.choices[0].delta.tool_calls[0]?.function?.name || '<名前なし>'
-                }, "<不明なチャンク>")}`);
-              } else {
-                // その他のチャンク - 簡略化して表示
-                console.log(`処理チャンク: ${Object.keys(data).join(', ')}`);
-              }
-            } catch (e) {
-              // ログ出力中のエラーは無視
-              console.warn(`チャンクログ出力中にエラー: ${getErrorMessage(e)}`);
-            }
+            console.log(`処理チャンク: ${safeStringify(data, "<不明なチャンク>")}`);
           }
           
           // チャンクを処理
