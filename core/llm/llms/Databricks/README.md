@@ -124,174 +124,47 @@ Claude 3.7 Sonnet's thinking mode can return data in multiple different formats.
 4. Sent in `summary.text` format
 5. Sent in `reasoning` object or string format (Databricks-specific alternative)
 
-To handle these different formats, the `processThinkingChunk` method uses a hierarchical processing approach with clear prioritization:
+To handle these potentially variable formats, we've updated the code to focus exclusively on the most reliable format: `choices[0].delta.content.summary.text`. This simplifies the processing and improves type safety. The updated implementation:
 
 ```typescript
-private static processThinkingChunk(thinkingData: ThinkingChunk): ChatMessage {
-  // Initialize variables for thinking content and signature
-  let newThinking = "";
-  let signature: string | undefined = undefined;
+// 思考モード処理 - choices[0].delta.content.summary.text形式のみを優先的に処理
+if (chunk.choices && 
+    Array.isArray(chunk.choices) && 
+    chunk.choices.length > 0 && 
+    chunk.choices[0]?.delta?.content) {
   
-  try {
-    // ***** HIGHEST PRIORITY: choices[0].delta.content.summary.text format *****
-    if (thinkingData.choices && 
-        Array.isArray(thinkingData.choices) && 
-        thinkingData.choices.length > 0 && 
-        thinkingData.choices[0]?.delta?.content?.summary?.text) {
-      
-      newThinking = thinkingData.choices[0].delta.content.summary.text;
-      
-      if (process.env.NODE_ENV === 'development') {
-        console.log('Detected highest priority format (choices.delta.content.summary.text)');
-      }
-    }
-    // ***** NEXT PRIORITY: choices[0].delta.content.summary format (object) *****
-    else if (thinkingData.choices?.[0]?.delta?.content?.summary && 
-           typeof thinkingData.choices[0].delta.content.summary === 'object') {
-      const summaryObj = thinkingData.choices[0].delta.content.summary;
-      if (summaryObj && typeof summaryObj === 'object' && summaryObj.text) {
-        newThinking = summaryObj.text;
-        // Debug log omitted for brevity
-      } else {
-        // Explore for text properties instead of string conversion
-        const extractedText = this.findTextProperty(summaryObj);
-        if (extractedText) {
-          newThinking = extractedText;
-          // Debug log omitted for brevity
-        } else {
-          newThinking = "[Thinking...]";
-        }
-      }
-    }
-    // ***** NEXT PRIORITY: content.summary.text format *****
-    else if (thinkingData.content?.summary?.text) {
-      newThinking = thinkingData.content.summary.text;
-      // Debug log omitted for brevity
-    }
-    // ***** NEXT PRIORITY: summary.text format *****
-    else if (thinkingData.summary?.text) {
-      newThinking = thinkingData.summary.text;
-      // Debug log omitted for brevity
-    }
-    // ***** NEXT PRIORITY: reasoning format (Databricks-specific) *****
-    else if (typeof thinkingData === 'object' && 
-             thinkingData !== null && 
-             'reasoning' in thinkingData) {
-      
-      const reasoningData = thinkingData.reasoning;
-      // Processing logic for reasoning format...
-    }
-    // ***** NEXT PRIORITY: thinking format (direct string or internal object) *****
-    else if (thinkingData.thinking) {
-      // Processing logic for thinking property format...
-    }
-    // ***** LAST RESORT: recursively search for text properties in the object *****
-    else {
-      const textProperties = this.findTextProperty(thinkingData);
-      if (textProperties) {
-        newThinking = textProperties;
-        // Debug log omitted for brevity
-      } else {
-        // No text found anywhere in the object
-        newThinking = "[Processing thinking content...]";
-        
-        // Debug mode only - log details of unprocessable data
-        if (process.env.NODE_ENV === 'development') {
-          console.log(`Unprocessable thinking data format: ${safeStringify(thinkingData, "<unknown format>")}`);
-        }
-      }
-    }
+  const content = chunk.choices[0].delta.content;
+  
+  // オブジェクト型かつsummaryプロパティがある場合
+  if (this.isContentObject(content) && 
+      content.summary && 
+      typeof content.summary === 'object' && 
+      content.summary.text) {
     
-    // Get signature information - process safely with type checking
-    if (typeof thinkingData.signature === 'string') {
-      signature = thinkingData.signature;
-    } else if (thinkingData.choices?.[0]?.delta?.signature && 
-                typeof thinkingData.choices[0].delta.signature === 'string') {
-      signature = thinkingData.choices[0].delta.signature;
-    }
+    // 思考メッセージを作成
+    const thinkingMessage: ThinkingChatMessage = {
+      role: "thinking",
+      content: content.summary.text,
+      signature: chunk.choices[0].delta.signature || undefined
+    };
     
-  } catch (error) {
-    // Handle error and continue processing
-    console.error(`Error processing thinking chunk: ${getErrorMessage(error)}`);
+    // 処理結果に思考メッセージを設定
+    result.thinkingMessage = thinkingMessage;
     
-    // Debug mode only - log detailed error information
-    if (process.env.NODE_ENV === 'development') {
-      console.error(`Chunk data: ${safeStringify(thinkingData, "<data error>")}`);
-    }
-    
-    newThinking = `[Processing thinking data...]`;
+    // 処理を完了して結果を返す
+    return result;
   }
-  
-  // Create and return thinking message
-  const thinkingMessage: ThinkingChatMessage = {
-    role: "thinking",
-    content: newThinking,
-    signature: signature
-  };
-  
-  // Log thinking process to console
-  this.logThinkingProcess(thinkingMessage);
-  
-  return thinkingMessage;
 }
 ```
 
-### Enhanced Text Property Discovery
-
-To find text content within complex nested objects, a recursive exploration function is implemented:
+This approach uses a type guard function to ensure type safety:
 
 ```typescript
-private static findTextProperty(obj: any, depth: number = 0): string | null {
-  // Prevent infinite loops or excessive recursion
-  if (depth > 5) {
-    return null;
-  }
-  
-  // Handle null or undefined
-  if (obj === null || obj === undefined) {
-    return null;
-  }
-  
-  // Return directly if a string
-  if (typeof obj === 'string') {
-    return obj;
-  }
-  
-  // Recursively process for objects
-  if (typeof obj === 'object') {
-    // Prioritize Databricks-specific thinking mode formats
-    
-    // choices[0].delta.content.summary.text format (most common)
-    if (obj.choices && 
-        Array.isArray(obj.choices) && 
-        obj.choices.length > 0 && 
-        obj.choices[0]?.delta?.content?.summary?.text) {
-      return obj.choices[0].delta.content.summary.text;
-    }
-    
-    // Array format checking (more formats omitted for brevity)
-    
-    // Priority property names to check first
-    const textPropertyNames = [
-      'text', 'content', 'summary', 'thinking', 'reasoning',
-      'message', 'description', 'value', 'delta', 'choices'
-    ];
-    
-    // Check priority properties first
-    for (const propName of textPropertyNames) {
-      if (propName in obj) {
-        const result = this.findTextProperty(obj[propName], depth + 1);
-        if (result) {
-          return result;
-        }
-      }
-    }
-    
-    // Check all other properties if not found in priority props
-    // Array handling logic omitted for brevity
-  }
-  
-  return null;
+/**
+ * contentがオブジェクト型かどうかを判定する型ガード関数
+ */
+private static isContentObject(content: any): content is { summary?: { text?: string } } {
+  return typeof content === 'object' && content !== null;
 }
 ```
 
@@ -302,9 +175,8 @@ The `[object Object]` display problem occurs due to the interaction between Type
 1. **Flexible Type Definitions**: Enhanced `ThinkingChunk` interface to accommodate various data structures
 2. **Type Guard Functions**: Added `isContentObject()` type guard for safe type checking
 3. **Hierarchical Property Access**: Using optional chaining (`?.`) to safely extract text from all data formats
-4. **Recursive Property Exploration**: Using `findTextProperty` method to explore for text in deeply nested objects
-5. **Safe Stringification**: Using common utilities like `extractContentAsString` and `safeStringify` for safe stringification
-6. **Appropriate Fallbacks**: Providing explicit fallback text when text can't be extracted via any method
+4. **Safe Stringification**: Using common utilities like `extractContentAsString` and `safeStringify` for safe stringification
+5. **Appropriate Fallbacks**: Providing explicit fallback text when text can't be extracted via any method
 
 Similar measures are applied when logging thinking processes:
 
@@ -317,38 +189,24 @@ private static logThinkingProcess(thinkingMessage: ThinkingChatMessage): void {
   
   try {
     // Use extractContentAsString to safely extract content
-    const content = extractContentAsString(thinkingMessage.content) || "";
+    const contentAsString = extractContentAsString(thinkingMessage.content) || "";
     
     // Add safe type checking
-    if (content === undefined || content === null) {
+    if (contentAsString === undefined || contentAsString === null) {
       console.log('[Thinking Process] No data');
       return;
     }
     
-    // Ensure text content is properly extracted
-    let thinkingText = content;
-    
-    // If content is an object, attempt to extract text (avoid [object Object])
-    if (typeof content === 'object') {
-      // Process different format patterns
-      // Processing logic omitted for brevity
-      
-      // Use safeStringify as a last resort
-      thinkingText = safeStringify(content, "[Thinking...]");
-    }
-    
     // Truncate long thinking process for display
-    const truncatedThinking = thinkingText.length > 200 
-      ? thinkingText.substring(0, 200) + '...' 
-      : thinkingText;
+    const truncatedThinking = contentAsString.length > 200 
+      ? contentAsString.substring(0, 200) + '...' 
+      : contentAsString;
     
     // Log as simple text to prevent [object Object] display
     console.log('[Thinking Process]', truncatedThinking);
-    
-    // Additional signature logging omitted for brevity
   } catch (error) {
     // Skip logging errors to continue functionality
-    // Error handling omitted for brevity
+    console.log('[Thinking Process] データを処理中...');
   }
 }
 ```
@@ -356,12 +214,6 @@ private static logThinkingProcess(thinkingMessage: ThinkingChatMessage): void {
 For thinking mode to work correctly, appropriate parameters must be set in the request:
 
 ```typescript
-// For direct Anthropic API
-finalOptions.thinking = {
-  type: "enabled",
-  budget_tokens: thinkingBudgetTokens,
-};
-
 // For Databricks endpoint
 finalOptions.extra_body = {
   thinking: {
@@ -373,6 +225,34 @@ finalOptions.extra_body = {
 
 Note that thinking mode is only supported by Claude 3.7 Sonnet models.
 
+## Type Safety and Reduced Complexity
+
+With the May 2025 update, we've simplified thinking mode processing logic to focus exclusively on the `choices[0].delta.content.summary.text` format. This leads to several benefits:
+
+1. **Improved Type Safety**: By focusing on one specific format with well-defined type guards, we avoid TypeScript compilation errors
+2. **Reduced Complexity**: The simplified approach makes the code easier to understand and maintain
+3. **Better Error Resilience**: The focused approach is less prone to edge cases and error conditions
+4. **More Predictable Behavior**: By standardizing on one format, the behavior is more consistent
+
+### Type Guard Functions for Safe Property Access
+
+Using type guard functions is crucial for type-safe code:
+
+```typescript
+// Type guard for safely checking object properties
+private static isContentObject(content: any): content is { summary?: { text?: string } } {
+  return typeof content === 'object' && content !== null;
+}
+
+// Using type guard and in operator for safe property access
+if (this.isContentObject(content) && content.summary) {
+  // Now TypeScript knows content is an object with a potentially defined summary property
+  // ...
+}
+```
+
+By using proper type guards and carefully structured conditional checks, we ensure TypeScript correctly narrows types and prevents "Property does not exist on type 'never'" errors, which commonly happen when TypeScript loses track of an object's structure in complex conditionals.
+
 ## JSON Processing for Streaming Content
 
 When working with streaming JSON data, the implementation uses various techniques to handle partial or malformed JSON. For Databricks endpoints with Claude 3.7 Sonnet's thinking mode, additional complexity arises due to nested JSON structure. These issues are addressed with:
@@ -380,270 +260,6 @@ When working with streaming JSON data, the implementation uses various technique
 1. **JSON Buffer Management**: Accumulating JSON fragments to reconstruct complete objects
 2. **Delta-based JSON Processing**: Using `processJsonDelta` to incrementally build JSON objects
 3. **JSON Validation and Repair**: Techniques for validating and repairing malformed JSON
-
-```typescript
-// Building an accumulatng buffer 
-class JSONStreamParser {
-  private buffer = '';
-  
-  // Process chunks and try to extract complete JSON objects
-  processChunk(chunk: string): any[] {
-    this.buffer += chunk;
-    const results: any[] = [];
-    
-    // Look for multiple complete JSON objects
-    let startIdx = 0;
-    while (true) {
-      try {
-        const endIdx = this.findJsonEnd(this.buffer, startIdx);
-        if (endIdx === -1) break;
-        
-        const jsonStr = this.buffer.substring(startIdx, endIdx + 1);
-        const parsed = JSON.parse(jsonStr);
-        results.push(parsed);
-        
-        startIdx = endIdx + 1;
-      } catch (e) {
-        break; // Parsing error - wait for more data
-      }
-    }
-    
-    // Remove processed portions from buffer
-    if (startIdx > 0) {
-      this.buffer = this.buffer.substring(startIdx);
-    }
-    
-    return results;
-  }
-  
-  // Find end position of JSON object
-  private findJsonEnd(str: string, startPos: number): number {
-    // Implementation details for finding JSON object boundaries
-    // ...
-  }
-}
-```
-
-## Module Relationships and Coordination
-
-The Databricks integration consists of the main `Databricks.ts` class and multiple specialized modules in the `Databricks/` directory. This modularized design clearly separates responsibilities and maximizes the use of common utilities.
-
-### Architecture Overview
-
-The following diagram shows the relationships and dependencies between modules in the Databricks integration:
-
-```
-┌────────────────────────────────────────────────────────────────────┐
-│                        Continue Core Framework                      │
-│  ┌─────────────┐ ┌─────────────┐ ┌─────────────┐ ┌─────────────┐  │
-│  │   BaseLLM   │ │ LLMOptions  │ │ChatMessage  │ │stream.js    │  │
-│  └─────────────┘ └─────────────┘ └─────────────┘ └─────────────┘  │
-└────────────────────────────────────────────────────────────────────┘
-               ▲                    ▲                  ▲
-               │                    │                  │
-               │                    │                  │
-┌──────────────┼────────────────────┼──────────────────┼─────────────┐
-│              │                    │                  │             │
-│  ┌───────────┴────────────┐       │                  │             │
-│  │     Databricks.ts      │◄──────┘                  │             │
-│  │    (Orchestrator)      │◄─────────────────────────┘             │
-│  └───────────┬────────────┘                                        │
-│              │                                                     │
-│              ▼                                                     │
-│  ┌──────────────────────────────────────────────────────────┐      │
-│  │                        Module Layer                       │      │
-│  │ ┌─────────────┐ ┌─────────────┐ ┌─────────────┐          │      │
-│  │ │  config.ts  │ │  errors.ts  │ │ helpers.ts  │          │      │
-│  │ │Config Mgmt  │ │Error Handling│ │Helper Funcs │          │      │
-│  │ └─────────────┘ └─────────────┘ └─────────────┘          │      │
-│  │                                                           │      │
-│  │ ┌─────────────┐ ┌─────────────┐ ┌─────────────┐          │      │
-│  │ │ messages.ts │ │streaming.ts │ │ toolcalls.ts│          │      │
-│  │ │Msg Conversion│ │Stream Process│ │Tool Calling │          │      │
-│  │ └─────────────┘ └─────────────┘ └─────────────┘          │      │
-│  └──────────────────────────────────────────────────────────┘      │
-│                              ▲                                      │
-│                              │                                      │
-│  ┌──────────────────────────────────────────────────────────┐      │
-│  │                       Type Definition Layer               │      │
-│  │ ┌─────────────────┐ ┌─────────────────┐ ┌───────────────┐ │      │
-│  │ │    types.ts     │ │  extension.d.ts  │ │   index.ts    │ │      │
-│  │ │                 │ │                  │ │               │ │      │
-│  │ └─────────────────┘ └─────────────────┘ └───────────────┘ │      │
-│  └──────────────────────────────────────────────────────────┘      │
-│                                                                     │
-└─────────────────────────────────────────────────────────────────────┘
-                              ▲
-                              │
-┌─────────────────────────────┼─────────────────────────────────────┐
-│                             │                                     │
-│  ┌──────────────────────────────────────────────────────────┐     │
-│  │                  Common Utilities                         │     │
-│  │ ┌─────────────┐ ┌─────────────┐ ┌─────────────┐          │     │
-│  │ │  errors.js  │ │   json.js   │ │messageUtils │          │     │
-│  │ │             │ │             │ │     .js      │          │     │
-│  │ └─────────────┘ └─────────────┘ └─────────────┘          │     │
-│  │                                                           │     │
-│  │ ┌─────────────┐ ┌─────────────┐ ┌─────────────┐          │     │
-│  │ │streamProcess│ │   sseProces │ │ toolUtils.js│          │     │
-│  │ │    ing.js   │ │    sing.js  │ │             │          │     │
-│  │ └─────────────┘ └─────────────┘ └─────────────┘          │     │
-│  └──────────────────────────────────────────────────────────┘     │
-│                                                                    │
-└────────────────────────────────────────────────────────────────────┘
-```
-
-### Module Structure Based on the Orchestrator Pattern
-
-```
-core/
-├── index.js                   (Basic type definitions: ChatMessage, CompletionOptions, LLMOptions etc.)
-├── util/
-│   └── messageContent.js      (Chat message rendering functions)
-└── llm/
-    ├── index.js               (BaseLLM class - base class for all LLM implementations)
-    ├── stream.js              (streamSse function - streaming response processing)
-    ├── types/                 (Common type definition extensions - ensuring proper type safety)
-    │   └── databricks-extensions.d.ts (Extension types for Databricks)
-    ├── utils/                 (Common utility functions)
-    │   ├── errors.js          (Error handling - provides getErrorMessage, isConnectionError)
-    │   ├── json.js            (JSON processing - provides processJsonDelta and other functions)
-    │   ├── messageUtils.js    (Message processing - provides extractContentAsString and other functions)
-    │   └── toolUtils.js       (Tool processing - provides repairToolArguments and other functions)
-    ├── llms/
-    │   ├── Databricks.ts       (Orchestrator - integrates and coordinates all modules)
-    │   └── Databricks/
-    │       ├── config.ts       (Configuration management - handles API connection info and timeout settings)
-    │       ├── errors.ts       (Error handling - dedicated error handling and retry logic)
-    │       ├── helpers.ts      (Helper functions - request parameter construction and initialization)
-    │       ├── messages.ts     (Message conversion - standardized message formatting)
-    │       ├── streaming.ts    (Stream processing - handling streaming responses)
-    │       ├── toolcalls.ts    (Tool call processing - handling tool invocations)
-    │       └── types/          (Type definitions - interfaces and types)
-    │           ├── index.ts        (Type definition entry point - exports all types)
-    │           └── extension.d.ts  (Type extension definitions - extends core types with Databricks-specific requirements)
-```
-
-### Clear Module Responsibilities
-
-**1. `Databricks.ts` - Orchestrator**
-- Inherits BaseLLM, implements public API
-- Coordinates specialized modules
-- Routes requests
-- High-level error handling
-- Delegates responsibilities to appropriate modules
-- Manages tool call control settings
-- Coordinates communication between modules
-- Controls overall flow and execution order
-- Implements top-level APIs (_streamChat, _streamComplete)
-- Manages streaming process lifecycle
-- **New Feature**: `getApiEndpoint()` method for unified API request management
-
-**2. `config.ts` - Configuration Management**
-- Loads and validates API configuration
-- Normalizes URLs
-- Handles timeout settings
-- Implements validation logic
-- Reads configuration values from settings
-- Centralizes environment settings
-- Normalizes and validates API endpoints
-- Sets up and manages timeout controllers
-- **New Feature**: `getFullApiEndpoint()` method for complete API endpoint URL
-
-**3. `errors.ts` - Error Handling**
-- Databricks-specific error handling
-- Parses error responses
-- Implements retry logic
-- Handles connection errors and timeouts
-- Provides state-preserving retry mechanisms
-- Detects transient errors and auto-recovery
-- Type-safe error handling interfaces
-- Provides generic retry utilities
-- Configures and executes retry strategies
-- Collects and analyzes error statistics
-
-**4. `helpers.ts` - Helper Functions**
-- Constructs request parameters
-- Initializes streaming state
-- Manages common constants and initial values
-- Provides utility functions
-- Converts to OpenAI-compatible format
-- Processes non-streaming responses
-- Validates JSON validity
-- Processes content deltas
-- Logs request bodies
-- Detects text block completion
-- **New Feature**: Claude 3.7 model auto-detection and dedicated configuration
-- **Improvement**: Enhanced error logging and debugging
-- **Update**: Type-safe content processing using common utilities
-- **Addition**: Proper type definition and handling for `thinking` property
-- **New Feature**: `processThinkingSummary()` method for thinking data extraction
-- **New Feature**: `removeUnsupportedParameters()` for removing unnecessary parameters
-
-**5. `messages.ts` - Message Conversion**
-- Converts standard message formats
-- Handles Claude 3.7 Sonnet-specific message processing
-- Processes system and user messages
-- Integrates thinking process messages
-- Databricks-specific message preprocessing
-- Handles composite content (text + images)
-- Converts message formats (Continue → OpenAI format)
-- Sanitizes and standardizes messages
-- Detects and handles Japanese content
-- Processes and validates empty messages
-- **New Feature**: `processSystemMessage()` method for dedicated system message processing
-
-**6. `streaming.ts` - Stream Processing**
-- Processes streaming responses
-- Handles thinking process streaming
-- Accumulates JSON fragments
-- Processes streaming tool calls
-- Recovers from connection errors
-- Uses common utilities for JSON delta-based processing
-- Efficiently handles partial JSON
-- Clearly separates responsibilities with modularized methods
-- Implements clear state management and reconnection mechanisms
-- Leverages common `processContentDelta` and `processJsonDelta` for consistent processing
-- Properly handles message content types using `extractContentAsString` for type-safe handling
-- Persists and restores state
-- Handles reconnection
-- Finalizes stream processing and cleanup
-- **Improvement**: Proper handling of multiple thinking mode data formats
-- **New Feature**: `findTextProperty()` for recursive text property exploration
-- **New Feature**: Enhanced thinking data format detection
-- **Update**: Hierarchical priority processing in `processThinkingChunk()` method
-- **Fix**: Type-safe handling of object property access to prevent TypeScript errors
-
-**7. `toolcalls.ts` - Tool Call Processing**
-- Processes and standardizes tool calls
-- Handles and repairs tool call arguments
-- Integrates tool results
-- Provides special handling for search tools
-- Preprocesses messages after tool calls
-- Uses common utilities for JSON delta-based tool argument processing
-- Detects and repairs duplicated JSON patterns
-- Pre- and post-processes tool calls and results
-- Delta-processes and accumulates tool arguments
-- Leverages common utility `repairToolArguments` for tool argument repair
-- Implements interfaces for clear responsibility boundaries
-
-**8. `types/` - Type Definitions**
-- Defines strict type interfaces
-- Supports type-safe code
-- Extends common type definitions
-- Enhances JSON processing-related type definitions
-- Provides error handling-related type definitions
-- Ensures type consistency and interoperability
-- Standardizes type interfaces between modules
-- Provides type assertions and guards
-- Extends standard library types
-- Supports type-safe error handling
-- Provides module interface types for clear responsibility separation
-- Defines explicit types for method declarations
-- Enhances return type safety
-- **Improvement**: Expanded and flexible `ThinkingChunk` interface
-- **Addition**: Type definitions supporting multiple formats for thinking mode
-- **Update**: Extended `ResponseDelta` to support object-format content
 
 ## Configuration
 
@@ -739,39 +355,6 @@ const thinking = response?.choices?.[0]?.thinking ?? '';
 const content = response?.choices?.[0]?.message?.content ?? 'No response content';
 ```
 
-### 3. Zod for Runtime Validation
-
-For complex response structures, validation libraries like Zod are effective:
-
-```typescript
-import { z } from 'zod';
-
-// Define Claude response schema
-const ClaudeResponseSchema = z.object({
-  choices: z.array(
-    z.object({
-      message: z.object({
-        content: z.string().optional()
-      }).optional(),
-      thinking: z.string().optional()
-    })
-  ).nonempty()
-});
-
-async function getValidatedCompletion() {
-  const response = await api.fetchCompletion();
-  
-  // Validate and get strongly typed data
-  const validated = ClaudeResponseSchema.parse(response);
-  
-  // Safe access - Zod guarantees structure
-  return {
-    thinking: validated.choices[0]?.thinking || '',
-    content: validated.choices[0]?.message?.content || ''
-  };
-}
-```
-
 ## Troubleshooting
 
 ### If parallel_tool_calls Errors Occur
@@ -808,7 +391,7 @@ See the "Debugging and Logging Best Practices" section for details.
 For thinking data processing issues, also check:
 
 1. **Proper Thinking Data Format Detection**: Whether `StreamingProcessor.processChunk` method correctly detects thinking data
-2. **Appropriate Thinking Data Extraction**: Whether `processThinkingChunk` method properly extracts text
+2. **Appropriate Thinking Data Extraction**: Whether thinking data is properly extracted
 3. **Thinking Data Format**: Check the actual thinking data format returned from the Databricks endpoint (check console logs)
 
 ### Type Definition Issues
@@ -820,52 +403,16 @@ If TypeScript compilation errors occur, check:
 3. **ContentObject Pattern**: Use the `isContentObject` type guard for safely checking object properties
 4. **Content Extraction**: Use `extractContentAsString` to safely handle `MessageContent` type, which can be string or object
 
-### Fixed TypeScript Errors with Type Guards
-
-The TypeScript errors in `streaming.ts` have been resolved by implementing proper type guards and hierarchical property access:
-
-```typescript
-// Type guard for safely checking object properties
-private static isContentObject(content: any): content is { summary?: { text?: string } } {
-  return typeof content === 'object' && content !== null;
-}
-
-// Using type guard and in operator for safe property access
-if (this.isContentObject(content) && (content.summary !== undefined || 'summary' in content)) {
-  // Now TypeScript knows content is an object with a potentially defined summary property
-  const thinkingData: ThinkingChunk = {
-    content: {
-      summary: content.summary
-    }
-  };
-  
-  // Safe access with properly typed objects
-  thinkingData.choices = [{
-    delta: {
-      content: {
-        summary: content.summary
-      }
-    }
-  }];
-  
-  const thinkingMessage = this.processThinkingChunk(thinkingData);
-  // ...
-}
-```
-
-By using proper type guards and carefully structured conditional checks, we can ensure TypeScript correctly narrows types and prevents "Property does not exist on type 'never'" errors, which commonly happen when TypeScript loses track of an object's structure in complex conditionals.
-
 ## Future Improvement Plans
 
 1. **Performance Optimization**: Further optimize request processing and response parsing performance
 2. **Improved Buffer Management**: More efficient JSON buffer management for improved stability in large streaming
 3. **Enhanced Context Management**: Improved context management considering token limits
 4. **Increased Type Safety**: Stricter type definitions and checks for improved safety
-5. **Improved Parallel Processing**: Optimized resource sharing between multiple requests
-6. **Enhanced Error Handling**: More detailed error analysis and automatic recovery
-7. **Documentation Improvements**: Enhanced user documentation and in-code comments
-8. **Support for New Features**: Support for future Claude 3.7/3.8 features
-9. **Performance Metrics Collection**: Detailed performance measurement and metrics collection for optimization
-10. **Expanded Automated Testing**: More comprehensive automated testing for quality assurance
+5. **Enhanced Error Handling**: More detailed error analysis and automatic recovery
+6. **Documentation Improvements**: Enhanced user documentation and in-code comments
+7. **Support for New Features**: Support for future Claude 3.7/3.8 features
+8. **Performance Metrics Collection**: Detailed performance measurement and metrics collection for optimization
+9. **Expanded Automated Testing**: More comprehensive automated testing for quality assurance
 
-This modularized architecture significantly improves the extension's stability and maintainability, making it easier to adapt to future API changes. The May 2025 improvements have resolved URL routing issues, improved type safety and common utility usage. Most importantly, Claude 3.7 Sonnet's thinking mode is now correctly processed with robust support for various data formats and the [object Object] issue has been resolved.
+This modularized architecture significantly improves the extension's stability and maintainability, making it easier to adapt to future API changes. The May 2025 improvements have resolved URL routing issues, improved type safety and common utility usage. Most importantly, Claude 3.7 Sonnet's thinking mode is now correctly processed with a more focused approach to handling the `choices[0].delta.content.summary.text` format, eliminating the previous [object Object] display issues.
