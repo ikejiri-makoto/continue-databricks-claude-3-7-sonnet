@@ -6,6 +6,8 @@ This directory contains the type definitions used in the Databricks LLM integrat
 
 **IMPORTANT**: Databricks endpoints do not support the `parallel_tool_calls` parameter. This parameter has been intentionally excluded from the Databricks type definitions, and using it will cause errors.
 
+**IMPORTANT**: Databricks endpoints also do not support the `extra_body` parameter. Parameters must be placed at the root level of the request. Our implementation handles this by extracting contents from `extra_body` and placing them at the root level using type assertion.
+
 ## Directory Structure
 
 ```
@@ -622,6 +624,24 @@ interface LLMOptions {
 
 This change prevents type errors during use and improves code safety.
 
+### 6. Handling for Parameters Not Defined in Type Definitions
+
+For some parameters like `extra_body` that are needed for compatibility but aren't officially supported by Databricks endpoints, we use type assertion in the implementation:
+
+```typescript
+// Type-safe access to extra_body using type assertion
+const optionsAny = options as any;
+      
+// Extract thinking mode parameters from extra_body, if present
+if (optionsAny.extra_body && 
+    typeof optionsAny.extra_body === 'object' && 
+    optionsAny.extra_body.thinking) {
+  args.thinking = optionsAny.extra_body.thinking;
+}
+```
+
+This approach allows us to maintain type safety while still supporting the required functionality.
+
 ## Type Safety Best Practices
 
 Type safety best practices adopted in the Databricks integration:
@@ -672,6 +692,18 @@ private static isContentObject(content: any): content is { summary?: { text?: st
 }
 ```
 
+### 5. Using Type Assertion
+
+Type assertion is used when accessing properties not defined in the type definitions:
+
+```typescript
+// Type assertion to safely access extra_body property
+const optionsAny = options as any;
+if (optionsAny.extra_body) {
+  // ...
+}
+```
+
 ## Troubleshooting Type Errors
 
 Common type errors and their solutions:
@@ -709,6 +741,18 @@ import { extractContentAsString } from "../../utils/messageUtils.js";
 
 // Correct approach
 const contentAsString = extractContentAsString(message.content);
+```
+
+### 4. `Property 'extra_body' does not exist on type 'CompletionOptions'`
+
+This error occurs when trying to access the `extra_body` property which isn't defined in the `CompletionOptions` interface. The solution is to use type assertion:
+
+```typescript
+// Type assertion to access extra_body property
+const optionsAny = options as any;
+if (optionsAny.extra_body) {
+  // ...
+}
 ```
 
 ## Future Type Definition Enhancements

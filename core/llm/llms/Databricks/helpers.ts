@@ -62,11 +62,15 @@ export class DatabricksHelpers {
       
       console.log(`Token settings - max_tokens: ${args.max_tokens}, thinking budget: ${thinkingBudgetTokens}`);
       
+      // 型安全に処理するために型アサーションを使用
+      // options を any型として扱い、extra_bodyプロパティにアクセス
+      const optionsAny = options as any;
+      
       // 重要: extra_bodyから思考モードパラメータを抽出してトップレベルに配置
-      if (options.extra_body && typeof options.extra_body === 'object' && options.extra_body.thinking) {
+      if (optionsAny.extra_body && typeof optionsAny.extra_body === 'object' && optionsAny.extra_body.thinking) {
         // extra_bodyから直接thinking設定を抽出
         console.log('思考モードパラメータをextra_bodyから抽出してルートに配置します');
-        args.thinking = options.extra_body.thinking;
+        args.thinking = optionsAny.extra_body.thinking;
       } else {
         // デフォルトの思考モード設定
         args.thinking = {
@@ -115,7 +119,7 @@ export class DatabricksHelpers {
       delete args.reasoning;
     }
     
-    // extra_bodyの内容を適切に処理 - extra_bodyをそのまま削除せず、その内容を処理する
+    // 型アサーションを使用してextra_bodyにアクセス
     if ('extra_body' in args && typeof args.extra_body === 'object') {
       console.log('extra_bodyが検出されました - 内容を処理します');
       
