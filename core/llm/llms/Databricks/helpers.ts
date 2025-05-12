@@ -74,6 +74,7 @@ export class DatabricksHelpers {
           budget_tokens: thinkingBudgetTokens
         };
       }
+    }
     
     // ツール設定の処理
     if (options.tools && Array.isArray(options.tools) && options.tools.length > 0) {
