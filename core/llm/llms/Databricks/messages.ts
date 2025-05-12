@@ -126,16 +126,9 @@ export class MessageProcessor {
    */
   static convertToOpenAIFormat(messages: ChatMessage[], preprocessedMessages: ChatMessage[]): any[] {
     // メッセージをOpenAI形式に変換（システムメッセージを除く）
-    // 思考メッセージは特別な形式で追加
     const convertedMessages: any[] = [];
     
-    // 過去の思考メッセージを最初に配置
-    const thinkingMessages = preprocessedMessages.filter(m => m.role === "thinking");
-    for (const thinkingMsg of thinkingMessages) {
-      convertedMessages.push(this.convertThinkingMessageToOpenAIFormat(thinkingMsg));
-    }
-    
-    // 続けて通常のメッセージを配置
+    // 通常のメッセージを配置（thinking メッセージは除外）
     const regularMessages = preprocessedMessages.filter(m => m.role !== "system" && m.role !== "thinking");
     for (const msg of regularMessages) {
       convertedMessages.push(this.convertMessageToOpenAIFormat(msg, preprocessedMessages));
@@ -202,37 +195,31 @@ export class MessageProcessor {
       case "assistant":
         return this.convertAssistantMessageToOpenAIFormat(message, allMessages);
       case "thinking":
-        return this.convertThinkingMessageToOpenAIFormat(message);
+        // Databricksエンドポイントは thinking メッセージを直接サポートしていないため、
+        // 通常のメッセージ変換処理で対応
+        return this.convertThinkingToPlainFormat(message);
       default:
         return this.convertUserMessageToOpenAIFormat(message);
     }
   }
 
   /**
-   * 思考メッセージをOpenAI形式（Claude互換形式）に変換
+   * 思考メッセージを通常メッセージとして変換
+   * Databricksは思考モードのメッセージを直接サポートしていないため、内容を変更
    * 
    * @param message 思考メッセージ
-   * @returns OpenAI形式に変換された思考メッセージ
+   * @returns 通常メッセージとして変換されたメッセージ
    */
-  private static convertThinkingMessageToOpenAIFormat(message: ThinkingChatMessage): any {
+  private static convertThinkingToPlainFormat(message: ThinkingChatMessage): any {
     // 思考コンテンツを抽出
     const thinkingContent = typeof message.content === "string" 
       ? message.content 
       : safeStringify(message.content, "");
     
-    // 署名情報を取得
-    const signature = (message as any).signature;
-    
-    // 思考モードが有効な場合、思考ブロックを持つメッセージ形式で返す
+    // 通常のアシスタントメッセージとして返す（Databricksの互換性のため）
     return {
       role: "assistant",
-      content: [
-        {
-          type: "thinking",
-          thinking: thinkingContent,
-          ...(signature ? { signature } : {})
-        }
-      ]
+      content: `[思考プロセス] ${thinkingContent}`
     };
   }
 
@@ -255,7 +242,7 @@ export class MessageProcessor {
 
   /**
    * アシスタントメッセージをOpenAI形式に変換
-   * Claude 3.7の思考モードに対応した形式に変換する
+   * Databricksエンドポイントの互換性を確保するために単純な形式にする
    * 
    * @param message アシスタントメッセージ
    * @param allMessages すべてのメッセージ配列（コンテキスト用）
@@ -266,42 +253,20 @@ export class MessageProcessor {
     if (this.messageHasToolCalls(message)) {
       const msgAny = message as any;
       
-      // 重要: ツール呼び出しの場合、思考モードのメッセージも付与する
-      // thinkingブロックが必要なため、コンテンツをnullではなく思考ブロック配列にする
+      // 単純な形式でアシスタントメッセージを作成（Databricksとの互換性のため）
       return {
         role: "assistant",
-        content: [
-          {
-            type: "thinking",
-            thinking: "Preparing to use tools to help with this request"
-          }
-        ],
+        content: extractContentAsString(message.content),
         tool_calls: msgAny.toolCalls.map((toolCall: any) => 
           this.convertToolCallToOpenAIFormat(toolCall, allMessages)
         )
       };
     }
     
-    // 記録: ログのエラーメッセージから判断
-    // "Expected `thinking` or `redacted_thinking`, but found `text`. When `thinking` is enabled"
-    // 思考モードが有効な場合、コンテンツの最初の要素は必ず thinking タイプである必要がある
-    
-    // 通常のアシスタントメッセージ
-    // Claude 3.7の思考モードでは、thinkingタイプのコンテンツを最初に含める必要がある
-    const contentStr = extractContentAsString(message.content);
-    
+    // 通常のアシスタントメッセージ - Databricksとの互換性を確保するために単純な形式で返す
     return {
       role: "assistant",
-      content: [
-        {
-          type: "thinking",
-          thinking: "Processing your request"
-        },
-        {
-          type: "text",
-          text: contentStr
-        }
-      ]
+      content: extractContentAsString(message.content)
     };
   }
 

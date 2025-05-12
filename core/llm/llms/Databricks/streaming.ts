@@ -1,4 +1,11 @@
-import { ChatMessage, ThinkingChatMessage, ToolCallDelta as CoreToolCallDelta } from "../../../index.js";
+  /**
+   * オブジェクトとしてのコンテンツかどうかを確認するタイプガード
+   * @param content チェックする対象
+   * @returns オブジェクトの場合true
+   */
+  private static isContentObject(content: any): content is { summary?: { text?: string } } {
+    return typeof content === 'object' && content !== null;
+  }import { ChatMessage, ThinkingChatMessage, ToolCallDelta as CoreToolCallDelta } from "../../../index.js";
 import { DatabricksHelpers } from "./helpers.js";
 import { 
   ThinkingChunk, 
@@ -169,70 +176,164 @@ export class StreamingProcessor {
    * @returns 抽出した思考テキストとシグネチャ、または null
    */
   private static extractThinkingData(chunk: StreamingChunk): { text: string; signature?: string } | null {
-    if (!chunk?.choices?.[0]?.delta?.content) {
+    // デバッグログ（開発モード時のみ）
+    if (process.env.NODE_ENV === 'development') {
+      console.log(`思考データ抽出: チャンク構造: ${safeStringify(chunk, "<不明なチャンク>")}`); 
+    }
+
+    // 基本チェック - choices配列が存在しない場合
+    if (!chunk?.choices || !Array.isArray(chunk.choices) || chunk.choices.length === 0) {
       return null;
     }
     
-    // content が配列の場合
-    const content = chunk.choices[0].delta.content;
-    
-    if (Array.isArray(content) && content.length > 0) {
-      const firstContent = content[0];
+    // 思考データの抽出パスを確認
+    // パス1: choices[0].delta.content[0].summary[0].text
+    if (chunk.choices[0]?.delta?.content) {
+      const content = chunk.choices[0].delta.content;
       
-      // type が "reasoning" で summary が配列の場合
-      if (typeof firstContent === 'object' && 
-          firstContent !== null && 
-          firstContent.type === "reasoning" && 
-          Array.isArray(firstContent.summary) && 
-          firstContent.summary.length > 0) {
+      // 配列形式のcontent - 最も一般的な形式
+      if (Array.isArray(content) && content.length > 0) {
+        const firstContent = content[0];
         
-        const summaryItem = firstContent.summary[0];
-        
-        // type が "summary_text" でテキストが存在する場合
-        if (typeof summaryItem === 'object' && 
-            summaryItem !== null && 
-            summaryItem.type === "summary_text" && 
-            typeof summaryItem.text === 'string') {
+        // type が "reasoning" で summary が配列の場合
+        if (typeof firstContent === 'object' && 
+            firstContent !== null && 
+            firstContent.type === "reasoning" && 
+            Array.isArray(firstContent.summary) && 
+            firstContent.summary.length > 0) {
           
-          return {
-            text: summaryItem.text,
-            signature: summaryItem.signature || undefined
-          };
-        }
-      }
-    }
-    
-    // フォールバック: non-array content 対応
-    if (typeof content === 'object' && 
-        content !== null && 
-        !Array.isArray(content)) {
-      
-      // summary が配列の場合（非配列 content with 配列 summary）
-      if (Array.isArray(content.summary) && content.summary.length > 0) {
-        const summaryItem = content.summary[0];
-        
-        if (typeof summaryItem === 'object' && 
-            summaryItem !== null && 
-            typeof summaryItem.text === 'string') {
+          const summaryItem = firstContent.summary[0];
           
-          return {
-            text: summaryItem.text,
-            signature: summaryItem.signature || undefined
-          };
+          // type が "summary_text" でテキストが存在する場合
+          if (typeof summaryItem === 'object' && 
+              summaryItem !== null && 
+              summaryItem.type === "summary_text" && 
+              typeof summaryItem.text === 'string') {
+            
+            console.log(`思考データを抽出しました: パス = choices[0].delta.content[0].summary[0].text`);
+            return {
+              text: summaryItem.text,
+              signature: summaryItem.signature || undefined
+            };
+          }
         }
       } 
-      // summary がオブジェクトの場合（非配列 content with 非配列 summary）
-      else if (typeof content.summary === 'object' && 
-               content.summary !== null && 
-               typeof content.summary.text === 'string') {
-        
-        return {
-          text: content.summary.text,
-          signature: chunk.choices[0].delta.signature || undefined
-        };
+      // オブジェクト形式のcontent
+      else if (typeof content === 'object' && content !== null) {
+        // summary が配列の場合
+        if (Array.isArray(content.summary) && content.summary.length > 0) {
+          const summaryItem = content.summary[0];
+          
+          if (typeof summaryItem === 'object' && 
+              summaryItem !== null && 
+              typeof summaryItem.text === 'string') {
+            
+            console.log(`思考データを抽出しました: パス = choices[0].delta.content.summary[0].text`);
+            return {
+              text: summaryItem.text,
+              signature: summaryItem.signature || undefined
+            };
+          }
+        } 
+        // summary がオブジェクトの場合
+        else if (typeof content.summary === 'object' && 
+                content.summary !== null && 
+                typeof content.summary.text === 'string') {
+          
+          console.log(`思考データを抽出しました: パス = choices[0].delta.content.summary.text`);
+          return {
+            text: content.summary.text,
+            signature: chunk.choices[0].delta.signature || undefined
+          };
+        }
       }
     }
     
+    // パス2: choices[0].message.content[0].summary[0].text（非ストリーミングレスポンス形式）
+    if (chunk.choices[0]?.message?.content) {
+      const content = chunk.choices[0].message.content;
+      
+      // 配列形式のcontent
+      if (Array.isArray(content) && content.length > 0) {
+        const firstContent = content[0];
+        
+        if (typeof firstContent === 'object' && 
+            firstContent !== null && 
+            firstContent.type === "reasoning" && 
+            Array.isArray(firstContent.summary) && 
+            firstContent.summary.length > 0) {
+          
+          const summaryItem = firstContent.summary[0];
+          
+          if (typeof summaryItem === 'object' && 
+              summaryItem !== null && 
+              summaryItem.type === "summary_text" && 
+              typeof summaryItem.text === 'string') {
+            
+            console.log(`思考データを抽出しました: パス = choices[0].message.content[0].summary[0].text`);
+            return {
+              text: summaryItem.text,
+              signature: summaryItem.signature || undefined
+            };
+          }
+        }
+      }
+    }
+
+    // パス3: choices[0].delta.reasoning（代替形式）
+    if (chunk.choices[0]?.delta?.reasoning) {
+      const reasoning = chunk.choices[0].delta.reasoning;
+      
+      // reasoningが文字列の場合
+      if (typeof reasoning === 'string') {
+        console.log(`思考データを抽出しました: パス = choices[0].delta.reasoning (string)`);
+        return {
+          text: reasoning
+        };
+      }
+      
+      // reasoningがオブジェクトの場合
+      if (typeof reasoning === 'object' && reasoning !== null) {
+        // text プロパティがある場合
+        if (typeof reasoning.text === 'string') {
+          console.log(`思考データを抽出しました: パス = choices[0].delta.reasoning.text`);
+          return {
+            text: reasoning.text,
+            signature: reasoning.signature || undefined
+          };
+        }
+        
+        // summary.text プロパティがある場合
+        if (typeof reasoning.summary?.text === 'string') {
+          console.log(`思考データを抽出しました: パス = choices[0].delta.reasoning.summary.text`);
+          return {
+            text: reasoning.summary.text,
+            signature: reasoning.signature || undefined
+          };
+        }
+      }
+    }
+    
+    // 代替パス - 直接のコンテンツパス
+    // パス4: content.summary.text（フラットな形式）
+    if (chunk.content?.summary?.text && typeof chunk.content.summary.text === 'string') {
+      console.log(`思考データを抽出しました: パス = content.summary.text`);
+      return {
+        text: chunk.content.summary.text,
+        signature: chunk.signature || undefined
+      };
+    }
+    
+    // パス5: summary.text（フラットな形式）
+    if (chunk.summary?.text && typeof chunk.summary.text === 'string') {
+      console.log(`思考データを抽出しました: パス = summary.text`);
+      return {
+        text: chunk.summary.text,
+        signature: chunk.signature || undefined
+      };
+    }
+    
+    // 思考データが見つからない場合
     return null;
   }
 

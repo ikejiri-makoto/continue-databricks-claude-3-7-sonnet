@@ -2,14 +2,11 @@
 
 This directory contains the implementation for connecting Continue VS Code extension to Databricks LLM services, particularly Claude 3.7 Sonnet. It enables access to Databricks-hosted models for code completion, explanation, refactoring, and other features within the Continue extension.
 
-## Response Format Structure
-The Databricks Claude 3.7 Sonnet response structure follows this hierarchy:
-
+Toolを使う場合のdatabricks-claude-3-7-sonnetへのリクエストとレスポンス形式は以下の階層になります。
 === REQUEST ===
 URL: https://adb-1981899174914086.6.azuredatabricks.net/serving-endpoints/chat/completions
 Method: POST
 Request Body:
-```json
 {
   "messages": [
     {
@@ -58,10 +55,9 @@ Request Body:
   ],
   "tool_choice": "auto"
 }
-```
+
 
 === RESPONSE ===
-```json
 {
   "id": "msg_bdrk_01LYsYW3RFFdEPVAUedC8u9Z",
   "choices": [
@@ -117,7 +113,77 @@ Request Body:
     "prompt_tokens_details": null
   }
 }
-```
+
+
+
+Toolを使わない場合のdatabricks-claude-3-7-sonnetへのリクエストとレスポンス形式は以下の階層になります。
+=== REQUEST ===
+{
+  "messages": [
+    {
+      "role": "system",
+      "content": "\u3042\u306a\u305f\u306f\u5f79\u7acb\u3064AI\u30a2\u30b7\u30b9\u30bf\u30f3\u30c8\u3067\u3059\u3002"
+    },
+    {
+      "role": "user",
+      "content": "\u6771\u4eac\u306e\u73fe\u5728\u306e\u5929\u6c17\u3092\u6559\u3048\u3066\u304f\u3060\u3055\u3044\u3002"
+    }
+  ],
+  "model": "databricks-claude-3-7-sonnet",
+  "max_tokens": 20480,
+  "thinking": {
+    "type": "enabled",
+    "budget_tokens": 10240
+  }
+}
+
+=== RESPONSE ===
+{
+  "id": "msg_bdrk_011G6sGXuygHpvP1Pwq8zwyp",
+  "choices": [
+    {
+      "finish_reason": "stop",
+      "index": 0,
+      "logprobs": null,
+      "message": {
+        "content": [
+          {
+            "type": "reasoning",
+            "summary": [
+              {
+                "type": "summary_text",
+                "text": "東京の現在の天気を答えるには、リアルタイムの気象情報にアクセスする必要があります。しかし、私はAIアシスタントとして常にインターネットに接続しているわけではなく、リアルタイムデータにアクセスできません。また、私の知識は学習データの範囲内に限られており、定期的に更新されるものではありません。\n\nしたがって、正確な「現在の」東京の天気を伝えることはできません。この場合、以下のように回答するのが適切です：\n1. 正確な現在の天気情報を提供できないことを伝える\n2. 天気情報を確認する方法を提案する",
+                "signature": "ErcBCkgIAxABGAIiQH1PzxtdFBdW6n/eiplr6ycZyzatn07G1634e6XJ562qt//N6XRNwADSLVsVvXlCmCLX/7id/8yt3B5f08I4okISDP2Pdt0cwPwb+iWdbRoMkrLVt4SHAdT9qbtBIjB4yNthPg3idwLVsoJzKCUcpTzdzVt5obZop8yK8CWs3JH60xD4vsHhSZmjWN58c+YqHW79NuybO34ovy/Xu4rNJkvC0bvqWmO1PlG8YPAN"
+              }
+            ]
+          },
+          {
+            "type": "text",
+            "text": "申し訳ありませんが、私はリアルタイムのインターネット接続や最新の気象データにアクセスすることができないため、東京の現在の正確な天気をお伝えすることができません。\n\n現在の天気を確認するには、以下の方法をお試しください：\n- 天気予報アプリをご確認ください\n- 天気予報のウェブサイト（気象庁やWeather News等）を参照してください\n- スマートフォンの天気アプリをご利用ください\n- テレビやラジオの天気情報をご確認ください\n\nお役に立てず申し訳ありません。他にお手伝いできることがあればお知らせください。"
+          }
+        ],
+        "refusal": null,
+        "role": "assistant",
+        "annotations": null,
+        "audio": null,
+        "function_call": null,
+        "tool_calls": null
+      }
+    }
+  ],
+  "created": 1747070352,
+  "model": "us.anthropic.claude-3-7-sonnet-20250219-v1:0",
+  "object": "chat.completion",
+  "service_tier": null,
+  "system_fingerprint": null,
+  "usage": {
+    "completion_tokens": 421,
+    "prompt_tokens": 67,
+    "total_tokens": 488,
+    "completion_tokens_details": null,
+    "prompt_tokens_details": null
+  }
+}
 
 ### Streaming Response Format for Thinking Mode
 
