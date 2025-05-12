@@ -1,11 +1,4 @@
-  /**
-   * オブジェクトとしてのコンテンツかどうかを確認するタイプガード
-   * @param content チェックする対象
-   * @returns オブジェクトの場合true
-   */
-  private static isContentObject(content: any): content is { summary?: { text?: string } } {
-    return typeof content === 'object' && content !== null;
-  }import { ChatMessage, ThinkingChatMessage, ToolCallDelta as CoreToolCallDelta } from "../../../index.js";
+import { ChatMessage, ThinkingChatMessage, ToolCallDelta as CoreToolCallDelta } from "../../../index.js";
 import { DatabricksHelpers } from "./helpers.js";
 import { 
   ThinkingChunk, 
@@ -73,6 +66,15 @@ export class StreamingProcessor {
   // 状態更新のループ検出用カウンター
   private static stateUpdateCounter = 0;
   private static lastStateUpdateTime = 0;
+
+  /**
+   * オブジェクトとしてのコンテンツかどうかを確認するタイプガード
+   * @param content チェックする対象
+   * @returns オブジェクトの場合true
+   */
+  private static isContentObject(content: any): content is { summary?: { text?: string } } {
+    return typeof content === 'object' && content !== null;
+  }
 
   /**
    * ツール呼び出しを出力用に処理するヘルパー関数
@@ -316,7 +318,8 @@ export class StreamingProcessor {
     
     // 代替パス - 直接のコンテンツパス
     // パス4: content.summary.text（フラットな形式）
-    if (chunk.content?.summary?.text && typeof chunk.content.summary.text === 'string') {
+    if (chunk.content && this.isContentObject(chunk.content) && 
+        chunk.content.summary?.text && typeof chunk.content.summary.text === 'string') {
       console.log(`思考データを抽出しました: パス = content.summary.text`);
       return {
         text: chunk.content.summary.text,
