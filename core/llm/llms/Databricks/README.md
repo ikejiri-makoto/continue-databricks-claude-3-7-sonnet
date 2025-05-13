@@ -11,6 +11,28 @@ https://adb-xxxxxxxxxxxxxxxxx.x.azuredatabricks.net/chat/completions
 
 This directory contains the implementation for connecting Continue VS Code extension to Databricks LLM services, particularly Claude 3.7 Sonnet. It enables access to Databricks-hosted models for code completion, explanation, refactoring, and other features within the Continue extension.
 
+## 注意: TS2307: Cannot find module '../../config.js' エラーについて
+
+**エラー解決方法**:
+Anthropic.tsでのビルドエラー `Cannot find module '../../config.js'` が発生した場合は、以下の対応が必要です:
+
+1. **config.js のインポート削除**:
+   ```typescript
+   // このインポート文を削除する
+   import { config } from "../../config.js";
+   ```
+
+2. **apiBase の直接設定**:
+   ```typescript
+   static defaultOptions: Partial<LLMOptions> = {
+     // ...
+     // 以下のように直接URLを指定する
+     apiBase: "https://adb-1981899174914086.6.azuredatabricks.net/serving-endpoints/databricks-claude-3-7-sonnet/invocations",
+   };
+   ```
+
+これにより、不要なconfig依存を削除し、エンドポイントを直接指定することができます。
+
 Toolを使う場合のdatabricks-claude-3-7-sonnetへのリクエストとレスポンス形式は以下の階層になります。
 === REQUEST ===
 URL: https://adb-1981899174914086.6.azuredatabricks.net/serving-endpoints/chat/completions
@@ -641,188 +663,6 @@ For thinking text display, the implementation:
 3. Preserves formatting including newlines (`\n`)
 4. Outputs just the text without additional formatting or structure information
 
-## May 2025 Updates
-
-### Parameter Handling Improvements
-
-The May 2025 update includes several important improvements to parameter handling for Databricks endpoints:
-
-1. **Handling `extra_body` Parameter**: The implementation now handles the `extra_body` parameter by extracting its contents and placing them at the root level for Databricks compatibility
-   - This approach works even though `extra_body` is not officially defined in the type definitions
-   - Uses type assertion to safely access the `extra_body` property
-   - Eliminates the `extra_body: Extra inputs are not permitted` error
-   - Makes the implementation more robust and flexible
-
-2. **Enhanced Debug Logging**: Improved logging for request parameters and response processing
-   - Complete request body logging for better debugging
-   - Detailed parameter tracking
-   - Clear error messages for parameter issues
-
-3. **Type-Safe Parameter Handling**: Better type definitions and handling of request parameters
-   - Clearer type definitions for request options
-   - Better error detection for unsupported parameters
-   - Safer parameter transformation
-
-### Thinking Mode Processing Enhancements
-
-With the May 2025 update, we've improved the thinking mode processing logic to handle the specific response structure used by Databricks Claude 3.7 Sonnet:
-
-1. **Accurate Data Structure Handling**: Added proper handling for the nested array structure
-2. **Type Checking**: Added detailed type checking for each level of the data structure
-3. **Direct Text Output**: Simplified the output of thinking text to the console
-4. **Preservation of Formatting**: Ensured that newlines and other formatting in the thinking text are properly preserved
-
-### Type Guard Functions for Safe Property Access
-
-Using type guard functions is crucial for type-safe code:
-
-```typescript
-// Type guard for safely checking object properties
-private static isContentObject(content: any): content is { summary?: any } {
-  return typeof content === 'object' && content !== null;
-}
-
-// Using type guard and in operator for safe property access
-if (this.isContentObject(content) && content.summary) {
-  // Now TypeScript knows content is an object with a potentially defined summary property
-  // ...
-}
-```
-
-By using proper type guards and carefully structured conditional checks, we ensure TypeScript correctly narrows types and prevents "Property does not exist on type 'never'" errors, which commonly happen when TypeScript loses track of an object's structure in complex conditionals.
-
-### Support for Both Streaming and Non-Streaming Responses
-
-The May 2025 update adds support for properly handling both streaming and non-streaming responses with a single type definition. The `StreamingChunk` interface now includes a `message` property in the `choices` array to support non-streaming responses, while maintaining the `delta` property for streaming responses:
-
-```typescript
-choices?: Array<{
-  index?: number;
-  delta?: ResponseDelta & {
-    content?: string | { summary?: { text?: string; }; };
-    reasoning?: { text?: string; summary?: { text?: string; }; signature?: string; [key: string]: any; } | string;
-  };
-  // Non-streaming response message property
-  message?: {
-    content?: any; // Support for arrays, objects, strings, etc.
-    role?: string;
-    tool_calls?: ToolCall[];
-    refusal?: any;
-    annotations?: any;
-    audio?: any;
-    function_call?: any;
-    [key: string]: any; // Support for other properties
-  };
-  finish_reason?: string | null;
-}>;
-```
-
-This dual support ensures robust handling of different API response formats with a single implementation.
-
-### Message Role Handling Improvements
-
-The May 2025 update includes improvements to message role handling, particularly for ThinkingChatMessage types:
-
-1. **Flexible Thinking Role Handling**: Added options for how to handle thinking role messages
-   - Default behavior: Exclude all messages with `role="thinking"`
-   - Optional behavior: Convert thinking messages to system messages to preserve content
-   - Control via `preserveThinking` option in `validateAndFixMessageRoles` and `prepareMessagesForDatabricks`
-
-2. **String Literal Type Handling**: Improved handling of string literal types for message roles
-   - Properly handling "thinking" role as a string literal type
-   - Using "as const" type assertions to ensure TypeScript recognizes string literals
-   - Fixed type errors related to ThinkingChatMessage role assignments
-
-3. **Message Filtering and Validation**:
-   - Multi-layer validation to ensure only valid roles reach the Databricks API
-   - First layer: `validateAndFixMessageRoles()` to filter out or convert thinking messages
-   - Second layer: Pre-request check in `prepareRequest()` method
-   - Final layer: Last-minute validation before request is sent
-
-```typescript
-// Example from the updated implementation
-static validateAndFixMessageRoles(messages: ChatMessage[], options: { preserveThinking?: boolean } = {}): ChatMessage[] {
-  // Process thinking role messages - either exclude or convert to system
-  const resultMessages: ChatMessage[] = [];
-  
-  for (const message of messages) {
-    // thinkingロールを持つメッセージの処理 - 型安全なチェック
-    if (this.isThinkingMessage(message)) {
-      if (options.preserveThinking === true) {
-        // thinkingロールをsystemロールに変換
-        resultMessages.push({
-          ...message,
-          role: "system" as const,  // 明示的なリテラル型指定
-          content: `Thinking process: ${extractContentAsString(message.content)}`
-        });
-      }
-      // preserveThingkingがfalseまたは未指定の場合はスキップ（除外）
-      continue;
-    }
-    
-    // 有効なロールかチェック
-    if (!this.isValidRole(message.role)) {
-      // 無効なロールを「assistant」に変換
-      resultMessages.push({
-        ...message,
-        role: "assistant" as const  // 明示的なリテラル型指定
-      });
-    } else {
-      // 有効なロールはそのまま追加
-      resultMessages.push(message);
-    }
-  }
-  
-  // 型アサーションを追加して返す
-  return resultMessages as ChatMessage[];
-}
-
-// 型安全な思考メッセージ判定のための型ガード関数
-static isThinkingMessage(message: ChatMessage): boolean {
-  return (message.role as string) === "thinking";
-}
-```
-
-This approach ensures only valid roles are sent to the Databricks API, preventing the `Invalid role in the chat message` error while providing flexible options for handling thinking content.
-
-### Modular Architecture Refinements
-
-The May 2025 update further refines the modular architecture of the Databricks integration:
-
-1. **Clearer Module Responsibilities**: Each module now has more clearly defined responsibilities:
-   - `Databricks.ts`: Primary orchestrator that coordinates between specialized modules
-   - `config.ts`: Configuration management and validation
-   - `errors.ts`: Error handling and recovery strategies
-   - `helpers.ts`: General utility functions for parameter processing
-   - `messages.ts`: Message formatting and transformation
-   - `streaming.ts`: Stream processing and chunk handling
-   - `toolcalls.ts`: Tool call processing and result formatting
-
-2. **Improved Error Handling**: Enhanced error handling with better recovery mechanisms:
-   - Structured error results with preserved state information
-   - Exponential backoff for transient errors
-   - Type-safe error processing with standardized patterns
-
-3. **Better State Management**: Improved state management between modules:
-   - Clear state interfaces with proper type definitions
-   - Immutable update patterns for state changes
-   - Preservation of state during error recovery
-   - Type-safe state transitions
-
-4. **Standardized Logging**: Consolidated approach to logging:
-   - Consistent message formats
-   - Safe object stringification
-   - Exception handling for logging operations
-   - Conditional detailed logging based on environment
-
-## JSON Processing for Streaming Content
-
-When working with streaming JSON data, the implementation uses various techniques to handle partial or malformed JSON. For Databricks endpoints with Claude 3.7 Sonnet's thinking mode, additional complexity arises due to nested JSON structure. These issues are addressed with:
-
-1. **JSON Buffer Management**: Accumulating JSON fragments to reconstruct complete objects
-2. **Delta-based JSON Processing**: Using `processJsonDelta` to incrementally build JSON objects
-3. **JSON Validation and Repair**: Techniques for validating and repairing malformed JSON
-
 ## Configuration
 
 To use the Databricks integration, the following configuration is needed:
@@ -836,7 +676,7 @@ These can be configured in the `config.yaml` file:
 models:
   - name: "databricks-claude"
     provider: "databricks"
-    apiBase: "https://your-databricks-endpoint.cloud.databricks.com/serving-endpoints/claude-3-7-sonnet/invocations"
+    apiBase: "https://adb-1981899174914086.6.azuredatabricks.net/serving-endpoints/databricks-claude-3-7-sonnet/invocations"
     apiKey: "dapi_your_api_key_here"
     model: "databricks-claude-3-7-sonnet"
 ```
@@ -853,7 +693,7 @@ Claude 3.7 Sonnet models support thinking mode, which provides more detailed ste
 models:
   - name: "databricks-claude"
     provider: "databricks"
-    apiBase: "https://your-databricks-endpoint.cloud.databricks.com/serving-endpoints/claude-3-7-sonnet/invocations"
+    apiBase: "https://adb-1981899174914086.6.azuredatabricks.net/serving-endpoints/databricks-claude-3-7-sonnet/invocations"
     apiKey: "dapi_your_api_key_here"
     model: "databricks-claude-3-7-sonnet"
     completionOptions:
@@ -870,54 +710,42 @@ Thinking mode is automatically detected and always enabled for Claude 3.7 models
 
 This configuration allows Claude 3.7 Sonnet to display more detailed thinking processes and generate higher quality responses.
 
-## Type-safe JSON Access and "choices" Property Error Solution
+## Anthropic.ts Interface for Databricks
 
-When working with Databricks endpoints, you may encounter the error: "Property 'choices' does not exist on type 'never'". This happens when TypeScript can't correctly understand the API response type. To solve this:
+Using Anthropic provider with Databricks endpoints requires special care. In `Anthropic.ts`, you should:
 
-### 1. Type Guard + Validation for Safe LLM Response Processing
+1. **Set the correct API endpoint**:
+   ```typescript
+   static defaultOptions: Partial<LLMOptions> = {
+     model: "claude-3-7-sonnet-20250219",
+     // Other options...
+     apiBase: "https://adb-1981899174914086.6.azuredatabricks.net/serving-endpoints/databricks-claude-3-7-sonnet/invocations",
+   };
+   ```
 
-```typescript
-// Define API response type
-interface DatabricksClaudeResponse {
-  choices?: Array<{
-    message?: {
-      content?: string;
-    };
-    thinking?: string;
-  }>;
-}
+2. **Set thinking mode for Claude 3.7**:
+   ```typescript
+   // In convertArgs method
+   const isClaude37 = modelName.includes("claude-3-7");
+   // ...
+   ...(isClaude37 ? {
+     thinking: {
+       type: "enabled",
+       budget_tokens: 60000,
+     }
+   } : {})
+   ```
 
-// Type guard function
-function isValidClaudeResponse(response: any): response is DatabricksClaudeResponse {
-  return (
-    response &&
-    Array.isArray(response.choices) &&
-    response.choices.length > 0
-  );
-}
+3. **If using config.yaml-based configuration**:
+   ```typescript
+   // Do not use this due to import error:
+   // import { config } from "../../config.js";
+   
+   // Instead, directly specify apiBase:
+   apiBase: "https://adb-1981899174914086.6.azuredatabricks.net/serving-endpoints/databricks-claude-3-7-sonnet/invocations",
+   ```
 
-// Safe access approach
-async function getCompletionWithThinking() {
-  const response = await fetchFromAPI();
-  
-  if (isValidClaudeResponse(response)) {
-    // Type-safe access now possible
-    const thinking = response.choices[0]?.thinking || '';
-    const content = response.choices[0]?.message?.content || '';
-    return { thinking, content };
-  }
-  
-  throw new Error('Invalid API response');
-}
-```
-
-### 2. Optional Chaining and Nullish Coalescing
-
-```typescript
-// Use optional chaining (?.) and nullish coalescing (??) for safe access
-const thinking = response?.choices?.[0]?.thinking ?? '';
-const content = response?.choices?.[0]?.message?.content ?? 'No response content';
-```
+These settings ensure optimal compatibility with Databricks-hosted Claude 3.7 endpoints.
 
 ## Troubleshooting
 
@@ -950,6 +778,27 @@ This error occurs when a message with an invalid role (such as "thinking") is se
    );
    ```
 
+### If `Cannot find module '../../config.js'` Error Occurs
+
+This error occurs when trying to import the config module in `Anthropic.ts`. To resolve this issue:
+
+1. **Remove the import statement**:
+   ```typescript
+   // Remove this line
+   import { config } from "../../config.js";
+   ```
+
+2. **Directly specify the apiBase**:
+   ```typescript
+   static defaultOptions: Partial<LLMOptions> = {
+     // ...
+     apiBase: "https://adb-1981899174914086.6.azuredatabricks.net/serving-endpoints/databricks-claude-3-7-sonnet/invocations",
+   };
+   ```
+
+3. **If dynamic configuration is needed**:
+   First check if an alternate config utility exists in the codebase. If none is available, simply use a hard-coded value or environment variable.
+
 ### If `requestTimeout: Extra inputs are not permitted` Errors Occur
 
 This error specifically occurs when the `requestTimeout` parameter is included in requests to Databricks endpoints. To resolve this issue:
@@ -981,169 +830,6 @@ If you still encounter this error:
 # Enable debug logging (add to config.yaml)
 debug: true
 ```
-
-### If parallel_tool_calls Errors Occur
-
-If you see error messages like this in the error logs:
-
-```
-Property 'tools' does not exist on type '{ messages: any[]; system: string; }'
-```
-
-Check the following:
-
-1. Whether you're using the latest code version (with May 2025 updates applied)
-2. Whether `Databricks.ts` file is using `args.tools` instead of `requestBody.tools`
-3. Whether `DatabricksHelpers.convertArgs()` method is properly removing the `parallel_tool_calls` parameter
-
-### If TypeScript Errors Related to ThinkingChatMessage or Message Roles Occur
-
-If you encounter TypeScript errors like:
-
-```
-Type 'string' is not assignable to type '"thinking"'.
-```
-
-or
-
-```
-Type '{ role: string; content: MessageContent; }' is not assignable to type 'ThinkingChatMessage'.
-```
-
-Check the following:
-
-1. Use the `as const` assertion when setting the role property for thinking messages:
-   ```typescript
-   return {
-     ...message,
-     role: "thinking" as const // Ensure TypeScript treats this as a string literal
-   };
-   ```
-
-2. Use type assertions on return values when TypeScript cannot infer the correct type:
-   ```typescript
-   return fixedMessages as ChatMessage[];
-   ```
-
-3. Use type guards to check message types before accessing specific properties:
-   ```typescript
-   if (message.role === "thinking") {
-     // Special handling for thinking messages
-   }
-   ```
-
-### If "This comparison appears to be unintentional" TypeScript Error Occurs
-
-This common error can be fixed in several ways:
-
-1. **Create a Type Guard Function** (Recommended):
-   ```typescript
-   // Define a type guard for thinking messages
-   static isThinkingMessage(message: ChatMessage): boolean {
-     return (message.role as string) === "thinking";
-   }
-   
-   // Use the type guard instead of direct comparison
-   if (this.isThinkingMessage(message)) {
-     // Handle thinking message
-   }
-   ```
-
-2. **Cast to String for Comparison**:
-   ```typescript
-   // Use type assertion to cast to string first
-   if ((message.role as string) !== "thinking") {
-     // Handle non-thinking message
-   }
-   ```
-
-3. **Use a String Variable for Comparison**:
-   ```typescript
-   // Create a string variable for comparison
-   const thinkingRole = "thinking";
-   if (message.role !== thinkingRole) {
-     // Handle non-thinking message
-   }
-   ```
-
-### If `[object Object]` is Displayed
-
-If `[object Object]` appears in the console logs, proper object stringification is needed:
-
-1. Use `safeStringify` function to log objects
-2. Add checks for safe access to object properties
-3. Add try-catch blocks around logging code
-
-See the "Debugging and Logging Best Practices" section for details.
-
-For thinking data processing issues, also check:
-
-1. **Proper Thinking Data Format Detection**: Whether `StreamingProcessor.extractThinkingData` method correctly detects thinking data
-2. **Appropriate Thinking Data Extraction**: Whether thinking data is properly extracted from the nested structure
-3. **Thinking Data Format**: Check the actual thinking data format returned from the Databricks endpoint (check console logs)
-
-### Type Definition Issues
-
-If TypeScript compilation errors occur, check:
-
-1. **Type Guards**: Ensure proper type guard functions are used to safely check object properties
-2. **Optional Chaining**: Use optional chaining (`?.`) and nullish coalescing (`??`) operators for safe property access
-3. **ContentObject Pattern**: Use the `isContentObject` type guard for safely checking object properties
-4. **Content Extraction**: Use `extractContentAsString` to safely handle `MessageContent` type, which can be string or object
-5. **Type Assertion**: Use type assertion (`as any`) when necessary for accessing properties not defined in the type definition
-
-### Syntax and Block Structure Errors
-
-If you encounter syntax errors like the one fixed in the May 2025 update (missing closing brace), check:
-
-1. **Block Structure**: Ensure all opening braces `{` have matching closing braces `}`
-2. **Code Indentation**: Use consistent indentation to make code structure visible
-3. **Method Boundaries**: Make sure each method's implementation is properly enclosed
-4. **TypeScript Linting**: Run a TypeScript linter to catch these issues early
-5. **VSCode's bracket matching**: Use this feature to check for proper bracket pairing
-
-### Null Safety Issues
-
-When working with potentially undefined or null properties, always use null-safe coding practices:
-
-1. **Optional Chaining**: Always use optional chaining (`?.`) when accessing properties that might be undefined or null
-   ```typescript
-   // Instead of:
-   if (this.persistentState && this.persistentState.identicalUpdateCount > MAX_IDENTICAL_UPDATES) {
-     // ...
-   }
-   
-   // Use:
-   if (this.persistentState?.identicalUpdateCount !== undefined && this.persistentState.identicalUpdateCount > MAX_IDENTICAL_UPDATES) {
-     // ...
-   }
-   ```
-
-2. **Nullish Coalescing**: Use the nullish coalescing operator (`??`) for providing default values when a value might be null or undefined
-   ```typescript
-   const toolName = tool?.function?.name ?? "<unnamed>";
-   ```
-
-3. **Explicit Null/Undefined Checks**: For more complex conditions, explicitly check for null or undefined
-   ```typescript
-   if (value !== null && value !== undefined) {
-     // Safe to work with value
-   }
-   ```
-
-4. **Default Parameters**: Provide default values for function parameters that might be undefined
-   ```typescript
-   function processConfig(config = {}, options = { debug: false }) {
-     // ...
-   }
-   ```
-
-5. **Type Guards with Null Checks**: Always check for null values before using type guards
-   ```typescript
-   function isValidObject(obj: any): obj is Record<string, any> {
-     return obj !== null && typeof obj === 'object';
-   }
-   ```
 
 ## Implementation Details
 
