@@ -179,7 +179,7 @@ export class StreamingProcessor {
 
   /**
    * 思考テキストを処理して完全な文章を抽出し、残りをバッファに保存
-   * 「。」や「.」などの句読点で区切られた完全な文章を検出
+   * 「。」の句読点で区切られた完全な文章を検出
    * 
    * @param thinkingText 新しい思考テキスト
    * @returns {sentences: string[], remaining: string} 完全な文章の配列と残りのテキスト
@@ -196,7 +196,7 @@ export class StreamingProcessor {
     let lastIndex = 0;
     
     // 日本語と英語の句読点を検索（全角・半角両方対応）
-    const sentenceRegex = /([^。．.]*[。．.])/g;
+    const sentenceRegex = /([^。．]*[。．])/g;
     let match;
     
     while ((match = sentenceRegex.exec(this.thinkingTextBuffer)) !== null) {
