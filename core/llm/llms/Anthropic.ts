@@ -11,7 +11,7 @@ class Anthropic extends BaseLLM {
     contextLength: 200_000,
     completionOptions: {
       model: "claude-3-7-sonnet-20250219",
-      maxTokens: 64000,        // 固定値: 64000
+      maxTokens: 64000,         // 固定値: 64000
       temperature: 1,           // 固定値: 1 (思考モード有効時は必須)
       reasoning: true           // 思考モードを有効化
     },
