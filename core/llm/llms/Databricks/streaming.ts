@@ -1,43 +1,36 @@
-import { ChatMessage, ThinkingChatMessage, ToolCallDelta as CoreToolCallDelta } from "../../../index.js";
+import { ChatMessage, ToolCallDelta as CoreToolCallDelta, ThinkingChatMessage } from "../../../index.js";
 import { DatabricksHelpers } from "./helpers.js";
-import { 
-  ThinkingChunk, 
-  StreamingChunk, 
-  ResponseDelta, 
-  ToolCall, 
-  PersistentStreamState, 
-  ToolCallDelta,
-  ToolCallResult,
-  ReconnectionResult,
-  StreamingResponseResult
-} from "./types/types.js";
 import "./types/extension.d.ts";
+import {
+  PersistentStreamState,
+  ReconnectionResult,
+  ResponseDelta,
+  StreamingChunk,
+  StreamingResponseResult,
+  ToolCall,
+  ToolCallResult
+} from "./types/types.js";
 
 // 共通ユーティリティのインポート
-import { getErrorMessage, isConnectionError } from "../../utils/errors.js";
-import { 
-  safeStringify, 
-  isValidJson, 
-  safeJsonParse, 
-  extractValidJson, 
-  processJsonDelta, 
-  processToolArgumentsDelta, 
-  repairDuplicatedJsonPattern,
-  tryFixBrokenBooleanJson
-} from "../../utils/json.js";
-import { repairToolArguments } from "../../utils/toolUtils.js";
-import { extractQueryContext, extractContentAsString } from "../../utils/messageUtils.js";
-import { processContentDelta, JsonBufferHelpers } from "../../utils/streamProcessing.js";
-import { isSearchTool, processSearchToolArguments } from "../../utils/toolUtils.js";
 import { streamSse } from "../../stream.js";
+import { getErrorMessage, isConnectionError } from "../../utils/errors.js";
+import {
+  extractValidJson,
+  isValidJson,
+  processJsonDelta,
+  safeJsonParse,
+  safeStringify
+} from "../../utils/json.js";
+import { extractContentAsString, extractQueryContext } from "../../utils/messageUtils.js";
+import { JsonBufferHelpers } from "../../utils/streamProcessing.js";
+import { isSearchTool, processSearchToolArguments, repairToolArguments } from "../../utils/toolUtils.js";
 
 // 独自モジュールをインポート
-import { ToolCallProcessor } from "./toolcalls.js";
 
 // 定数
 const MAX_STATE_AGE_MS = 5 * 60 * 1000; // 5分
 const THINKING_LOG_INTERVAL = 10; // 10チャンクごとにログ出力
-const BUFFER_SIZE_THRESHOLD = 100; // 100文字以上でバッファ出力
+const BUFFER_SIZE_THRESHOLD = 200; // 200文字以上でバッファ出力
 const MAX_JSON_BUFFER_SIZE = 10000; // 最大JSONバッファサイズ
 const MAX_LOOP_DETECTION_COUNT = 10; // 無限ループ検出のためのカウンター閾値
 const MIN_UPDATE_INTERVAL_MS = 100; // 最小更新間隔（ミリ秒）
@@ -66,6 +59,9 @@ export class StreamingProcessor {
   // 状態更新のループ検出用カウンター
   private static stateUpdateCounter = 0;
   private static lastStateUpdateTime = 0;
+  
+  // 思考テキストバッファ - 文章を句読点ごとに区切るために使用
+  private static thinkingTextBuffer: string = '';
 
   /**
    * オブジェクトとしてのコンテンツかどうかを確認するタイプガード
@@ -177,7 +173,70 @@ export class StreamingProcessor {
     };
     this.stateUpdateCounter = 0;
     this.lastStateUpdateTime = 0;
+    this.thinkingTextBuffer = ''; // 思考テキストバッファもリセット
     console.log("永続的ストリーム状態をリセットしました");
+  }
+
+  /**
+   * 思考テキストを処理して完全な文章を抽出し、残りをバッファに保存
+   * 「。」や「.」などの句読点で区切られた完全な文章を検出
+   * 
+   * @param thinkingText 新しい思考テキスト
+   * @returns {sentences: string[], remaining: string} 完全な文章の配列と残りのテキスト
+   */
+  private static processThinkingText(thinkingText: string): { 
+    sentences: string[], 
+    remaining: string 
+  } {
+    // バッファに新しいテキストを追加
+    this.thinkingTextBuffer += thinkingText;
+    
+    // 完全な文章を検出
+    const sentences: string[] = [];
+    let lastIndex = 0;
+    
+    // 日本語と英語の句読点を検索（全角・半角両方対応）
+    const sentenceRegex = /([^。．.]*[。．.])/g;
+    let match;
+    
+    while ((match = sentenceRegex.exec(this.thinkingTextBuffer)) !== null) {
+      sentences.push(match[0]);
+      lastIndex = match.index + match[0].length;
+    }
+    
+    // 残りのテキスト（次の句読点までの部分）
+    const remaining = this.thinkingTextBuffer.substring(lastIndex);
+    
+    // バッファを更新（残りのテキストのみ保持）
+    this.thinkingTextBuffer = remaining;
+    
+    return { sentences, remaining };
+  }
+
+  /**
+   * 思考テキストバッファをフラッシュ
+   * ストリーム終了時やバッファが大きくなりすぎた場合に呼び出す
+   * 
+   * @param signature シグネチャ（存在する場合）
+   * @returns 思考メッセージ、バッファが空の場合はnull
+   */
+  static flushThinkingBuffer(signature?: string): ThinkingChatMessage | null {
+    if (this.thinkingTextBuffer && this.thinkingTextBuffer.length > 0) {
+      console.log(`[思考プロセス] ${this.thinkingTextBuffer}`);
+      
+      const finalThinkingMessage: ThinkingChatMessage = {
+        role: "thinking",
+        content: this.thinkingTextBuffer,
+        signature: signature
+      };
+      
+      // バッファをリセット
+      this.thinkingTextBuffer = '';
+      
+      return finalThinkingMessage;
+    }
+    
+    return null;
   }
 
   /**
@@ -214,12 +273,12 @@ export class StreamingProcessor {
     shouldYieldMessage: boolean;
   } {
     // チャンクデータをログ出力（開発モードのみ）
-    if (process.env.NODE_ENV === 'development') {
-      console.log(`処理チャンク: ${safeStringify(chunk, "<不明なチャンク>")}`);
-    } else {
+    // if (process.env.NODE_ENV === 'development') {
+    //   console.log(`処理チャンク: ${safeStringify(chunk, "<不明なチャンク>")}`);
+    // } else {
       // 本番環境でも基本情報はログ出力
-      console.log(`処理チャンク: ${safeStringify(chunk, "<不明なチャンク>")}`);
-    }
+    //   console.log(`処理チャンク: ${safeStringify(chunk, "<不明なチャンク>")}`);
+    // }
     
     // 再接続時は永続的な状態を適用
     if (isReconnect) {
@@ -264,18 +323,44 @@ export class StreamingProcessor {
     const thinkingData = DatabricksHelpers.extractThinkingData(chunk);
     
     if (thinkingData) {
-      // 思考メッセージを作成
-      const thinkingMessage: ThinkingChatMessage = {
-        role: "thinking",
-        content: thinkingData.text,
-        signature: thinkingData.signature
-      };
+      // 思考テキストを処理して完全な文章を抽出
+      const processedText = this.processThinkingText(thinkingData.text);
       
-      // 思考テキストのみをログに出力
-      console.log(`[思考プロセス] ${thinkingData.text}`);
-      
-      // 処理結果に思考メッセージを設定
-      result.thinkingMessage = thinkingMessage;
+      // 完全な文章があれば出力
+      if (processedText.sentences.length > 0) {
+        // 完全な文章をログに出力
+        const completeText = processedText.sentences.join('');
+        console.log(`[思考プロセス] ${completeText}`);
+        
+        // 思考メッセージを作成
+        const thinkingMessage: ThinkingChatMessage = {
+          role: "thinking",
+          content: completeText,
+          signature: thinkingData.signature
+        };
+        
+        // 処理結果に思考メッセージを設定
+        result.thinkingMessage = thinkingMessage;
+      } else {
+        // 残りのテキストがバッファにある場合、サイズをチェック
+        if (processedText.remaining.length > BUFFER_SIZE_THRESHOLD) {
+          // バッファサイズが閾値を超えた場合は強制的に出力
+          console.log(`[思考プロセス] ${processedText.remaining}`);
+          
+          // 思考メッセージを作成
+          const thinkingMessage: ThinkingChatMessage = {
+            role: "thinking",
+            content: processedText.remaining,
+            signature: thinkingData.signature
+          };
+          
+          // バッファをリセット
+          this.thinkingTextBuffer = '';
+          
+          // 処理結果に思考メッセージを設定
+          result.thinkingMessage = thinkingMessage;
+        }
+      }
       
       // 処理を完了して結果を返す
       return result;
@@ -1245,6 +1330,14 @@ export class StreamingProcessor {
         
         if (finalizedToolCall && currentToolCallIndex !== null) {
           toolCalls[currentToolCallIndex] = finalizedToolCall;
+        }
+      }
+      
+      // 最終的な思考テキストバッファを処理
+      if (this.thinkingTextBuffer && this.thinkingTextBuffer.length > 0) {
+        const finalThinkingMessage = this.flushThinkingBuffer();
+        if (finalThinkingMessage) {
+          responseMessages.push(finalThinkingMessage);
         }
       }
       
