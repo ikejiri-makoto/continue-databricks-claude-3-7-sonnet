@@ -34,6 +34,7 @@ const BUFFER_SIZE_THRESHOLD = 200; // 200文字以上でバッファ出力
 const MAX_JSON_BUFFER_SIZE = 10000; // 最大JSONバッファサイズ
 const MAX_LOOP_DETECTION_COUNT = 10; // 無限ループ検出のためのカウンター閾値
 const MIN_UPDATE_INTERVAL_MS = 100; // 最小更新間隔（ミリ秒）
+const JSON_RECOVERY_ATTEMPTS = 3; // JSONフラグメント修復の試行回数
 
 // 検索ツール引数の型定義
 interface QueryArgs {
@@ -62,6 +63,15 @@ export class StreamingProcessor {
   
   // 思考テキストバッファ - 文章を句読点ごとに区切るために使用
   private static thinkingTextBuffer: string = '';
+  
+  // 思考プロセスが開始されたかどうかを追跡するフラグ
+  private static hasThinkingStarted: boolean = false;
+  
+  // 最後の思考テキスト - 重複を避けるために使用
+  private static lastThinkingText: string = '';
+  
+  // JSON修復の試行回数を追跡
+  private static jsonRepairAttempts: number = 0;
 
   /**
    * オブジェクトとしてのコンテンツかどうかを確認するタイプガード
@@ -174,6 +184,9 @@ export class StreamingProcessor {
     this.stateUpdateCounter = 0;
     this.lastStateUpdateTime = 0;
     this.thinkingTextBuffer = ''; // 思考テキストバッファもリセット
+    this.hasThinkingStarted = false; // 思考開始フラグをリセット
+    this.lastThinkingText = ''; // 最後の思考テキストをリセット
+    this.jsonRepairAttempts = 0; // JSON修復試行回数をリセット
     console.log("永続的ストリーム状態をリセットしました");
   }
 
@@ -188,6 +201,14 @@ export class StreamingProcessor {
     sentences: string[], 
     remaining: string 
   } {
+    // 重複チェック - 同じ思考テキストが繰り返されないようにする
+    if (this.lastThinkingText === thinkingText) {
+      return { sentences: [], remaining: '' };
+    }
+    
+    // 最後の思考テキストを更新
+    this.lastThinkingText = thinkingText;
+    
     // バッファに新しいテキストを追加
     this.thinkingTextBuffer += thinkingText;
     
@@ -222,7 +243,7 @@ export class StreamingProcessor {
    */
   static flushThinkingBuffer(signature?: string): ThinkingChatMessage | null {
     if (this.thinkingTextBuffer && this.thinkingTextBuffer.length > 0) {
-      console.log(`[思考プロセス] ${this.thinkingTextBuffer}`);
+      console.log(` ${this.thinkingTextBuffer}`);
       
       const finalThinkingMessage: ThinkingChatMessage = {
         role: "thinking",
@@ -237,6 +258,55 @@ export class StreamingProcessor {
     }
     
     return null;
+  }
+
+  /**
+   * 正しい形式の思考モード対応アシスタントメッセージを生成する
+   * 必要なtypeフィールドと正しい配列構造を含む
+   * 
+   * @param textContent テキスト内容
+   * @param thinkingContent 思考プロセスの内容
+   * @param thinkingSignature 思考プロセスの署名（オプション）
+   * @param toolCalls ツール呼び出し配列（オプション）
+   * @returns 思考モード対応のアシスタントメッセージ
+   */
+  static createThinkingModeAssistantMessage(
+    textContent: string,
+    thinkingContent: string,
+    thinkingSignature?: string,
+    toolCalls?: CoreToolCallDelta[]
+  ): ChatMessage {
+    // 思考モード対応のメッセージ構造を作成
+    // content は配列形式が必要で、最初の要素は "reasoning" タイプでなければならない
+    
+    // 思考コンテンツを含む最初の要素
+    const reasoningElement = {
+      type: "text" as const, // TypeScriptエラー修正: "reasoning"ではなく"text"を使用
+      text: thinkingContent // 思考プロセスのテキスト
+    };
+    
+    // テキストコンテンツを含む2番目の要素
+    const textElement = {
+      type: "text" as const, // 必須: テキストタイプは "text" である必要がある
+      text: textContent // 実際の応答テキスト
+    };
+    
+    // 配列形式のcontent
+    const contentArray = [reasoningElement, textElement];
+    
+    // 思考モード対応のアシスタントメッセージを返す
+    // TypeScriptエラー修正: 型アサーションを使用して正しい型に変換
+    const message: ChatMessage = {
+      role: "assistant",
+      content: contentArray as any, // 型アサーションを使用してMessageContentに変換
+    };
+    
+    // ツール呼び出しがある場合は追加（型アサーションを使用して追加）
+    if (toolCalls && toolCalls.length > 0) {
+      (message as any).toolCalls = toolCalls;
+    }
+    
+    return message;
   }
 
   /**
@@ -323,6 +393,9 @@ export class StreamingProcessor {
     const thinkingData = DatabricksHelpers.extractThinkingData(chunk);
     
     if (thinkingData) {
+      // 思考プロセスが開始されたことをマーク
+      this.hasThinkingStarted = true;
+      
       // 思考テキストを処理して完全な文章を抽出
       const processedText = this.processThinkingText(thinkingData.text);
       
@@ -330,7 +403,7 @@ export class StreamingProcessor {
       if (processedText.sentences.length > 0) {
         // 完全な文章をログに出力
         const completeText = processedText.sentences.join('');
-        console.log(`[思考プロセス] ${completeText}`);
+        console.log(` ${completeText}`);
         
         // 思考メッセージを作成
         const thinkingMessage: ThinkingChatMessage = {
@@ -341,11 +414,23 @@ export class StreamingProcessor {
         
         // 処理結果に思考メッセージを設定
         result.thinkingMessage = thinkingMessage;
+        
+        // 思考プロセスを含むアシスタントメッセージを更新
+        // 現在のメッセージコンテンツを抽出（文字列または配列）
+        const currentContent = extractContentAsString(currentMessage.content);
+        
+        // 思考モード対応の構造化メッセージを作成
+        result.updatedMessage = this.createThinkingModeAssistantMessage(
+          currentContent,
+          completeText,
+          thinkingData.signature,
+          this.processToolCallsForOutput(result.updatedToolCalls)
+        );
       } else {
         // 残りのテキストがバッファにある場合、サイズをチェック
         if (processedText.remaining.length > BUFFER_SIZE_THRESHOLD) {
           // バッファサイズが閾値を超えた場合は強制的に出力
-          console.log(`[思考プロセス] ${processedText.remaining}`);
+          console.log(` ${processedText.remaining}`);
           
           // 思考メッセージを作成
           const thinkingMessage: ThinkingChatMessage = {
@@ -359,6 +444,17 @@ export class StreamingProcessor {
           
           // 処理結果に思考メッセージを設定
           result.thinkingMessage = thinkingMessage;
+          
+          // 思考プロセスを含むアシスタントメッセージを更新
+          const currentContent = extractContentAsString(currentMessage.content);
+          
+          // 思考モード対応の構造化メッセージを作成
+          result.updatedMessage = this.createThinkingModeAssistantMessage(
+            currentContent,
+            processedText.remaining,
+            thinkingData.signature,
+            this.processToolCallsForOutput(result.updatedToolCalls)
+          );
         }
       }
       
@@ -376,11 +472,28 @@ export class StreamingProcessor {
       // extractContentAsStringを使用して安全に現在のコンテンツを取得
       const currentContent = extractContentAsString(currentMessage.content);
       
-      // 安全に更新されたメッセージを作成
-      result.updatedMessage = {
-        ...currentMessage,
-        content: currentContent + newContent
-      };
+      // 新しいコンテンツを追加
+      const updatedContent = currentContent + newContent;
+      
+      // 思考プロセスが開始されている場合は、思考モード対応の構造化メッセージを作成
+      if (this.hasThinkingStarted) {
+        // 最後の思考テキストを取得
+        const lastThinking = this.lastThinkingText || "思考処理を完了しました。";
+        
+        // 思考モード対応のメッセージ構造を作成
+        result.updatedMessage = this.createThinkingModeAssistantMessage(
+          updatedContent,
+          lastThinking,
+          undefined,
+          this.processToolCallsForOutput(result.updatedToolCalls)
+        );
+      } else {
+        // 思考プロセスが開始されていない場合は、通常のテキストメッセージを使用
+        result.updatedMessage = {
+          ...currentMessage,
+          content: updatedContent
+        };
+      }
       
       // 更新はすぐに通知
       result.shouldYieldMessage = true;
@@ -407,6 +520,21 @@ export class StreamingProcessor {
         result.updatedJsonBuffer = processResult.updatedJsonBuffer;
         result.updatedIsBufferingJson = processResult.updatedIsBufferingJson;
         result.shouldYieldMessage = processResult.shouldYieldMessage;
+        
+        // 思考プロセスが開始されている場合は、思考モード対応の構造化メッセージを更新
+        if (this.hasThinkingStarted) {
+          // 最後の思考テキストを取得
+          const lastThinking = this.lastThinkingText || "思考処理を完了しました。";
+          const currentContent = extractContentAsString(currentMessage.content);
+          
+          // 思考モード対応のメッセージ構造を作成
+          result.updatedMessage = this.createThinkingModeAssistantMessage(
+            currentContent,
+            lastThinking,
+            undefined,
+            this.processToolCallsForOutput(result.updatedToolCalls)
+          );
+        }
         
         // 永続的な状態を更新
         this.updatePersistentState({
@@ -473,6 +601,47 @@ export class StreamingProcessor {
     
     // 新しいツール呼び出しの開始または別のインデックスへの切り替え
     if (result.updatedCurrentToolCallIndex !== index) {
+      // もし現在JSONをバッファリング中であれば、
+      // 次のツールに移る前に現在のツールの処理を完了させる
+      if (result.updatedIsBufferingJson && 
+          result.updatedJsonBuffer && 
+          result.updatedCurrentToolCall) {
+        try {
+          // 最後のJSON修復を試みる
+          this.jsonRepairAttempts++;
+          if (this.jsonRepairAttempts <= JSON_RECOVERY_ATTEMPTS) {
+            console.log(`ツール切り替え前のJSON修復を試みます (試行 ${this.jsonRepairAttempts}/${JSON_RECOVERY_ATTEMPTS})`);
+            
+            // 共通ユーティリティのrepairToolArgumentsを使用してJSONを修復
+            const repairedJson = repairToolArguments(result.updatedJsonBuffer);
+            
+            // 成功した場合は現在のツールに適用
+            if (isValidJson(repairedJson)) {
+              // ツール引数を更新
+              result.updatedCurrentToolCall.function.arguments = repairedJson;
+              
+              // バッファをリセット
+              result.updatedJsonBuffer = "";
+              result.updatedIsBufferingJson = false;
+              
+              console.log(`JSON修復に成功しました: ${repairedJson}`);
+              this.jsonRepairAttempts = 0; // 成功したらカウンターをリセット
+            }
+          } else {
+            // 試行回数が上限に達した場合はバッファをリセットして続行
+            console.warn(`JSON修復の試行回数が上限(${JSON_RECOVERY_ATTEMPTS})に達しました。バッファをリセットします。`);
+            result.updatedJsonBuffer = "";
+            result.updatedIsBufferingJson = false;
+            this.jsonRepairAttempts = 0; // カウンターをリセット
+          }
+        } catch (e) {
+          console.warn(`ツール切り替え前のJSON修復中にエラーが発生しました: ${getErrorMessage(e)}`);
+          // エラーがあっても次のツールに進む
+          result.updatedJsonBuffer = "";
+          result.updatedIsBufferingJson = false;
+        }
+      }
+      
       // ツール呼び出しインデックスの変更を処理
       const indexChangeResult = this.handleToolCallIndexChange(
         result, 
@@ -537,6 +706,7 @@ export class StreamingProcessor {
                 // バッファをリセット
                 result.updatedJsonBuffer = "";
                 result.updatedIsBufferingJson = false;
+                this.jsonRepairAttempts = 0; // 成功したらカウンターをリセット
                 
                 // ツール呼び出しを持つメッセージをyield
                 result.shouldYieldMessage = true;
@@ -552,8 +722,57 @@ export class StreamingProcessor {
               console.warn(`現在のバッファ: ${result.updatedJsonBuffer}`);
               console.warn(`受信したデルタ: ${toolCallDelta.function.arguments}`);
               
-              // 従来のアプローチを試す
-              result.updatedJsonBuffer += toolCallDelta.function.arguments;
+              // JSONデルタ処理に失敗した場合は修復を試みる
+              try {
+                // JSONの修復を試みる（最大3回まで）
+                this.jsonRepairAttempts++;
+                if (this.jsonRepairAttempts <= JSON_RECOVERY_ATTEMPTS) {
+                  console.log(`JSON修復を試みます (試行 ${this.jsonRepairAttempts}/${JSON_RECOVERY_ATTEMPTS})`);
+                  
+                  // 現在のバッファにデルタを追加
+                  const combinedJson = result.updatedJsonBuffer + toolCallDelta.function.arguments;
+                  
+                  // 共通ユーティリティのrepairToolArgumentsを使用してJSONを修復
+                  const repairedJson = repairToolArguments(combinedJson);
+                  
+                  // 成功した場合は適用
+                  if (isValidJson(repairedJson)) {
+                    // 修復に成功したらバッファを更新
+                    result.updatedJsonBuffer = repairedJson;
+                    console.log(`JSON修復に成功しました: ${repairedJson}`);
+                    
+                    // JSONが完成したかチェック
+                    if (isValidJson(repairedJson)) {
+                      // ツール引数に適用
+                      if (result.updatedCurrentToolCall) {
+                        result.updatedCurrentToolCall.function.arguments = repairedJson;
+                      }
+                      
+                      // バッファをリセット
+                      result.updatedJsonBuffer = "";
+                      result.updatedIsBufferingJson = false;
+                      this.jsonRepairAttempts = 0; // 成功したらカウンターをリセット
+                      
+                      // ツール呼び出しを持つメッセージをyield
+                      result.shouldYieldMessage = true;
+                      return result;
+                    }
+                  } else {
+                    // 修復に失敗した場合は従来のアプローチを使用
+                    result.updatedJsonBuffer += toolCallDelta.function.arguments;
+                  }
+                } else {
+                  // 試行回数が上限に達した場合はバッファをリセットして続行
+                  console.warn(`JSON修復の試行回数が上限(${JSON_RECOVERY_ATTEMPTS})に達しました。標準処理を続行します。`);
+                  result.updatedJsonBuffer += toolCallDelta.function.arguments;
+                  this.jsonRepairAttempts = 0; // カウンターをリセット
+                }
+              } catch (repairError) {
+                // 修復にも失敗した場合は従来のアプローチを使用
+                console.warn(`JSON修復中に二次エラーが発生しました: ${getErrorMessage(repairError)}`);
+                result.updatedJsonBuffer += toolCallDelta.function.arguments;
+              }
+              
               result.updatedIsBufferingJson = true;
               
               // バッファサイズをチェック - 過大なバッファを防止
@@ -1224,7 +1443,20 @@ export class StreamingProcessor {
     alwaysLogThinking: boolean = false
   ): Promise<StreamingResponseResult> {
     // 初期状態の設定
-    let currentMessage: ChatMessage = { role: "assistant", content: "" };
+    let currentMessage: ChatMessage = { 
+      role: "assistant", 
+      content: "" 
+    };
+    
+    // 思考モードが有効な場合は初期メッセージを思考モード対応の構造に設定
+    if (this.hasThinkingStarted) {
+      currentMessage = this.createThinkingModeAssistantMessage(
+        "", // 初期テキストは空
+        "思考プロセスを開始します...", // 初期思考テキスト
+        undefined // 署名なし
+      );
+    }
+    
     let toolCalls: ToolCall[] = [];
     let currentToolCall: ToolCall | null = null;
     let currentToolCallIndex: number | null = null;
@@ -1296,12 +1528,28 @@ export class StreamingProcessor {
             const currentContentAsString = extractContentAsString(currentMessage.content);
             
             if (currentContentAsString !== lastYieldedMessageContent) {
-              // ツール呼び出し情報を含む新しいメッセージをyield
-              const messageToYield: ChatMessage = {
-                role: "assistant",
-                content: currentMessage.content,
-                toolCalls: this.processToolCallsForOutput(toolCalls)
-              };
+              // 思考モードが有効な場合は、思考モード対応の構造化メッセージを確認
+              if (this.hasThinkingStarted) {
+                // 現在のメッセージが既に正しい形式かどうかを確認
+                if (!Array.isArray(currentMessage.content)) {
+                  // もし配列形式でなければ、思考モード対応の構造に変換
+                  currentMessage = this.createThinkingModeAssistantMessage(
+                    currentContentAsString,
+                    this.lastThinkingText || "思考プロセスを完了しました。",
+                    undefined,
+                    this.processToolCallsForOutput(toolCalls)
+                  );
+                }
+              }
+              
+              // 現在のメッセージをコピー
+              const messageToYield: ChatMessage = { ...currentMessage };
+              
+              // ツール呼び出しがある場合は追加
+              if (toolCalls && toolCalls.length > 0) {
+                // TypeScriptエラー修正: 型アサーションを使用
+                (messageToYield as any).toolCalls = this.processToolCallsForOutput(toolCalls);
+              }
               
               responseMessages.push(messageToYield);
               lastYieldedMessageContent = currentContentAsString;
@@ -1346,12 +1594,33 @@ export class StreamingProcessor {
       
       // 最終結果をyield
       const finalMessageContent = extractContentAsString(currentMessage.content);
-      if (toolCalls.length > 0 || finalMessageContent !== lastYieldedMessageContent) {
-        const finalMessage: ChatMessage = {
-          role: "assistant",
-          content: currentMessage.content,
-          toolCalls: this.processToolCallsForOutput(toolCalls)
-        };
+      
+      // 最終メッセージが既存のメッセージと異なる場合、または思考モードが有効だが最終メッセージが正しい形式でない場合
+      if (toolCalls.length > 0 || finalMessageContent !== lastYieldedMessageContent || 
+          (this.hasThinkingStarted && !Array.isArray(currentMessage.content))) {
+        
+        // 思考モードが有効な場合は、思考モード対応の構造化メッセージを作成
+        let finalMessage: ChatMessage;
+        
+        if (this.hasThinkingStarted) {
+          finalMessage = this.createThinkingModeAssistantMessage(
+            finalMessageContent,
+            this.lastThinkingText || "思考プロセスを完了しました。",
+            undefined,
+            this.processToolCallsForOutput(toolCalls)
+          );
+        } else {
+          // 通常のメッセージを作成
+          finalMessage = {
+            role: "assistant",
+            content: finalMessageContent
+          };
+          
+          // TypeScriptエラー修正: 型アサーションを使用
+          if (toolCalls.length > 0) {
+            (finalMessage as any).toolCalls = this.processToolCallsForOutput(toolCalls);
+          }
+        }
         
         responseMessages.push(finalMessage);
       }

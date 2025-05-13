@@ -1,5 +1,8 @@
 # Databricks LLM Integration for Continue
 
+正しいDatabricks Claude エンドポイントの形式
+https://adb-xxxxxxxxxxxxxxxxx.x.azuredatabricks.net/serving-endpoints/databricks-claude-3-7-sonnet/invocations
+
 This directory contains the implementation for connecting Continue VS Code extension to Databricks LLM services, particularly Claude 3.7 Sonnet. It enables access to Databricks-hosted models for code completion, explanation, refactoring, and other features within the Continue extension.
 
 Toolを使う場合のdatabricks-claude-3-7-sonnetへのリクエストとレスポンス形式は以下の階層になります。
@@ -236,6 +239,44 @@ This structure must be properly handled to correctly extract and display thinkin
 
 ## Databricks-Specific Limitations
 
+### Message Role Constraints
+
+**CRITICAL**: Databricks endpoints only accept the following message roles:
+- `system`
+- `user`
+- `assistant`
+- `tool`
+- `function`
+
+**Common Error**: Sending messages with `role: "thinking"` will result in a `BAD_REQUEST: Invalid role in the chat message` error. The implementation now ensures:
+1. All `thinking` role messages are excluded from the request payload before sending to Databricks
+2. Thinking mode functionality is implemented through the `thinking` parameter at the root level of the request, not through message roles
+3. Any other non-standard roles are converted to "assistant" to ensure compatibility
+
+### Handling Thinking Role Messages
+
+When working with ThinkingChatMessage objects, there are two approaches available:
+
+1. **Complete Exclusion (Default)**: The default behavior completely excludes any messages with `role: "thinking"` from the request payload to Databricks.
+
+2. **Conversion to System Messages**: An optional feature allows converting thinking messages to system messages to preserve their content. This can be useful for debugging or when the context of the thinking process needs to be maintained.
+
+To use the conversion approach:
+
+```typescript
+// Filter out thinking messages completely (default)
+const filteredMessages = MessageProcessor.validateAndFixMessageRoles(messages);
+
+// Convert thinking messages to system messages
+const convertedMessages = MessageProcessor.validateAndFixMessageRoles(messages, { preserveThinking: true });
+```
+
+The `preserveThinking` option modifies how thinking messages are processed:
+- When `false` or undefined: Thinking messages are completely removed from the request
+- When `true`: Thinking messages are converted to system messages with the prefix "Thinking process: "
+
+This provides flexibility in how thinking content is handled while ensuring compatibility with Databricks endpoints.
+
 ### API Parameter Differences for Claude's Thinking Mode
 
 **IMPORTANT**: Databricks endpoints have specific requirements for Claude's thinking mode implementation that differ from direct Anthropic API calls. The key differences are:
@@ -254,7 +295,7 @@ This structure must be properly handled to correctly extract and display thinkin
   "max_tokens": 20000,
   "thinking": {
     "type": "enabled",
-    "budget_tokens": 8000  // Must be less than max_tokens
+    "budget_tokens": 10240  // Must be less than max_tokens
   }
 }
 ```
@@ -265,13 +306,15 @@ This structure must be properly handled to correctly extract and display thinkin
 - For complex reasoning tasks, at least 4,000 tokens is recommended
 - Values larger than 32K may not result in better performance
 
-### About the `parallel_tool_calls` and `extra_body` Parameters
+### About the `parallel_tool_calls`, `requestTimeout`, and `extra_body` Parameters
 
-**IMPORTANT**: Databricks endpoints have two key parameter limitations:
+**IMPORTANT**: Databricks endpoints have several key parameter limitations:
 
 1. **No Support for `parallel_tool_calls`**: This parameter (used by other providers like OpenAI) is not supported by Databricks endpoints and will cause errors.
 
-2. **No Support for `extra_body`**: Databricks endpoints reject requests with `extra_body` as a parameter. All parameters must be placed at the root level of the request.
+2. **No Support for `requestTimeout`**: The `requestTimeout` parameter is not recognized by Databricks endpoints and will result in a `requestTimeout: Extra inputs are not permitted` error.
+
+3. **No Support for `extra_body`**: Databricks endpoints reject requests with `extra_body` as a parameter. All parameters must be placed at the root level of the request.
 
 The following measures have been implemented to address these issues:
 
@@ -382,6 +425,104 @@ if (isClaude37) {
 
 These best practices prevent `[object Object]` issues in logs and ensure more useful information is being logged.
 
+### Message Processing and Type Safety
+
+#### Handling Special Message Types
+
+When working with special message types like `ThinkingChatMessage`, follow these type safety guidelines:
+
+```typescript
+// Type-safe approach for handling thinking messages
+if (message.role === "thinking") {
+  // Ensure role property is properly typed as a string literal
+  return {
+    ...message,
+    role: "thinking" as const // Use "as const" to define string literal type
+  };
+}
+```
+
+This approach ensures TypeScript correctly identifies the message as a `ThinkingChatMessage` type, which requires the `role` property to be exactly the string literal `"thinking"`.
+
+#### Using Type Guards for Message Validation
+
+Type guard functions are essential for preventing TypeScript errors when checking message roles:
+
+```typescript
+// Type guard function for ThinkingChatMessage
+function isThinkingMessage(message: ChatMessage): boolean {
+  return (message.role as string) === "thinking";
+}
+
+// Usage with type narrowing
+if (isThinkingMessage(message)) {
+  // TypeScript now knows this is a ThinkingChatMessage
+  // Access ThinkingChatMessage-specific properties safely
+}
+```
+
+This pattern avoids TypeScript errors like "This comparison appears to be unintentional because the types have no overlap" that occur when directly comparing roles that TypeScript doesn't think can match.
+
+#### Solving the "No Overlap" TypeScript Error
+
+A common TypeScript error when working with message roles is:
+
+```
+error TS2367: This comparison appears to be unintentional because the types '"user" | "assistant" | "system" | "tool"' and '"thinking"' have no overlap.
+```
+
+This occurs because TypeScript believes the `role` property can only be one of the defined valid roles, making the comparison with "thinking" appear meaningless.
+
+Three solutions to this problem:
+
+1. **Use a Type Guard Function** (Recommended):
+   ```typescript
+   // Define a type guard function
+   static isThinkingMessage(message: ChatMessage): boolean {
+     return (message.role as string) === "thinking";
+   }
+   
+   // Use the type guard instead of direct comparison
+   if (this.isThinkingMessage(message)) {
+     // Process thinking message
+   }
+   ```
+
+2. **Type Assertion for Direct Comparison**:
+   ```typescript
+   // Cast to string before comparison
+   if ((message.role as string) !== "thinking") {
+     // Process non-thinking message
+   }
+   ```
+
+3. **String Literal Type Assertion**:
+   ```typescript
+   // Return with explicit string literal type
+   return {
+     ...message,
+     role: "thinking" as const // Use "as const" for string literal type
+   };
+   ```
+
+These approaches ensure type safety while still allowing the code to properly handle message roles that aren't directly represented in the TypeScript type definitions.
+
+#### Fixing Common Type Errors
+
+For message processing, avoid these common issues:
+
+1. **String vs String Literal Types**: Ensure `role` properties use string literals with `as const` when required by interfaces
+2. **Type Assertions for Return Values**: Use type assertions like `as ChatMessage[]` for return values when TypeScript cannot infer the correct type
+3. **Explicit Types for Variables**: Use explicit type annotations for variables that will hold messages with special requirements
+
+```typescript
+// Explicit type annotations for message arrays
+const fixedMessages: ChatMessage[] = messages.map(/* ... */);
+
+// Return with type assertion when needed
+return fixedMessages as ChatMessage[];
+```
+
 ### Thinking Mode Parameters and Processing
 
 #### Request Parameters for Thinking Mode
@@ -396,14 +537,14 @@ To enable thinking mode for Claude 3.7 Sonnet models, the following parameters n
   "max_tokens": 20000,
   "thinking": {
     "type": "enabled",
-    "budget_tokens": 8000  // Must be less than max_tokens
+    "budget_tokens": 10240  // Must be less than max_tokens
   }
 }
 ```
 
 **Key Constraints**:
 - `budget_tokens` should be smaller than `max_tokens`
-- Minimum recommended value is 1,024 tokens
+- Minimum required value is 1,024 tokens
 - For complex reasoning tasks, at least 4,000 tokens is recommended
 - Values larger than 32K may not result in better performance
 
@@ -572,6 +713,72 @@ choices?: Array<{
 
 This dual support ensures robust handling of different API response formats with a single implementation.
 
+### Message Role Handling Improvements
+
+The May 2025 update includes improvements to message role handling, particularly for ThinkingChatMessage types:
+
+1. **Flexible Thinking Role Handling**: Added options for how to handle thinking role messages
+   - Default behavior: Exclude all messages with `role="thinking"`
+   - Optional behavior: Convert thinking messages to system messages to preserve content
+   - Control via `preserveThinking` option in `validateAndFixMessageRoles` and `prepareMessagesForDatabricks`
+
+2. **String Literal Type Handling**: Improved handling of string literal types for message roles
+   - Properly handling "thinking" role as a string literal type
+   - Using "as const" type assertions to ensure TypeScript recognizes string literals
+   - Fixed type errors related to ThinkingChatMessage role assignments
+
+3. **Message Filtering and Validation**:
+   - Multi-layer validation to ensure only valid roles reach the Databricks API
+   - First layer: `validateAndFixMessageRoles()` to filter out or convert thinking messages
+   - Second layer: Pre-request check in `prepareRequest()` method
+   - Final layer: Last-minute validation before request is sent
+
+```typescript
+// Example from the updated implementation
+static validateAndFixMessageRoles(messages: ChatMessage[], options: { preserveThinking?: boolean } = {}): ChatMessage[] {
+  // Process thinking role messages - either exclude or convert to system
+  const resultMessages: ChatMessage[] = [];
+  
+  for (const message of messages) {
+    // thinkingロールを持つメッセージの処理 - 型安全なチェック
+    if (this.isThinkingMessage(message)) {
+      if (options.preserveThinking === true) {
+        // thinkingロールをsystemロールに変換
+        resultMessages.push({
+          ...message,
+          role: "system" as const,  // 明示的なリテラル型指定
+          content: `Thinking process: ${extractContentAsString(message.content)}`
+        });
+      }
+      // preserveThingkingがfalseまたは未指定の場合はスキップ（除外）
+      continue;
+    }
+    
+    // 有効なロールかチェック
+    if (!this.isValidRole(message.role)) {
+      // 無効なロールを「assistant」に変換
+      resultMessages.push({
+        ...message,
+        role: "assistant" as const  // 明示的なリテラル型指定
+      });
+    } else {
+      // 有効なロールはそのまま追加
+      resultMessages.push(message);
+    }
+  }
+  
+  // 型アサーションを追加して返す
+  return resultMessages as ChatMessage[];
+}
+
+// 型安全な思考メッセージ判定のための型ガード関数
+static isThinkingMessage(message: ChatMessage): boolean {
+  return (message.role as string) === "thinking";
+}
+```
+
+This approach ensures only valid roles are sent to the Databricks API, preventing the `Invalid role in the chat message` error while providing flexible options for handling thinking content.
+
 ### Modular Architecture Refinements
 
 The May 2025 update further refines the modular architecture of the Databricks integration:
@@ -646,7 +853,7 @@ models:
     completionOptions:
       thinking:
         type: "enabled"
-        budget_tokens: 50000  # Optional: specify token budget (default is half of max_tokens)
+        budget_tokens: 10240  # Optional: specify token budget (default is half of max_tokens)
 ```
 
 Thinking mode is automatically detected and always enabled for Claude 3.7 models. When the model name includes "claude-3-7", the following special processing occurs:
@@ -708,6 +915,52 @@ const content = response?.choices?.[0]?.message?.content ?? 'No response content
 
 ## Troubleshooting
 
+### If `BAD_REQUEST: Invalid role in the chat message` Errors Occur
+
+This error occurs when a message with an invalid role (such as "thinking") is sent to the Databricks endpoint. To fix this issue:
+
+1. **Check Message Processing**: Ensure that `MessageProcessor.validateAndFixMessageRoles()` is properly filtering out thinking role messages:
+   ```typescript
+   // First filter out any "thinking" role messages
+   const filteredMessages = messages.filter(message => message.role !== "thinking");
+   ```
+
+2. **Debug Message Roles**: Add logging to check the roles in your messages before sending:
+   ```typescript
+   console.log(`Message roles before filtering: ${messages.map(m => m.role).join(', ')}`);
+   console.log(`Message roles after filtering: ${filteredMessages.map(m => m.role).join(', ')}`);
+   ```
+
+3. **Check Final Request**: Log the final request body to confirm no invalid roles are present:
+   ```typescript
+   console.log(`Final request message roles: ${requestBody.messages.map(m => m.role).join(', ')}`);
+   ```
+
+4. **Additional Validation Layer**: Add a final safeguard to filter any remaining invalid roles:
+   ```typescript
+   // Just before sending request, filter messages one last time
+   requestBody.messages = requestBody.messages.filter(m => 
+     ["system", "user", "assistant", "tool", "function"].includes(m.role)
+   );
+   ```
+
+### If `requestTimeout: Extra inputs are not permitted` Errors Occur
+
+This error specifically occurs when the `requestTimeout` parameter is included in requests to Databricks endpoints. To resolve this issue:
+
+1. **Check Type Definitions**: Ensure the `requestTimeout` parameter has been completely removed from `DatabricksCompletionOptions` in the types definition
+
+2. **Check Helper Implementation**: Verify that `DatabricksHelpers.convertArgs()` method does not add the `requestTimeout` parameter to the request
+
+3. **Add to Unsupported Parameters**: Make sure `requestTimeout` is included in the `UNSUPPORTED_PARAMETERS` list in `DatabricksHelpers` class
+
+4. **Log Request Bodies**: Use detailed logging to confirm the parameter isn't being sent:
+   ```typescript
+   console.log(`Databricks request parameters: ${Object.keys(requestBody).join(', ')}`);
+   ```
+
+5. **Inspect All Middleware**: Check any middleware or request transformation logic to ensure it's not adding this parameter
+
 ### If `extra_body: Extra inputs are not permitted` Errors Occur
 
 This error occurs when the Databricks endpoint does not recognize the `extra_body` parameter. With the May 2025 update, this error should be resolved automatically as the implementation now extracts parameters from `extra_body` and places them at the root level using type assertion.
@@ -736,6 +989,76 @@ Check the following:
 1. Whether you're using the latest code version (with May 2025 updates applied)
 2. Whether `Databricks.ts` file is using `args.tools` instead of `requestBody.tools`
 3. Whether `DatabricksHelpers.convertArgs()` method is properly removing the `parallel_tool_calls` parameter
+
+### If TypeScript Errors Related to ThinkingChatMessage or Message Roles Occur
+
+If you encounter TypeScript errors like:
+
+```
+Type 'string' is not assignable to type '"thinking"'.
+```
+
+or
+
+```
+Type '{ role: string; content: MessageContent; }' is not assignable to type 'ThinkingChatMessage'.
+```
+
+Check the following:
+
+1. Use the `as const` assertion when setting the role property for thinking messages:
+   ```typescript
+   return {
+     ...message,
+     role: "thinking" as const // Ensure TypeScript treats this as a string literal
+   };
+   ```
+
+2. Use type assertions on return values when TypeScript cannot infer the correct type:
+   ```typescript
+   return fixedMessages as ChatMessage[];
+   ```
+
+3. Use type guards to check message types before accessing specific properties:
+   ```typescript
+   if (message.role === "thinking") {
+     // Special handling for thinking messages
+   }
+   ```
+
+### If "This comparison appears to be unintentional" TypeScript Error Occurs
+
+This common error can be fixed in several ways:
+
+1. **Create a Type Guard Function** (Recommended):
+   ```typescript
+   // Define a type guard for thinking messages
+   static isThinkingMessage(message: ChatMessage): boolean {
+     return (message.role as string) === "thinking";
+   }
+   
+   // Use the type guard instead of direct comparison
+   if (this.isThinkingMessage(message)) {
+     // Handle thinking message
+   }
+   ```
+
+2. **Cast to String for Comparison**:
+   ```typescript
+   // Use type assertion to cast to string first
+   if ((message.role as string) !== "thinking") {
+     // Handle non-thinking message
+   }
+   ```
+
+3. **Use a String Variable for Comparison**:
+   ```typescript
+   // Create a string variable for comparison
+   const thinkingRole = "thinking";
+   if (message.role !== thinkingRole) {
+     // Handle non-thinking message
+   }
+   ```
 
 ### If `[object Object]` is Displayed
 

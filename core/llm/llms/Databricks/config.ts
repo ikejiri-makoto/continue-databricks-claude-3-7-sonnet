@@ -119,24 +119,25 @@ export class DatabricksConfig {
     // URLをトリミング
     let normalizedUrl = apiBaseUrl.trim();
     
-    // URLが/invocations/で終わる場合、末尾のスラッシュを削除
-    if (normalizedUrl.endsWith('/invocations/')) {
+    // 末尾のスラッシュを削除
+    if (normalizedUrl.endsWith('/')) {
       normalizedUrl = normalizedUrl.slice(0, -1);
       console.log(`APIベースURL修正: 末尾のスラッシュを削除しました - ${normalizedUrl}`);
     }
     
-    // URLが/invocationsで終わっていない場合、必要に応じて追加
-    if (!normalizedUrl.endsWith('/invocations')) {
-      // URLが既に/で終わっている場合の処理
-      if (normalizedUrl.endsWith('/')) {
-        normalizedUrl = `${normalizedUrl}invocations`;
-      } else {
-        normalizedUrl = `${normalizedUrl}/invocations`;
-      }
-      console.log(`APIベースURL修正: /invocationsを追加しました - ${normalizedUrl}`);
+    // serving-endpoints/{endpoint-name}/invocations 形式の確認
+    // すでに正しい形式の場合はそのまま返す
+    if (normalizedUrl.includes('/serving-endpoints/') && normalizedUrl.endsWith('/invocations')) {
+      return normalizedUrl;
     }
     
-    return normalizedUrl;
+    // モデル名を抽出（デフォルトはdatabricks-claude-3-7-sonnet）
+    // URLの最後の部分をモデル名として使用
+    const urlParts = normalizedUrl.split('/');
+    const endpointName = "databricks-claude-3-7-sonnet"; // デフォルト値
+    
+    // 完全なエンドポイントURLを構築
+    return `${normalizedUrl}/serving-endpoints/${endpointName}/invocations`;
   }
 
   /**
@@ -188,7 +189,7 @@ export class DatabricksConfig {
     if (!apiBase.includes('databricks')) {
       console.warn(
         `Databricks API URL may be incorrect: ${apiBase}. ` +
-        `Expected format: https://xxx.cloud.databricks.com/serving-endpoints/xxx/invocations`
+        `Expected format: https://xxx.cloud.databricks.net/serving-endpoints/{endpoint-name}/invocations`
       );
     }
   }
@@ -223,20 +224,15 @@ export class DatabricksConfig {
 
   /**
    * タイムアウト時間をミリ秒単位で取得する
-   * オプション型のより安全な処理
+   * DatabricksエンドポイントではrequestTimeoutパラメータが使用できないため、
+   * 常にデフォルト値を返すよう修正
    * 
    * @param options 補完オプション
    * @returns タイムアウト時間（ミリ秒）
    */
   private static getTimeoutMilliseconds(options: DatabricksCompletionOptions): number {
-    // 型安全なアクセス
-    const timeoutSec = options.requestTimeout;
-    
-    // 有効なタイムアウト値の検証
-    if (typeof timeoutSec === 'number' && timeoutSec > 0) {
-      return timeoutSec * 1000;
-    }
-    
+    // DatabricksエンドポイントではrequestTimeoutパラメータが使用できないため、
+    // 常にデフォルト値を返す
     return DEFAULT_TIMEOUT_MS;
   }
 }

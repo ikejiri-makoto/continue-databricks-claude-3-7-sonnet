@@ -55,9 +55,15 @@ class Databricks extends BaseLLM {
 
   // ログを常に表示するかどうかの設定
   private alwaysLogThinking: boolean = false;
+  
+  // TypeScriptエラー修正: optionsプロパティを追加
+  protected options: DatabricksLLMOptions;
 
   constructor(options: LLMOptions) {
     super(options);
+    
+    // 型変換してoptionsプロパティに保存
+    this.options = options as DatabricksLLMOptions;
     
     // 設定の初期化を設定管理モジュールに委譲
     if (!this.apiBase) {
@@ -87,14 +93,8 @@ class Databricks extends BaseLLM {
     }
     
     // 設定管理モジュールを使用して常に正規化されたURLを取得
-    const normalizedUrl = DatabricksHelpers.normalizeApiUrl(this.apiBase);
-    const endpoint = DatabricksConfig.getFullApiEndpoint(normalizedUrl);
-    
-    if (!endpoint) {
-      throw new Error("Failed to get valid Databricks API endpoint");
-    }
-    
-    return endpoint;
+    const normalizedUrl = DatabricksConfig.normalizeApiUrl(this.apiBase);
+    return normalizedUrl;
   }
 
   /**
@@ -124,8 +124,11 @@ class Databricks extends BaseLLM {
     // 設定の検証を設定管理モジュールに委譲
     DatabricksConfig.validateApiConfig(this.apiKey, this.apiBase);
     
-    // ToolCallProcessorからツール呼び出しメッセージの前処理を取得
-    const processedMessages = ToolCallProcessor.preprocessToolCallsAndResults(messages);
+    // まず無効なロールを持つメッセージを修正
+    let processedMessages = MessageProcessor.validateAndFixMessageRoles(messages);
+    
+    // 次にツール呼び出しの前処理
+    processedMessages = ToolCallProcessor.preprocessToolCallsAndResults(processedMessages);
     
     let retryCount = 0;
     const MAX_RETRIES = 3;
@@ -180,7 +183,7 @@ class Databricks extends BaseLLM {
    * @param messages メッセージ配列
    * @param signal AbortSignal
    * @param options 補完オプション
-   * @param retryCount 現在のリトライ回数
+   * @param retryCount 現在のリトライカウント
    * @returns 処理結果オブジェクト
    */
   private async processStreamingRequest(
@@ -197,17 +200,12 @@ class Databricks extends BaseLLM {
     const responseMessages: ChatMessage[] = [];
     
     try {
-      // リクエストパラメータの構築をヘルパーモジュールに委譲
-      const args = DatabricksHelpers.convertArgs(options);
-      
-      // メッセージのサニタイズと前処理
-      const systemMessage = MessageProcessor.processSystemMessage(messages);
-      const sanitizedMessages = MessageProcessor.sanitizeMessages(messages);
-      
-      // メッセージ変換をメッセージ処理モジュールに委譲
-      const formattedMessages = MessageProcessor.convertToOpenAIFormat(
-        messages, 
-        sanitizedMessages
+      // リクエストを前処理してリクエストボディを取得
+      // このメソッドはメッセージの前処理とparameter変換を行います
+      const requestBody = await DatabricksHelpers.prepareRequest(
+        messages,
+        options,
+        this.options
       );
       
       // 統一された方法でAPIエンドポイントを取得
@@ -216,23 +214,23 @@ class Databricks extends BaseLLM {
       // デバッグログ - リクエスト詳細を常に記録
       console.log(`Databricksエンドポイント: ${apiEndpoint}`);
       
-      // モデル情報をargsから取得して型安全性を確保（requestBodyからではなく）
-      const modelForLogging = args.model || options.model || this.model;
+      // モデル情報をrequestBodyから取得して型安全性を確保
+      const modelForLogging = requestBody.model || options.model || this.model;
       console.log(`Databricksリクエスト: モデル=${modelForLogging}`);
-      console.log(`Databricksリクエスト: メッセージ数=${formattedMessages.length}`);
+      console.log(`Databricksリクエスト: メッセージ数=${requestBody.messages?.length || 0}`);
 
-      // ツール関連のログを追加（argsから直接取得して型安全性を確保）
-      if (args.tools && Array.isArray(args.tools)) {
-        console.log(`Databricksリクエスト: ツール数=${args.tools.length}`);
+      // ツール関連のログを追加（requestBodyから直接取得して型安全性を確保）
+      if (requestBody.tools && Array.isArray(requestBody.tools)) {
+        console.log(`Databricksリクエスト: ツール数=${requestBody.tools.length}`);
         try {
           // ツール名を安全に取得して結合
-          const toolNames = args.tools
+          const toolNames = requestBody.tools
             .map((t: any) => t?.function?.name || 'unnamed')
             .join(', ');
           console.log(`Databricksリクエスト: ツール名=${toolNames}`);
           
           // 開発モードでより詳細なツール情報をログ出力
-          args.tools.forEach((tool: any, index: number) => {
+          requestBody.tools.forEach((tool: any, index: number) => {
             const toolInfo = {
               name: tool?.function?.name || 'unnamed',
               type: tool?.type || 'unknown',
@@ -249,14 +247,6 @@ class Databricks extends BaseLLM {
       // タイムアウトコントローラの設定を設定管理モジュールに委譲
       const { timeoutController, timeoutId, combinedSignal } = 
         DatabricksConfig.setupTimeoutController(signal, options);
-
-      // リクエストボディを構築 - 安全な方法で新しいオブジェクトを作成
-      // これにより元のオブジェクトの変更を防止する
-      // deep copy の代わりに、直接プロパティを設定して型安全性を高める
-      const requestBody = {
-        messages: formattedMessages,
-        ...args,
-      }; 
       
       // リクエストのJSON化と最終チェック
       const requestBodyString = safeStringify(requestBody, "{}");
@@ -264,7 +254,7 @@ class Databricks extends BaseLLM {
       // 完全なリクエストボディを詳細にログ出力（デバッグ用）
       console.log(`完全なリクエストボディJSON: ${requestBodyString}`);
       
-      // DatabricksのエンドポイントにOpenAI形式でリクエスト（修正版を使用）
+      // DatabricksのエンドポイントにOpenAI形式でリクエスト
       const response = await this.fetch(apiEndpoint, {
         method: "POST",
         headers: {

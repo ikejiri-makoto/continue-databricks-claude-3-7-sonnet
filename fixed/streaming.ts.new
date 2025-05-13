@@ -349,7 +349,7 @@ export class StreamingProcessor {
         ? thinkingMessage.content.substring(0, 200) + '...' 
         : thinkingMessage.content;
       
-      console.log('[思考プロセス]', truncatedThinking);
+      console.log('', truncatedThinking);
     }
   }
 

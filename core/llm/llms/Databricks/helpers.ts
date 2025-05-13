@@ -1,6 +1,7 @@
 import { ChatMessage, CompletionOptions } from "../../../index.js";
 import { safeStringify } from "../../utils/json.js";
 import { extractContentAsString } from "../../utils/messageUtils.js";
+import { MessageProcessor } from "./messages.js";
 
 /**
  * Databricks固有のヘルパー関数を提供するクラス
@@ -19,7 +20,8 @@ export class DatabricksHelpers {
     'has_parallel_tool_calls', // 内部フラグ
     'tool_choice',          // Databricksがサポートしているか不明
     'functions',            // 古いOpenAIの要求形式
-    'reasoning'             // Databricksではエラーになるパラメータ（追加）
+    'reasoning',            // Databricksではエラーになるパラメータ（追加）
+    'requestTimeout'        // Databricksでサポートされていないタイムアウトパラメータ
     // 'extra_body' は削除 - extra_bodyは除外せず、その内容を処理する
   ];
 
@@ -47,6 +49,8 @@ export class DatabricksHelpers {
       stream: options.stream ?? true
     };
 
+    // requestTimeoutパラメータはサポートされていないため削除
+    
     // トークン設定を調整
     if (options.maxTokens && options.maxTokens > 0) {
       args.max_tokens = options.maxTokens;
@@ -54,8 +58,8 @@ export class DatabricksHelpers {
     
     // 思考モード設定の追加（Claude 3.7モデルの場合のみ）
     if (isClaude37) {
-      // 思考モードバジェットを計算
-      const thinkingBudgetTokens = Math.min(options.maxTokens ? Math.floor(options.maxTokens / 2) : 32000, 64000);
+      // 思考モードバジェットを10240に設定（Databricksの推奨値）
+      const thinkingBudgetTokens = 10240;
       
       // 温度を1.0に設定（思考モードが最適に機能する値）
       args.temperature = 1.0;
@@ -70,11 +74,19 @@ export class DatabricksHelpers {
       if (optionsAny.extra_body && typeof optionsAny.extra_body === 'object' && optionsAny.extra_body.thinking) {
         // extra_bodyから直接thinking設定を抽出
         console.log('思考モードパラメータをextra_bodyから抽出してルートに配置します');
-        args.thinking = optionsAny.extra_body.thinking;
+        // 思考モードパラメータをオーバーライドして10240トークンに設定
+        args.thinking = {
+          ...optionsAny.extra_body.thinking,
+          budget_tokens: thinkingBudgetTokens
+        };
       } else if (optionsAny.thinking) {
         // thinking設定が直接存在する場合はそれを使用
         // 型アサーションを使用してthinkingプロパティにアクセス
-        args.thinking = optionsAny.thinking;
+        // バジェットトークンを10240に設定
+        args.thinking = {
+          ...optionsAny.thinking,
+          budget_tokens: thinkingBudgetTokens
+        };
       } else {
         // デフォルトの思考モード設定
         args.thinking = {
@@ -103,6 +115,18 @@ export class DatabricksHelpers {
           console.warn(`ツール情報のログ出力中にエラー発生`);
         }
       }
+      
+      // TypeScriptエラー修正: optionsAny変数の宣言を確保
+      const optionsAny = options as any;
+      
+      // tool_choiceパラメータをサポートしているか確認
+      if (optionsAny?.tool_choice) {
+        console.log(`tool_choiceパラメータ検出: ${safeStringify(optionsAny.tool_choice, "auto")}`);
+        args.tool_choice = optionsAny.tool_choice;
+      } else {
+        // デフォルトで"auto"を設定
+        args.tool_choice = "auto";
+      }
     }
     
     // ***** 重要: サポートされていないパラメータを明示的に削除 *****
@@ -130,7 +154,11 @@ export class DatabricksHelpers {
       // extra_bodyの内容を処理
       if (args.extra_body.thinking) {
         console.log('extra_body内のthinkingパラメータをルートに移動します');
-        args.thinking = args.extra_body.thinking;
+        // 思考モードパラメータをオーバーライドして10240トークンに設定
+        args.thinking = {
+          ...args.extra_body.thinking,
+          budget_tokens: 10240
+        };
       }
       
       // 処理後にextra_bodyを削除
@@ -178,9 +206,12 @@ export class DatabricksHelpers {
       // extra_bodyの内容を確認
       if (obj.extra_body.thinking) {
         console.log('extra_body内のthinkingパラメータを処理します');
-        // thinkingパラメータをルートレベルに移動
+        // thinkingパラメータをルートレベルに移動し、budget_tokensを10240に設定
         if (!obj.thinking) {
-          obj.thinking = obj.extra_body.thinking;
+          obj.thinking = {
+            ...obj.extra_body.thinking,
+            budget_tokens: 10240
+          };
         }
       }
       
@@ -197,7 +228,8 @@ export class DatabricksHelpers {
     // thinking関連パラメータを確認し、適切に処理
     if (obj.thinking && typeof obj.thinking === 'object' && obj.thinking.type === 'enabled') {
       // Databricksエンドポイントでは思考モードパラメータをトップレベルに配置する
-      // convertArgs関数で適切に設定されているので、ここでは何もしない
+      // 思考モードのbudget_tokensを10240に設定
+      obj.thinking.budget_tokens = 10240;
       console.log(`思考モードが設定されています: ${JSON.stringify(obj.thinking)}`);
     }
     
@@ -294,17 +326,70 @@ export class DatabricksHelpers {
       console.log(`APIベースURL修正: 末尾のスラッシュを削除しました - ${normalizedUrl}`);
     }
     
-    // URLにserving-endpointsが含まれるが、/chat/completionsエンドポイントがない場合は追加
-    if (normalizedUrl.includes("serving-endpoints") && 
-        !normalizedUrl.includes("/chat/completions") && 
-        !normalizedUrl.includes("/invocations")) {
-      
-      // /invocationエンドポイントの追加
-      normalizedUrl = `${normalizedUrl}/invocations`;
-      console.log(`APIベースURL修正: /invocationsを追加しました - ${normalizedUrl}`);
+    // serving-endpoints/{endpoint-name}/invocations 形式かチェック
+    if (normalizedUrl.includes('/serving-endpoints/') && normalizedUrl.endsWith('/invocations')) {
+      // 正しい形式の場合はそのまま返す
+      return normalizedUrl;
     }
     
-    return normalizedUrl;
+    // モデル名を含むURLを構築
+    const endpointName = "databricks-claude-3-7-sonnet"; // デフォルト値
+    return `${normalizedUrl}/serving-endpoints/${endpointName}/invocations`;
+  }
+
+  /**
+   * リクエストメッセージの前処理
+   * 思考モード対応のメッセージ構造を確保する
+   * @param messages メッセージ配列
+   * @returns 処理済みのメッセージ配列
+   */
+  static preprocessMessages(messages: ChatMessage[]): ChatMessage[] {
+    if (!messages || !Array.isArray(messages)) {
+      return messages;
+    }
+    
+    // まずthinkingロールを持つメッセージを除外し、無効なロールを修正
+    const validRolesMessages = MessageProcessor.validateAndFixMessageRoles(messages);
+    
+    // メッセージ配列をコピーして修正
+    const processedMessages = [...validRolesMessages];
+    
+    // アシスタントメッセージを検索して思考モード対応の構造に変換
+    for (let i = 0; i < processedMessages.length; i++) {
+      const message = processedMessages[i];
+      
+      if (message.role === 'assistant') {
+        // content が配列でない場合のみ変換（既に変換済みの場合はスキップ）
+        if (!Array.isArray(message.content)) {
+          const textContent = extractContentAsString(message.content);
+          
+          // 思考モード対応の構造に変換
+          const thinkingContent = "以前の思考プロセスの要約";
+          
+          // TypeScriptエラー修正: "text"タイプを使用
+          processedMessages[i] = {
+            role: 'assistant',
+            content: [
+              {
+                type: "text" as const, // "reasoning"の代わりに"text"を使用
+                text: thinkingContent // reasoning構造のテキストとして提供
+              },
+              {
+                type: "text" as const,
+                text: textContent
+              }
+            ]
+          };
+          
+          // toolCallsがある場合は保持（型アサーションを使用）
+          if ((message as any).toolCalls) {
+            (processedMessages[i] as any).toolCalls = (message as any).toolCalls;
+          }
+        }
+      }
+    }
+    
+    return processedMessages;
   }
 
   /**
@@ -322,15 +407,24 @@ export class DatabricksHelpers {
       if (loggableBody.messages && Array.isArray(loggableBody.messages)) {
         loggableBody.messages = loggableBody.messages.map((msg: any) => {
           if (msg.content) {
-            const contentStr = typeof msg.content === 'string' 
-              ? msg.content 
-              : extractContentAsString(msg.content);
-            
-            if (contentStr.length > 100) {
+            if (Array.isArray(msg.content)) {
+              // 配列形式のcontent（思考モード対応のメッセージ構造）
               return {
                 ...msg,
-                content: `${contentStr.substring(0, 100)}... (${contentStr.length} characters)`
+                content: `[配列構造のcontent (${msg.content.length} 要素)]`
               };
+            } else {
+              // 文字列形式のcontent
+              const contentStr = typeof msg.content === 'string' 
+                ? msg.content 
+                : extractContentAsString(msg.content);
+              
+              if (contentStr.length > 100) {
+                return {
+                  ...msg,
+                  content: `${contentStr.substring(0, 100)}... (${contentStr.length} characters)`
+                };
+              }
             }
           }
           return msg;
@@ -338,7 +432,7 @@ export class DatabricksHelpers {
       }
       
       const bodyString = safeStringify(loggableBody, "{}");
-      console.log(`完全なリクエストボディ (一部省略): ${bodyString.substring(0, 500)}${bodyString.length > 500 ? '...' : ''}`);
+      console.log(`完全なリクエストボディJSON: ${bodyString}`);
       
       // リクエストBodyの重要な部分を個別にログ出力
       console.log(`Databricks request model: ${requestBody.model || '未指定'}`);
@@ -432,7 +526,7 @@ export class DatabricksHelpers {
           // 思考サマリーを処理
           const summaryText = this.processThinkingSummary(item);
           if (summaryText) {
-            processedContent += `\n[思考プロセス] ${summaryText}\n`;
+            processedContent += `\n ${summaryText}\n`;
           }
         }
       }
@@ -624,5 +718,68 @@ export class DatabricksHelpers {
       console.error(`思考データの抽出中にエラー: ${error}`);
       return null;
     }
+  }
+  
+  /**
+   * リクエストを前処理して送信準備を行う
+   * @param messages メッセージ配列
+   * @param options 補完オプション
+   * @param llmOptions LLMオプション
+   * @returns 処理済みのリクエストボディ
+   */
+  static async prepareRequest(
+    messages: ChatMessage[],
+    options: CompletionOptions,
+    llmOptions: any
+  ): Promise<any> {
+    // 送信前にthinkingロールを含むメッセージの処理状況をログ出力
+    const hasThinkingMessages = messages.some(m => m.role === "thinking");
+    if (hasThinkingMessages) {
+      console.log(`警告: リクエスト内にthinkingロールのメッセージが含まれています。これらは除外されます。`);
+      console.log(`思考モードはリクエストパラメータとして設定され、メッセージとしては送信されません。`);
+    }
+    
+    // まず無効なロールのメッセージを修正（thinking除外）
+    const validRoleMessages = MessageProcessor.validateAndFixMessageRoles(messages);
+    
+    // パラメータを変換
+    const args = this.convertArgs(options);
+    
+    // 思考モードが有効な場合はメッセージを前処理
+    if (args.thinking && args.thinking.type === "enabled") {
+      // 思考モードの設定をログ出力
+      console.log(`思考モードがパラメータとして有効化されています: ${safeStringify(args.thinking, "{}")}`);
+      
+      // 念のためvalidRoleMessagesからthinkingを持つメッセージが完全に除外されたことを確認
+      const stillHasThinking = validRoleMessages.some(m => m.role === "thinking");
+      if (stillHasThinking) {
+        console.error(`エラー: 処理後もまだthinkingロールのメッセージが残っています。これらは手動で除外されます。`);
+        // 強制的にthinkingロールを除外
+        const forcedFilteredMessages = validRoleMessages.filter(m => m.role !== "thinking");
+        args.messages = MessageProcessor.prepareMessagesForDatabricks(forcedFilteredMessages);
+      } else {
+        // 通常の処理
+        args.messages = MessageProcessor.prepareMessagesForDatabricks(validRoleMessages);
+      }
+    } else {
+      // 通常のメッセージ処理
+      args.messages = MessageProcessor.prepareMessagesForDatabricks(validRoleMessages);
+    }
+    
+    // 送信メッセージのロールを最終確認
+    console.log(`送信前の最終確認 - メッセージロール: ${safeStringify(args.messages.map((m: any) => m.role), "[]")}`);
+    
+    // 送信メッセージに無効なロールがないか最終チェック
+    const invalidRoleFound = args.messages.some((m: any) => !["system", "user", "assistant", "tool", "function"].includes(m.role));
+    if (invalidRoleFound) {
+      console.error(`エラー: 送信メッセージに無効なロールが含まれています。最終フィルタリングを行います。`);
+      // 無効なロールを持つメッセージを最終的に除外
+      args.messages = args.messages.filter((m: any) => ["system", "user", "assistant", "tool", "function"].includes(m.role));
+    }
+    
+    // 重要: サポートされていないパラメータを再度チェック
+    this.removeUnsupportedParameters(args);
+    
+    return args;
   }
 }

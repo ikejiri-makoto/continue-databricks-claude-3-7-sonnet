@@ -13,14 +13,9 @@ export interface DatabricksLLMOptions extends LLMOptions {
 /**
  * Databricksリクエスト時の補完オプション型
  * parallel_tool_callsはDatabricksエンドポイントではサポートされないため含まれていない
+ * requestTimeoutもDatabricksエンドポイントではサポートされないため削除
  */
 export interface DatabricksCompletionOptions extends CompletionOptions {
-  /**
-   * リクエストのタイムアウト (秒)
-   * デフォルトは300秒 (5分)
-   */
-  requestTimeout?: number;
-  
   /**
    * API Base URL
    */

@@ -1,24 +1,22 @@
 import { ChatMessage, ThinkingChatMessage } from "../../../index.js";
-import { ThinkingChunk, StreamingChunk, ResponseDelta, ToolCall, PersistentStreamState, ToolCallResult } from "./types/types.js";
 import "./types/extension.d.ts";
+import { PersistentStreamState, ResponseDelta, StreamingChunk, ThinkingChunk, ToolCall, ToolCallResult } from "./types/types.js";
 
 // 共通ユーティリティのインポート
 import { getErrorMessage } from "../../utils/errors.js";
-import { 
-  safeStringify, 
-  isValidJson, 
-  safeJsonParse, 
-  extractValidJson, 
-  processJsonDelta, 
-  processToolArgumentsDelta, 
-  repairDuplicatedJsonPattern 
+import {
+  extractValidJson,
+  isValidJson,
+  processToolArgumentsDelta,
+  repairDuplicatedJsonPattern,
+  safeJsonParse,
+  safeStringify
 } from "../../utils/json.js";
 import { extractQueryContext } from "../../utils/messageUtils.js";
-import { processContentDelta, JsonBufferHelpers } from "../../utils/streamProcessing.js";
+import { JsonBufferHelpers } from "../../utils/streamProcessing.js";
 import { isSearchTool, processSearchToolArguments } from "../../utils/toolUtils.js";
 
 // 独自モジュールをインポート
-import { ToolCallProcessor } from "./toolcalls.js";
 
 // 定数
 const MAX_STATE_AGE_MS = 5 * 60 * 1000; // 5分
@@ -320,7 +318,7 @@ export class StreamingProcessor {
         ? thinkingMessage.content.substring(0, 200) + '...' 
         : thinkingMessage.content;
       
-      console.log('[思考プロセス]', truncatedThinking);
+      console.log('', truncatedThinking);
     }
   }
 

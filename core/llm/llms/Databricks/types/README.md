@@ -1,4 +1,6 @@
 # Databricks LLM Integration - Type Definitions
+正しいDatabricks Claude エンドポイントの形式
+https://adb-xxxxxxxxxxxxxxxxx.x.azuredatabricks.net/serving-endpoints/databricks-claude-3-7-sonnet/invocations
 
 This directory contains the type definitions used in the Databricks LLM integration. Type definitions play a crucial role in ensuring code safety, maintainability, and self-documentation.
 
@@ -236,9 +238,31 @@ This structure must be properly handled to correctly extract and display thinkin
 
 ## Important Notice
 
-**IMPORTANT**: Databricks endpoints do not support the `parallel_tool_calls` parameter. This parameter has been intentionally excluded from the Databricks type definitions, and using it will cause errors.
+**IMPORTANT**: Databricks endpoints have several key parameter and message role limitations:
 
-**IMPORTANT**: Databricks endpoints also do not support the `extra_body` parameter. Parameters must be placed at the root level of the request. Our implementation handles this by extracting contents from `extra_body` and placing them at the root level using type assertion.
+### Message Role Constraints
+
+**CRITICAL**: Databricks endpoints only accept the following message roles:
+- `system`
+- `user`
+- `assistant`
+- `tool`
+- `function`
+
+**Common Error**: Sending messages with `role: "thinking"` will result in a `BAD_REQUEST: Invalid role in the chat message` error. The implementation now ensures:
+1. All `thinking` role messages are excluded from the request payload before sending to Databricks
+2. Thinking mode functionality is implemented through the `thinking` parameter at the root level of the request, not through message roles
+3. Any other non-standard roles are converted to "assistant" to ensure compatibility
+
+This is particularly important because thinking mode generates `ThinkingChatMessage` objects with `role: "thinking"`, which must be handled specially in the type system but can never be sent directly to Databricks.
+
+### Parameter Limitations
+
+1. **No Support for `parallel_tool_calls`**: This parameter (used by other providers like OpenAI) is not supported by Databricks endpoints and will cause errors.
+
+2. **No Support for `requestTimeout`**: The `requestTimeout` parameter is not recognized by Databricks endpoints and will result in a `requestTimeout: Extra inputs are not permitted` error.
+
+3. **No Support for `extra_body`**: Databricks endpoints reject requests with `extra_body` as a parameter. All parameters must be placed at the root level of the request. Our implementation handles this by extracting contents from `extra_body` and placing them at the root level using type assertion.
 
 ## Directory Structure
 
@@ -300,14 +324,9 @@ export interface DatabricksLLMOptions extends LLMOptions {
 /**
  * Databricks completion options type for requests
  * parallel_tool_calls is not included as it's not supported by Databricks endpoints
+ * requestTimeout is also not supported by Databricks endpoints and has been removed
  */
 export interface DatabricksCompletionOptions extends CompletionOptions {
-  /**
-   * Request timeout in seconds
-   * Default is 300 seconds (5 minutes)
-   */
-  requestTimeout?: number;
-  
   /**
    * API Base URL
    */
@@ -334,6 +353,28 @@ export interface DatabricksCompletionOptions extends CompletionOptions {
      */
     budget_tokens?: number;
   };
+}
+```
+
+#### Message Role Type Definitions
+
+```typescript
+/**
+ * Valid message roles for Databricks endpoints
+ * The only roles accepted by Databricks are: "system", "user", "assistant", "tool", "function"
+ * The "thinking" role is NOT accepted by Databricks and must be filtered out before sending requests
+ */
+export type DatabricksValidRole = "system" | "user" | "assistant" | "tool" | "function";
+
+/**
+ * Chat message with role restricted to valid Databricks roles
+ * Used to ensure only valid roles are sent to Databricks endpoints
+ */
+export interface DatabricksSafeMessage {
+  role: DatabricksValidRole;
+  content: string | any[];
+  name?: string;
+  tool_call_id?: string;
 }
 ```
 
@@ -832,7 +873,32 @@ function extractThinkingText(content: any[]): string | null {
 }
 ```
 
-### 3. Extended `ResponseDelta` Interface
+### 3. Added Definition for Valid Message Roles
+
+A new type definition has been added to explicitly define the valid roles for Databricks endpoints:
+
+```typescript
+/**
+ * Valid message roles for Databricks endpoints
+ * Used to ensure only valid roles are sent to Databricks
+ */
+export type DatabricksValidRole = "system" | "user" | "assistant" | "tool" | "function";
+
+/**
+ * Chat message with role restricted to valid Databricks roles
+ * Used to ensure type safety when sending messages to Databricks
+ */
+export interface DatabricksSafeMessage {
+  role: DatabricksValidRole;
+  content: string | any[];
+  name?: string;
+  tool_call_id?: string;
+}
+```
+
+This explicit type definition helps prevent the `Invalid role in the chat message` error by providing compile-time checks for message roles.
+
+### 4. Extended `ResponseDelta` Interface
 
 Added `reasoning` property to the `ResponseDelta` interface to support Databricks endpoint-specific thinking data format:
 
@@ -852,7 +918,7 @@ export interface ResponseDelta {
 }
 ```
 
-### 4. More Flexible `ThinkingChunk` Interface
+### 5. More Flexible `ThinkingChunk` Interface
 
 The `ThinkingChunk` interface has been significantly extended to accommodate multiple data formats returned by Claude 3.7 Sonnet's thinking mode:
 
@@ -877,7 +943,7 @@ This flexible type definition allows for properly handling various thinking data
 4. `reasoning` object or string
 5. Format with direct `thinking` property
 
-### 5. Types for Reconnection and State Management
+### 6. Types for Reconnection and State Management
 
 Added new type definitions to support recovery from connection errors during streaming:
 
@@ -901,7 +967,7 @@ export interface PersistentStreamState {
 }
 ```
 
-### 6. Complete Exclusion of `parallel_tool_calls` Parameter
+### 7. Complete Exclusion of `parallel_tool_calls` Parameter
 
 Since Databricks endpoints don't support the `parallel_tool_calls` parameter, it has been completely excluded from the type definitions:
 
@@ -918,7 +984,7 @@ interface LLMOptions {
 
 This change prevents type errors during use and improves code safety.
 
-### 7. Handling for Parameters Not Defined in Type Definitions
+### 8. Handling for Parameters Not Defined in Type Definitions
 
 For some parameters like `extra_body` that are needed for compatibility but aren't officially supported by Databricks endpoints, we use type assertion in the implementation:
 
@@ -936,7 +1002,7 @@ if (optionsAny.extra_body &&
 
 This approach allows us to maintain type safety while still supporting the required functionality.
 
-### 8. Added Support for Non-Streaming Responses
+### 9. Added Support for Non-Streaming Responses
 
 With the May 2025 update, support has been added for non-streaming responses from Databricks endpoints. This is implemented through the addition of a `message` property in the `choices` array of the `StreamingChunk` interface:
 
@@ -954,6 +1020,10 @@ message?: {
 ```
 
 This allows the implementation to handle both streaming responses (using the `delta` property) and non-streaming responses (using the `message` property) with a single interface, improving code maintainability and type safety.
+
+### 10. Removal of `requestTimeout` Parameter
+
+The `requestTimeout` parameter has been completely removed from `DatabricksCompletionOptions` interface since it's not supported by Databricks endpoints and will cause errors. This ensures type safety by preventing the parameter from being included in requests at the type definition level.
 
 ## Type Safety Best Practices
 
@@ -1021,11 +1091,55 @@ if (optionsAny.extra_body) {
 }
 ```
 
+### 6. Using String Literal Types for Roles
+
+String literal types are used for message roles to ensure type safety:
+
+```typescript
+// Define valid roles as string literals
+export type DatabricksValidRole = "system" | "user" | "assistant" | "tool" | "function";
+
+// Use string literal assertions when setting roles
+return {
+  ...message,
+  role: "assistant" as DatabricksValidRole
+};
+```
+
+This ensures that only valid roles can be assigned to messages sent to Databricks endpoints.
+
 ## Troubleshooting Type Errors
 
 Common type errors and their solutions:
 
-### 1. `Property 'signature' does not exist on type 'StreamingChunk'`
+### 1. `BAD_REQUEST: Invalid role in the chat message` Error
+
+This runtime error occurs when sending a message with an invalid role like "thinking" to Databricks. To fix:
+
+1. Use the `DatabricksValidRole` type to ensure only valid roles are used:
+   ```typescript
+   function isValidDatabricksRole(role: string): role is DatabricksValidRole {
+     return ["system", "user", "assistant", "tool", "function"].includes(role);
+   }
+   ```
+
+2. Filter out thinking messages before sending to Databricks:
+   ```typescript
+   // Filter out thinking messages
+   const databricksMessages = messages.filter(m => m.role !== "thinking");
+   ```
+
+3. Convert invalid roles to valid ones:
+   ```typescript
+   const sanitizedMessages = databricksMessages.map(m => {
+     if (!isValidDatabricksRole(m.role)) {
+       return { ...m, role: "assistant" as DatabricksValidRole };
+     }
+     return m;
+   });
+   ```
+
+### 2. `Property 'signature' does not exist on type 'StreamingChunk'`
 
 This error occurs when the `signature` property is not defined in the `StreamingChunk` interface. To resolve, add the property to the interface:
 
@@ -1037,7 +1151,7 @@ export interface StreamingChunk {
 }
 ```
 
-### 2. `Property 'reasoning' does not exist on type 'ResponseDelta & {...}'`
+### 3. `Property 'reasoning' does not exist on type 'ResponseDelta & {...}'`
 
 This error occurs when the `reasoning` property is not defined in the `ResponseDelta` interface. The solution:
 
@@ -1049,7 +1163,7 @@ export interface ResponseDelta {
 }
 ```
 
-### 3. `Type 'MessageContent' is not assignable to type 'string'`
+### 4. `Type 'MessageContent' is not assignable to type 'string'`
 
 This common error occurs when trying to assign the `content` property to a string variable. The solution is to use the common utility function:
 
@@ -1060,7 +1174,7 @@ import { extractContentAsString } from "../../utils/messageUtils.js";
 const contentAsString = extractContentAsString(message.content);
 ```
 
-### 4. `Property 'extra_body' does not exist on type 'CompletionOptions'`
+### 5. `Property 'extra_body' does not exist on type 'CompletionOptions'`
 
 This error occurs when trying to access the `extra_body` property which isn't defined in the `CompletionOptions` interface. The solution is to use type assertion:
 
@@ -1072,7 +1186,7 @@ if (optionsAny.extra_body) {
 }
 ```
 
-### 5. `Property 'message' does not exist on type '{...}'`
+### 6. `Property 'message' does not exist on type '{...}'`
 
 This error occurs when trying to access the `message` property in the `choices` array of a `StreamingChunk` object. The solution is to make sure the `message` property is defined in the interface:
 
@@ -1087,7 +1201,7 @@ choices?: Array<{
 }>;
 ```
 
-### 6. `Type 'any[]' is not assignable to type 'string | { summary?: { text?: string; }; }'`
+### 7. `Type 'any[]' is not assignable to type 'string | { summary?: { text?: string; }; }'`
 
 This error occurs when trying to handle array-based content structure. The solution is to update the type definition to include array type:
 
@@ -1095,14 +1209,70 @@ This error occurs when trying to handle array-based content structure. The solut
 content?: string | any[] | { summary?: { text?: string; }; [key: string]: any; };
 ```
 
+### 8. `requestTimeout: Extra inputs are not permitted` Error
+
+This error occurs at runtime when the `requestTimeout` parameter is included in requests to Databricks endpoints. The solution includes:
+
+1. Removing the `requestTimeout` parameter from the `DatabricksCompletionOptions` interface
+2. Ensuring `requestTimeout` is included in the `UNSUPPORTED_PARAMETERS` list in `DatabricksHelpers` class
+3. Modifying `DatabricksHelpers.convertArgs()` to not add this parameter to requests
+4. Using detailed logging to verify the parameter is not included in requests
+
+### 9. `Type 'string' is not assignable to type 'DatabricksValidRole'`
+
+This error occurs when trying to assign a string to a variable of type `DatabricksValidRole`. The solution is to use type assertion or a type guard:
+
+```typescript
+// Type assertion approach
+const role = "assistant" as DatabricksValidRole;
+
+// Type guard approach
+function isValidDatabricksRole(role: string): role is DatabricksValidRole {
+  return ["system", "user", "assistant", "tool", "function"].includes(role);
+}
+
+if (isValidDatabricksRole(role)) {
+  // Use role here - TypeScript knows it's a valid role
+}
+```
+
+### 10. `This comparison appears to be unintentional because the types have no overlap`
+
+This TypeScript error occurs when comparing types that TypeScript thinks cannot be the same. For example, when comparing a string literal type with a value that TypeScript thinks can't be that literal:
+
+```typescript
+// Error: This comparison appears to be unintentional because the types 
+// '"user" | "assistant" | "system" | "tool"' and '"thinking"' have no overlap
+if (message.role !== "thinking") { /* ... */ }
+```
+
+The solution is to use a type guard function or a type assertion:
+
+```typescript
+// Type guard solution
+function isThinkingMessage(message: ChatMessage): boolean {
+  return (message.role as string) === "thinking";
+}
+
+if (!isThinkingMessage(message)) { /* ... */ }
+
+// OR type assertion solution
+if ((message.role as string) !== "thinking") { /* ... */ }
+```
+
 ## Future Type Definition Enhancements
 
 Planned improvements to type definitions:
 
-1. **More Precise Type Definitions**: Introducing more specific and strict types to improve type inference accuracy
-2. **Optimized Recursive Type Definitions**: Refining type definitions for complex nested structures
-3. **Utilizing Conditional Types**: Introducing conditional types for more flexible type transformations under specific conditions
-4. **Enhanced Type-Level Validation**: Expressing constraints on value ranges and formats at the type level
-5. **Further Utilizing Generic Types**: Leveraging generic types for improved balance between versatility and type safety
+1. **Message Role Type Safety**: Further refinements to message role type safety:
+   - Stricter validation for role values at compile time
+   - Runtime checks before message processing
+   - Helper functions for role conversion and validation
+
+2. **More Precise Type Definitions**: Introducing more specific and strict types to improve type inference accuracy
+3. **Optimized Recursive Type Definitions**: Refining type definitions for complex nested structures
+4. **Utilizing Conditional Types**: Introducing conditional types for more flexible type transformations under specific conditions
+5. **Enhanced Type-Level Validation**: Expressing constraints on value ranges and formats at the type level
+6. **Further Utilizing Generic Types**: Leveraging generic types for improved balance between versatility and type safety
 
 These type definition enhancements will further improve code safety and maintainability, allowing developers to write more reliable code more efficiently.

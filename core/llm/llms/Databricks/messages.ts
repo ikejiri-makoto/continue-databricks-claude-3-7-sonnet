@@ -1,12 +1,11 @@
 import { ChatMessage, ThinkingChatMessage } from "../../../index.js";
-import { safeStringify, safeJsonParse } from "../../utils/json.js";
-import { 
-  extractContentAsString, 
-  extractQueryContext, 
-  hasToolResultBlocksAtBeginning, 
+import { safeJsonParse, safeStringify } from "../../utils/json.js";
+import {
+  extractContentAsString,
+  extractQueryContext,
+  hasToolResultBlocksAtBeginning,
   messageHasToolCalls as utilsMessageHasToolCalls
 } from "../../utils/messageUtils.js";
-import { DatabricksChatMessage } from "./types/types.js";
 
 /**
  * Databricks Claude用のメッセージ処理ユーティリティークラス
@@ -14,40 +13,79 @@ import { DatabricksChatMessage } from "./types/types.js";
  */
 export class MessageProcessor {
   /**
+   * 有効なロール値
+   * Databricksエンドポイントが受け付けるロールのみを含む
+   */
+  private static VALID_ROLES = ["system", "user", "assistant", "tool", "function"];
+
+  /**
+   * 追加のサポートロール
+   * 型チェックでは明示的に除外されるが、特殊処理が必要なロール
+   */
+  private static SPECIAL_ROLES = ["thinking"];
+
+  /**
+   * ロール値が有効かどうかをチェック
+   * @param role ロール値
+   * @returns 有効な場合true
+   */
+  static isValidRole(role: string): boolean {
+    return this.VALID_ROLES.includes(role);
+  }
+
+  /**
+   * ロール値が特殊処理が必要なロールかどうかをチェック
+   * @param role ロール値
+   * @returns 特殊ロールの場合true
+   */
+  static isSpecialRole(role: string): boolean {
+    return this.SPECIAL_ROLES.includes(role);
+  }
+
+  /**
+   * メッセージが"thinking"ロールを持つかチェックする型ガード関数
+   * @param message チェック対象のメッセージ
+   * @returns thinkingロールを持つ場合true
+   */
+  static isThinkingMessage(message: ChatMessage): boolean {
+    return (message.role as string) === "thinking";
+  }
+
+  /**
    * 会話履歴内の既存メッセージをサニタイズする
    * 特に過去のアシスタントメッセージとthinkingメッセージを適切な形式に変換
+   * また、無効なロール値を「assistant」に変換
    * 
    * @param messages 元のメッセージ配列
    * @returns サニタイズされたメッセージ配列
    */
   static sanitizeMessages(messages: ChatMessage[]): ChatMessage[] {
-    return messages.map(message => {
+    // 無効なメッセージを削除
+    return messages.filter(message => message !== null).map(message => {
+      // ロールが有効かどうかをチェック
+      if (!this.isValidRole(message.role)) {
+        console.warn(`不正なロール値「${message.role}」を検出しました。「assistant」に変換します。`);
+        // ロールを"assistant"に変換
+        return {
+          role: "assistant",
+          content: typeof message.content === "string" ? message.content : extractContentAsString(message.content)
+        };
+      }
+
       // アシスタントメッセージの処理
       if (message.role === "assistant") {
         return this.sanitizeAssistantMessage(message);
       }
       
-      // thinking メッセージはそのまま保持
-      if (message.role === "thinking") {
-        // message を DatabricksChatMessage として扱うが、型安全のため変換せずにアクセス
-        return {
-          role: "thinking",
-          content: typeof message.content === "string" 
-            ? message.content 
-            : safeStringify(message.content, ""),
-          signature: (message as any).signature
-        };
-      }
-      
       // ツール結果メッセージ
       if (message.role === "tool") {
-        // message を DatabricksChatMessage として扱うが、型安全のため変換せずにアクセス
+        const toolCallId = (message as any).toolCallId || "";
         return {
           role: "tool",
           content: typeof message.content === "string" 
             ? message.content 
             : extractContentAsString(message.content),
-          toolCallId: (message as any).toolCallId || ""
+          toolCallId: toolCallId
         };
       }
       
@@ -122,16 +160,25 @@ export class MessageProcessor {
    * 
    * @param messages 元のメッセージ配列
    * @param preprocessedMessages 前処理済みのメッセージ配列
+   * @param options 変換オプション (thinkingEnabledなど)
    * @returns OpenAI形式に変換されたメッセージ配列
    */
-  static convertToOpenAIFormat(messages: ChatMessage[], preprocessedMessages: ChatMessage[]): any[] {
+  static convertToOpenAIFormat(messages: ChatMessage[], preprocessedMessages: ChatMessage[], options: { thinkingEnabled?: boolean } = {}): any[] {
     // メッセージをOpenAI形式に変換（システムメッセージを除く）
     const convertedMessages: any[] = [];
     
-    // 通常のメッセージを配置（thinking メッセージは除外）
-    const regularMessages = preprocessedMessages.filter(m => m.role !== "system" && m.role !== "thinking");
-    for (const msg of regularMessages) {
-      convertedMessages.push(this.convertMessageToOpenAIFormat(msg, preprocessedMessages));
+    // チェック: 無効なロールを事前に修正
+    const validMessages = preprocessedMessages.filter(m => {
+      if (!this.isValidRole(m.role)) {
+        console.warn(`OpenAI形式変換: 不正なロール「${m.role}」を検出しました。このメッセージはスキップします。`);
+        return false;
+      }
+      return true;
+    });
+    
+    // 通常のメッセージを配置
+    for (const msg of validMessages) {
+      convertedMessages.push(this.convertMessageToOpenAIFormat(msg, validMessages, options.thinkingEnabled));
     }
     
     return convertedMessages;
@@ -185,42 +232,28 @@ export class MessageProcessor {
    * 
    * @param message 変換するメッセージ
    * @param allMessages すべてのメッセージ配列（コンテキスト用）
+   * @param thinkingEnabled 思考モードが有効かどうか
    * @returns OpenAI形式に変換されたメッセージ
    */
-  private static convertMessageToOpenAIFormat(message: ChatMessage, allMessages: ChatMessage[]): any {
+  private static convertMessageToOpenAIFormat(message: ChatMessage, allMessages: ChatMessage[], thinkingEnabled: boolean = false): any {
+    // 最重要: ロールが有効かどうかを確認
+    if (!this.isValidRole(message.role)) {
+      console.warn(`無効なロール「${message.role}」を「assistant」に変換します`);
+      return {
+        role: "assistant",
+        content: extractContentAsString(message.content)
+      };
+    }
+
     // メッセージタイプに基づいて適切な変換メソッドを呼び出す
     switch (message.role) {
       case "tool":
         return this.convertToolMessageToOpenAIFormat(message);
       case "assistant":
-        return this.convertAssistantMessageToOpenAIFormat(message, allMessages);
-      case "thinking":
-        // Databricksエンドポイントは thinking メッセージを直接サポートしていないため、
-        // 通常のメッセージ変換処理で対応
-        return this.convertThinkingToPlainFormat(message);
+        return this.convertAssistantMessageToOpenAIFormat(message, allMessages, thinkingEnabled);
       default:
         return this.convertUserMessageToOpenAIFormat(message);
     }
-  }
-
-  /**
-   * 思考メッセージを通常メッセージとして変換
-   * Databricksは思考モードのメッセージを直接サポートしていないため、内容を変更
-   * 
-   * @param message 思考メッセージ
-   * @returns 通常メッセージとして変換されたメッセージ
-   */
-  private static convertThinkingToPlainFormat(message: ThinkingChatMessage): any {
-    // 思考コンテンツを抽出
-    const thinkingContent = typeof message.content === "string" 
-      ? message.content 
-      : safeStringify(message.content, "");
-    
-    // 通常のアシスタントメッセージとして返す（Databricksの互換性のため）
-    return {
-      role: "assistant",
-      content: `[思考プロセス] ${thinkingContent}`
-    };
   }
 
   /**
@@ -243,12 +276,14 @@ export class MessageProcessor {
   /**
    * アシスタントメッセージをOpenAI形式に変換
    * Databricksエンドポイントの互換性を確保するために単純な形式にする
+   * 思考モードが有効な場合は特別な構造を適用
    * 
    * @param message アシスタントメッセージ
    * @param allMessages すべてのメッセージ配列（コンテキスト用）
+   * @param thinkingEnabled 思考モードが有効かどうか
    * @returns OpenAI形式に変換されたアシスタントメッセージ
    */
-  private static convertAssistantMessageToOpenAIFormat(message: ChatMessage, allMessages: ChatMessage[]): any {
+  static convertAssistantMessageToOpenAIFormat(message: ChatMessage, allMessages: ChatMessage[], thinkingEnabled: boolean = false): any {
     // ツール呼び出しを含むアシスタントメッセージの特別処理
     if (this.messageHasToolCalls(message)) {
       const msgAny = message as any;
@@ -465,5 +500,116 @@ export class MessageProcessor {
    */
   static isToolResultMessage(message: ChatMessage): boolean {
     return hasToolResultBlocksAtBeginning(message);
+  }
+
+  /**
+   * メッセージ配列内の無効なロールを持つメッセージを検出して修正
+   * option.preserveThinking = trueの場合、thinkingロールをsystemロールに変換
+   * falseまたは未指定の場合は完全に除外
+   * その他の無効なロールはassistantに変換する
+   * 
+   * @param messages 入力メッセージ配列
+   * @param options オプション（preserveThinking: thinkingロールをsystemに変換するかどうか）
+   * @returns 無効なロールが修正されたメッセージ配列
+   */
+  static validateAndFixMessageRoles(messages: ChatMessage[], options: { preserveThinking?: boolean } = {}): ChatMessage[] {
+    // 処理前のメッセージロールをログ出力
+    const rolesBefore = messages.map(m => m.role);
+    console.log(`メッセージ処理前のロール: ${safeStringify(rolesBefore, "[]")}`);
+    
+    const invalidRoles: string[] = [];
+    let thinkingMessagesCount = 0;
+    
+    // 変換または除外したメッセージを追跡するための配列
+    const resultMessages: ChatMessage[] = [];
+    
+    for (const message of messages) {
+      // thinkingロールを持つメッセージの処理 - 型安全なチェック
+      if (this.isThinkingMessage(message)) {
+        thinkingMessagesCount++;
+        
+        // thinkingロールを保持してsystemロールに変換するかどうか
+        if (options.preserveThinking === true) {
+          // thinkingロールをsystemロールに変換
+          resultMessages.push({
+            ...message,
+            role: "system" as const,  // 明示的なリテラル型指定
+            content: `Thinking process: ${extractContentAsString(message.content)}`
+          });
+        }
+        // preserveThinkingがfalseまたは未指定の場合はスキップ（除外）
+        continue;
+      }
+      
+      // 有効なロールかチェック - 型安全な方法でチェック
+      if (!this.isValidRole(message.role)) {
+        // 無効なロールをリストに追加（thinkingは別途処理済み）
+        if (!invalidRoles.includes(message.role) && (message.role as string) !== "thinking") {
+          invalidRoles.push(message.role);
+        }
+        
+        // 無効なロールを「assistant」に変換
+        resultMessages.push({
+          ...message,
+          role: "assistant" as const  // 明示的なリテラル型指定
+        });
+      } else {
+        // 有効なロールはそのまま追加
+        resultMessages.push(message);
+      }
+    }
+    
+    // 処理結果をログ出力
+    if (thinkingMessagesCount > 0) {
+      if (options.preserveThinking) {
+        console.log(`${thinkingMessagesCount}件のthinkingロールメッセージをsystemロールに変換しました`);
+      } else {
+        console.log(`${thinkingMessagesCount}件のthinkingロールメッセージを除外しました`);
+      }
+    }
+    
+    // 無効なロールがあれば警告ログを出力
+    if (invalidRoles.length > 0) {
+      console.warn(`無効なロールを検出し修正しました: ${invalidRoles.join(', ')} -> "assistant"`);
+    }
+    
+    // 処理後のメッセージロールをログ出力
+    const rolesAfter = resultMessages.map(m => m.role);
+    console.log(`メッセージ処理後のロール: ${safeStringify(rolesAfter, "[]")}`);
+    
+    // 型アサーションを追加して返す
+    return resultMessages as ChatMessage[];
+  }
+
+  /**
+   * DatabricksエンドポイントのAPI要件に合わせてメッセージを準備
+   * preserveThinking = trueの場合、thinkingロールをsystemロールに変換
+   * falseまたは未指定の場合は完全に除外
+   * 
+   * @param messages 入力メッセージ配列
+   * @param options オプション（preserveThinking: thinkingロールをsystemに変換するかどうか）
+   * @returns 準備済みメッセージ配列
+   */
+  static prepareMessagesForDatabricks(messages: ChatMessage[], options: { preserveThinking?: boolean } = {}): any[] {
+    // まずthinkingロールを持つメッセージを処理（変換または除外）し、その他の無効なロールを修正
+    const validMessages = this.validateAndFixMessageRoles(messages, options);
+    
+    // 標準化されたメッセージ形式に変換
+    return validMessages.map(message => {
+      const content = extractContentAsString(message.content);
+      
+      // 基本メッセージ構造
+      const formattedMessage: any = {
+        role: message.role,
+        content: content
+      };
+      
+      // toolメッセージの場合、tool_call_idを追加
+      if (message.role === "tool" && (message as any).toolCallId) {
+        formattedMessage.tool_call_id = (message as any).toolCallId;
+      }
+      
+      return formattedMessage;
+    });
   }
 }
