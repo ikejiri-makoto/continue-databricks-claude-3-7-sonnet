@@ -2,6 +2,8 @@ import { ChatMessage, CompletionOptions, LLMOptions } from "../../index.js";
 import { renderChatMessage, stripImages } from "../../util/messageContent.js";
 import { BaseLLM } from "../index.js";
 import { streamSse } from "../stream.js";
+import * as fs from 'fs';
+import * as path from 'path';
 
 class Anthropic extends BaseLLM {
   static providerName = "anthropic";
@@ -10,16 +12,38 @@ class Anthropic extends BaseLLM {
     contextLength: 200_000,
     completionOptions: {
       model: "claude-3-7-sonnet-20250219",
-      maxTokens: 64000,        // 固定値: 64000
+      maxTokens: 64000,         // 固定値: 64000
       temperature: 1,           // 固定値: 1 (思考モード有効時は必須)
       reasoning: true           // 思考モードを有効化
     },
-    apiBase: "https://adb-1981899174914086.6.azuredatabricks.net/serving-endpoints/databricks-claude-3-7-sonnet/invocations",
+    apiBase: "",
   };
+
+  constructor(options: LLMOptions) {
+    super(options);
+    
+    // config.yaml からの apiBase 読み込みを試みる
+    try {
+      if (fs.existsSync(configPath)) {
+        const configContent = fs.readFileSync(configPath, 'utf8');
+        // YAML パーサーがない場合は単純に文字列検索で対応
+        const apiBaseMatch = configContent.match(/apiBase:\s*["']?(.*?)["']?\s*(\n|$)/);
+        if (apiBaseMatch && apiBaseMatch[1]) {
+          this.apiBase = apiBaseMatch[1].trim();
+          console.log("Loaded apiBase from config.yaml:", this.apiBase);
+        }
+      }
+    } catch (error) {
+      console.error('Error loading config.yaml:', error);
+    }
+  }
 
   public convertArgs(options: CompletionOptions) {
     // should be public for use within VertexAI
     const modelName = options.model || "claude-3-7-sonnet-20250219";
+    
+    // Databricksモデルかどうかを確認
+    const isDatabricksModel = this.apiBase?.includes("azuredatabricks.net") || false;
     
     // Claude 3.7 Sonnetを含むモデル名かどうかを確認
     const isClaude37 = modelName.includes("claude-3-7");
@@ -29,7 +53,7 @@ class Anthropic extends BaseLLM {
       top_p: options.topP,
       temperature: 1, // 固定値: 1 (thinking 有効時は必ず 1 にする必要がある)
       max_tokens: 64000, // 固定値: 64000
-      model: options.model === "claude-2" ? "claude-2.1" : modelName,
+      model: isDatabricksModel ? "databricks-claude-3-7-sonnet" : (options.model === "claude-2" ? "claude-2.1" : modelName),
       stop_sequences: options.stop?.filter((x) => x.trim() !== ""),
       stream: options.stream ?? true,
       tools: options.tools?.map((tool) => ({
@@ -37,8 +61,8 @@ class Anthropic extends BaseLLM {
         description: tool.function.description,
         input_schema: tool.function.parameters,
       })),
-      // 思考モードをClaude 3.7モデルの場合のみ追加
-      ...(isClaude37 ? {
+      // 思考モードをClaude 3.7モデルの場合のみ追加（Databricksモデルでは不要）
+      ...(isClaude37 && !isDatabricksModel ? {
         thinking: {
           type: "enabled",
           budget_tokens: 60000,
@@ -204,7 +228,10 @@ class Anthropic extends BaseLLM {
     );
 
     const msgs = this.convertMessages(messages);
-    const response = await this.fetch(new URL("messages", this.apiBase), {
+    
+    // エラー2: fetch()の引数にundefinedが渡される可能性がある場合の対処
+    const apiBaseUrl = this.apiBase || "";
+    const response = await this.fetch(apiBaseUrl, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
