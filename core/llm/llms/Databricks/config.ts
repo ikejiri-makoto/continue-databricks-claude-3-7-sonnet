@@ -22,7 +22,7 @@ interface ConfigFile {
 // 定数
 const DEFAULT_TIMEOUT_MS = 300000; // 5分
 const CONFIG_FILE_NAME = "config.yaml";
-const DEFAULT_API_BASE = "dummy-url";
+const DEFAULT_API_BASE = "https://adb-1981899174914086.6.azuredatabricks.net/serving-endpoints/databricks-claude-3-7-sonnet/invocations";
 const DEFAULT_API_KEY = "dapi-dummy-key";
 
 /**

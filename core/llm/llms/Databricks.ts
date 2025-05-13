@@ -46,13 +46,6 @@ class Databricks extends BaseLLM {
     },
     capabilities: {
       tools: true
-    },
-    // ツール呼び出し用の設定オプションを追加
-    toolOptions: {
-      disableStreamingForToolCalls: false, // ツール呼び出し時にストリーミングを無効化するオプション
-      validateToolSequence: true,         // ツール呼び出しシーケンスの検証を有効化
-      resetStateBetweenTurns: true,       // ターン間で状態をリセット
-      maxToolsPerTurn: 5                  // 1ターンあたりの最大ツール数
     }
     // DatabricksエンドポイントがOpenAIと互換性があるが、
     // parallel_tool_callsパラメータはDatabricksエンドポイントでサポートされていないため、
@@ -138,7 +131,7 @@ class Databricks extends BaseLLM {
       
       // ツールIDを追跡（後の検証用）
       if (hasToolUse && message.toolCalls) {
-        toolUseIds = message.toolCalls.map(tc => tc.id);
+        toolUseIds = message.toolCalls?.map(tc => tc?.id).filter(Boolean) as string[] || [];
       }
       
       // 検証済みメッセージに追加
@@ -187,25 +180,6 @@ class Databricks extends BaseLLM {
     // メッセージシーケンスの検証を実行
     processedMessages = this.validateToolCallSequence(processedMessages);
 
-    // ツール呼び出しがある場合にストリーミングを無効化するか判断
-    const hasToolsInRequest = options.tools && options.tools.length > 0;
-    const toolOptions = this.options.toolOptions || {};
-    
-    // ツール呼び出し時にストリーミングを無効化する設定がある場合
-    if (hasToolsInRequest && toolOptions.disableStreamingForToolCalls) {
-      console.log("ツール呼び出しがあるためストリーミングを無効化し、通常のチャット完了を使用します");
-      
-      // ストリーミングの代わりに通常のチャット完了を使用
-      try {
-        const response = await this.chatCompletion(processedMessages, signal, options);
-        yield response;
-        return;
-      } catch (error) {
-        console.error("ツール呼び出し中にエラーが発生しました:", getErrorMessage(error));
-        throw error;
-      }
-    }
-    
     let retryCount = 0;
     const MAX_RETRIES = 3;
     let lastError: Error | null = null;
@@ -263,7 +237,7 @@ class Databricks extends BaseLLM {
   private async chatCompletion(
     messages: ChatMessage[],
     signal: AbortSignal,
-    options: CompletionOptions
+    options: DatabricksCompletionOptions
   ): Promise<ChatMessage> {
     const args = DatabricksHelpers.convertArgs(messages, options);
     const endpoint = this.getApiEndpoint();

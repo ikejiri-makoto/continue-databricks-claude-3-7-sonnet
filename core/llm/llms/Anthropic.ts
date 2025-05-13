@@ -2,6 +2,7 @@ import { ChatMessage, CompletionOptions, LLMOptions } from "../../index.js";
 import { renderChatMessage, stripImages } from "../../util/messageContent.js";
 import { BaseLLM } from "../index.js";
 import { streamSse } from "../stream.js";
+import { config } from "../../config.js"; // configをインポート
 
 class Anthropic extends BaseLLM {
   static providerName = "anthropic";
@@ -14,7 +15,7 @@ class Anthropic extends BaseLLM {
       temperature: 1,           // 固定値: 1 (思考モード有効時は必須)
       reasoning: true           // 思考モードを有効化
     },
-    apiBase: "https://api.anthropic.com/v1/",
+    apiBase: config?.anthropic?.apiBase || "", // configから読み込み、存在しない場合は空文字列
   };
 
   public convertArgs(options: CompletionOptions) {

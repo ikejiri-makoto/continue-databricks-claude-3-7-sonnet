@@ -1,7 +1,7 @@
 import { ChatMessage, CompletionOptions } from "../../../index.js";
 import { safeStringify } from "../../utils/json.js";
 import { extractContentAsString } from "../../utils/messageUtils.js";
-import { DatabricksMessageAdapter, MessageProcessor } from "./messages.ts";
+import { DatabricksMessageAdapter, MessageProcessor } from "./messages.js";
 
 /**
  * Databricks固有のヘルパー関数を提供するクラス
@@ -27,10 +27,11 @@ export class DatabricksHelpers {
 
   /**
    * オプションをDatabricksエンドポイント用のパラメータに変換
+   * @param messages メッセージ配列
    * @param options 補完オプション
    * @returns Databricksエンドポイント用のパラメータ
    */
-  static convertArgs(options: CompletionOptions): any {
+  static convertArgs(messages: ChatMessage[], options: CompletionOptions): any {
     // モデル名（デフォルトはdatabricks-claude-3-7-sonnet）
     const modelName = options.model || "databricks-claude-3-7-sonnet";
     
@@ -55,6 +56,9 @@ export class DatabricksHelpers {
     if (options.maxTokens && options.maxTokens > 0) {
       args.max_tokens = options.maxTokens;
     }
+    
+    // メッセージを前処理してDatabriksエンドポイント用に変換
+    args.messages = DatabricksMessageAdapter.formatMessages(messages);
     
     // 思考モード設定の追加（Claude 3.7モデルの場合のみ）
     if (isClaude37) {
@@ -743,7 +747,7 @@ export class DatabricksHelpers {
     const validRoleMessages = MessageProcessor.validateAndFixMessageRoles(messages);
     
     // パラメータを変換
-    const args = this.convertArgs(options);
+    const args = this.convertArgs(validRoleMessages, options);
     
     // 思考モードが有効な場合はメッセージを前処理
     if (args.thinking && args.thinking.type === "enabled") {
@@ -758,13 +762,7 @@ export class DatabricksHelpers {
         const forcedFilteredMessages = validRoleMessages.filter(m => m.role !== "thinking");
         // DatabricksMessageAdapterを使用してメッセージを変換
         args.messages = DatabricksMessageAdapter.formatMessages(forcedFilteredMessages);
-      } else {
-        // DatabricksMessageAdapterを使用してメッセージを変換
-        args.messages = DatabricksMessageAdapter.formatMessages(validRoleMessages);
       }
-    } else {
-      // DatabricksMessageAdapterを使用してメッセージを変換
-      args.messages = DatabricksMessageAdapter.formatMessages(validRoleMessages);
     }
     
     // 送信メッセージのロールを最終確認

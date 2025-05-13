@@ -140,10 +140,12 @@ export class StreamingProcessor {
     // 無限ループ検出: 同じツールコールIDでの更新が続く場合
     if (newState.lastProcessedToolCallId && 
         newState.lastProcessedToolCallId === this.persistentState.lastProcessedToolCallId) {
-      this.persistentState.identicalUpdateCount++;
+      if (this.persistentState) {
+        this.persistentState.identicalUpdateCount = (this.persistentState.identicalUpdateCount || 0) + 1;
+      }
       
       // 一定回数以上同じIDでの更新があれば無限ループとみなして状態リセット
-      if (this.persistentState.identicalUpdateCount > MAX_IDENTICAL_UPDATES) {
+      if (this.persistentState?.identicalUpdateCount !== undefined && this.persistentState.identicalUpdateCount > MAX_IDENTICAL_UPDATES) {
         console.warn(`警告: 同じツールコールID "${newState.lastProcessedToolCallId}" で${MAX_IDENTICAL_UPDATES}回以上の更新を検出しました。状態をリセットします。`);
         this.resetPersistentState();
         return;
