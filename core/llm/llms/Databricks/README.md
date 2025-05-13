@@ -1,7 +1,13 @@
 # Databricks LLM Integration for Continue
 
-正しいDatabricks Claude エンドポイントの形式
+**重要**: このContinue VS Code拡張機能は以下のエンドポイントにのみ対応しています：
+
 https://adb-xxxxxxxxxxxxxxxxx.x.azuredatabricks.net/serving-endpoints/databricks-claude-3-7-sonnet/invocations
+※ Claude固有の機能（思考モードなど）を完全にサポートするモデル固有エンドポイント
+
+以下のエンドポイントは**非対応**です：
+https://adb-xxxxxxxxxxxxxxxxx.x.azuredatabricks.net/chat/completions
+※ OpenAI互換APIですが、Claude固有機能が利用できません
 
 This directory contains the implementation for connecting Continue VS Code extension to Databricks LLM services, particularly Claude 3.7 Sonnet. It enables access to Databricks-hosted models for code completion, explanation, refactoring, and other features within the Continue extension.
 
