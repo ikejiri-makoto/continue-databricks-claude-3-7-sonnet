@@ -1,5 +1,4 @@
 import { ChatMessage, CompletionOptions } from "../../../index.js";
-import { DatabricksCompletionOptions } from "./types/types.js";
 import { safeStringify } from "../../utils/json.js";
 import { extractContentAsString } from "../../utils/messageUtils.js";
 
@@ -540,7 +539,7 @@ export class DatabricksHelpers {
           if (summaryItem && typeof summaryItem === 'object' && 
               summaryItem.type === 'summary_text' && typeof summaryItem.text === 'string') {
             
-            console.log(`思考データを抽出しました: パス = choices[0].delta.content[0].summary[0].text`);
+            // console.log(`思考データを抽出しました: パス = choices[0].delta.content[0].summary[0].text`);
             return {
               text: summaryItem.text,
               signature: summaryItem.signature || undefined
@@ -551,7 +550,7 @@ export class DatabricksHelpers {
       
       // choices[0].delta.content.summary.text 形式 (オブジェクトベース形式)
       if (chunk.choices?.[0]?.delta?.content?.summary?.text) {
-        console.log(`思考データを抽出しました: パス = choices[0].delta.content.summary.text`);
+        // console.log(`思考データを抽出しました: パス = choices[0].delta.content.summary.text`);
         return {
           text: chunk.choices[0].delta.content.summary.text,
           signature: chunk.choices[0].delta.content.summary.signature
@@ -560,7 +559,7 @@ export class DatabricksHelpers {
       
       // thinking.text 形式（直接のthinking形式）
       if (chunk.thinking?.text) {
-        console.log(`思考データを抽出しました: パス = thinking.text`);
+        // console.log(`思考データを抽出しました: パス = thinking.text`);
         return {
           text: chunk.thinking.text,
           signature: chunk.thinking.signature
@@ -569,7 +568,7 @@ export class DatabricksHelpers {
       
       // content.summary.text 形式
       if (chunk.content?.summary?.text) {
-        console.log(`思考データを抽出しました: パス = content.summary.text`);
+        // console.log(`思考データを抽出しました: パス = content.summary.text`);
         return {
           text: chunk.content.summary.text,
           signature: chunk.content.summary.signature
@@ -578,7 +577,7 @@ export class DatabricksHelpers {
       
       // summary.text 形式
       if (chunk.summary?.text) {
-        console.log(`思考データを抽出しました: パス = summary.text`);
+        // console.log(`思考データを抽出しました: パス = summary.text`);
         return {
           text: chunk.summary.text,
           signature: chunk.summary.signature
@@ -591,7 +590,7 @@ export class DatabricksHelpers {
         
         // reasoningが文字列の場合
         if (typeof reasoning === 'string') {
-          console.log(`思考データを抽出しました: パス = choices[0].delta.reasoning (string)`);
+          // console.log(`思考データを抽出しました: パス = choices[0].delta.reasoning (string)`);
           return {
             text: reasoning
           };
@@ -601,7 +600,7 @@ export class DatabricksHelpers {
         if (typeof reasoning === 'object' && reasoning !== null) {
           // 直接のtext形式
           if (reasoning.text) {
-            console.log(`思考データを抽出しました: パス = choices[0].delta.reasoning.text`);
+            // console.log(`思考データを抽出しました: パス = choices[0].delta.reasoning.text`);
             return {
               text: reasoning.text,
               signature: reasoning.signature
@@ -610,7 +609,7 @@ export class DatabricksHelpers {
           
           // summary.text形式
           if (reasoning.summary?.text) {
-            console.log(`思考データを抽出しました: パス = choices[0].delta.reasoning.summary.text`);
+            // console.log(`思考データを抽出しました: パス = choices[0].delta.reasoning.summary.text`);
             return {
               text: reasoning.summary.text,
               signature: reasoning.signature
