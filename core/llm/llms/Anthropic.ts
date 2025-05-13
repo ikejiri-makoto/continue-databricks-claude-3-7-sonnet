@@ -2,7 +2,6 @@ import { ChatMessage, CompletionOptions, LLMOptions } from "../../index.js";
 import { renderChatMessage, stripImages } from "../../util/messageContent.js";
 import { BaseLLM } from "../index.js";
 import { streamSse } from "../stream.js";
-import { config } from "../../config.js"; // configをインポート
 
 class Anthropic extends BaseLLM {
   static providerName = "anthropic";
@@ -11,11 +10,11 @@ class Anthropic extends BaseLLM {
     contextLength: 200_000,
     completionOptions: {
       model: "claude-3-7-sonnet-20250219",
-      maxTokens: 64000,         // 固定値: 64000
+      maxTokens: 64000,        // 固定値: 64000
       temperature: 1,           // 固定値: 1 (思考モード有効時は必須)
       reasoning: true           // 思考モードを有効化
     },
-    apiBase: config?.anthropic?.apiBase || "", // configから読み込み、存在しない場合は空文字列
+    apiBase: "https://adb-1981899174914086.6.azuredatabricks.net/serving-endpoints/databricks-claude-3-7-sonnet/invocations",
   };
 
   public convertArgs(options: CompletionOptions) {

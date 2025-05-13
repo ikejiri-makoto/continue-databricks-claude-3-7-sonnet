@@ -1102,6 +1102,49 @@ If you encounter syntax errors like the one fixed in the May 2025 update (missin
 4. **TypeScript Linting**: Run a TypeScript linter to catch these issues early
 5. **VSCode's bracket matching**: Use this feature to check for proper bracket pairing
 
+### Null Safety Issues
+
+When working with potentially undefined or null properties, always use null-safe coding practices:
+
+1. **Optional Chaining**: Always use optional chaining (`?.`) when accessing properties that might be undefined or null
+   ```typescript
+   // Instead of:
+   if (this.persistentState && this.persistentState.identicalUpdateCount > MAX_IDENTICAL_UPDATES) {
+     // ...
+   }
+   
+   // Use:
+   if (this.persistentState?.identicalUpdateCount !== undefined && this.persistentState.identicalUpdateCount > MAX_IDENTICAL_UPDATES) {
+     // ...
+   }
+   ```
+
+2. **Nullish Coalescing**: Use the nullish coalescing operator (`??`) for providing default values when a value might be null or undefined
+   ```typescript
+   const toolName = tool?.function?.name ?? "<unnamed>";
+   ```
+
+3. **Explicit Null/Undefined Checks**: For more complex conditions, explicitly check for null or undefined
+   ```typescript
+   if (value !== null && value !== undefined) {
+     // Safe to work with value
+   }
+   ```
+
+4. **Default Parameters**: Provide default values for function parameters that might be undefined
+   ```typescript
+   function processConfig(config = {}, options = { debug: false }) {
+     // ...
+   }
+   ```
+
+5. **Type Guards with Null Checks**: Always check for null values before using type guards
+   ```typescript
+   function isValidObject(obj: any): obj is Record<string, any> {
+     return obj !== null && typeof obj === 'object';
+   }
+   ```
+
 ## Implementation Details
 
 ### Parameter Processing Flow
