@@ -1,7 +1,7 @@
 import { ChatMessage, CompletionOptions } from "../../../index.js";
 import { safeStringify } from "../../utils/json.js";
 import { extractContentAsString } from "../../utils/messageUtils.js";
-import { MessageProcessor } from "./messages.js";
+import { DatabricksMessageAdapter, MessageProcessor } from "./messages.ts";
 
 /**
  * Databricks固有のヘルパー関数を提供するクラス
@@ -756,14 +756,15 @@ export class DatabricksHelpers {
         console.error(`エラー: 処理後もまだthinkingロールのメッセージが残っています。これらは手動で除外されます。`);
         // 強制的にthinkingロールを除外
         const forcedFilteredMessages = validRoleMessages.filter(m => m.role !== "thinking");
-        args.messages = MessageProcessor.prepareMessagesForDatabricks(forcedFilteredMessages);
+        // DatabricksMessageAdapterを使用してメッセージを変換
+        args.messages = DatabricksMessageAdapter.formatMessages(forcedFilteredMessages);
       } else {
-        // 通常の処理
-        args.messages = MessageProcessor.prepareMessagesForDatabricks(validRoleMessages);
+        // DatabricksMessageAdapterを使用してメッセージを変換
+        args.messages = DatabricksMessageAdapter.formatMessages(validRoleMessages);
       }
     } else {
-      // 通常のメッセージ処理
-      args.messages = MessageProcessor.prepareMessagesForDatabricks(validRoleMessages);
+      // DatabricksMessageAdapterを使用してメッセージを変換
+      args.messages = DatabricksMessageAdapter.formatMessages(validRoleMessages);
     }
     
     // 送信メッセージのロールを最終確認

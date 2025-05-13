@@ -34,6 +34,7 @@ const MAX_LOOP_DETECTION_COUNT = 10; // 無限ループ検出のためのカウ�
 const MIN_UPDATE_INTERVAL_MS = 100; // 最小更新間隔（ミリ秒）
 const JSON_RECOVERY_ATTEMPTS = 3; // JSONフラグメント修復の試行回数
 const MAX_BUFFER_TIME_MS = 30000; // 最大バッファリング時間（30秒）
+const MAX_IDENTICAL_UPDATES = 5; // 同一更新の最大許容回数
 
 // 検索ツール引数の型定義
 interface QueryArgs {
@@ -54,7 +55,9 @@ export class StreamingProcessor {
     currentToolCallIndex: null,
     contentBuffer: "",
     lastReconnectTimestamp: 0,
-    bufferingStartTime: undefined // 追加: バッファリング開始時間を追跡
+    bufferingStartTime: undefined, // バッファリング開始時間を追跡
+    lastProcessedToolCallId: "", // 最後に処理したツールコールID
+    identicalUpdateCount: 0 // 同一更新の回数カウンター
   };
   
   // 状態更新のループ検出用カウンター
@@ -72,6 +75,10 @@ export class StreamingProcessor {
   
   // JSON修復の試行回数を追跡
   private static jsonRepairAttempts: number = 0;
+  
+  // 前回のツールコールデータを記録して無限ループを検出
+  private static lastToolCallData: string = '';
+  private static toolCallUpdateCount: number = 0;
 
   /**
    * オブジェクトとしてのコンテンツかどうかを確認するタイプガード
@@ -129,6 +136,23 @@ export class StreamingProcessor {
   static updatePersistentState(newState: Partial<PersistentStreamState>): void {
     // 現在時刻を取得
     const now = Date.now();
+    
+    // 無限ループ検出: 同じツールコールIDでの更新が続く場合
+    if (newState.lastProcessedToolCallId && 
+        newState.lastProcessedToolCallId === this.persistentState.lastProcessedToolCallId) {
+      this.persistentState.identicalUpdateCount++;
+      
+      // 一定回数以上同じIDでの更新があれば無限ループとみなして状態リセット
+      if (this.persistentState.identicalUpdateCount > MAX_IDENTICAL_UPDATES) {
+        console.warn(`警告: 同じツールコールID "${newState.lastProcessedToolCallId}" で${MAX_IDENTICAL_UPDATES}回以上の更新を検出しました。状態をリセットします。`);
+        this.resetPersistentState();
+        return;
+      }
+    } else if (newState.lastProcessedToolCallId) {
+      // 異なるIDが来たらカウンターをリセット
+      this.persistentState.identicalUpdateCount = 0;
+      this.persistentState.lastProcessedToolCallId = newState.lastProcessedToolCallId;
+    }
     
     // 更新間隔をチェック - 短すぎる間隔での更新を防止
     if (now - this.lastStateUpdateTime < MIN_UPDATE_INTERVAL_MS) {
@@ -189,7 +213,9 @@ export class StreamingProcessor {
       currentToolCallIndex: null,
       contentBuffer: "",
       lastReconnectTimestamp: 0,
-      bufferingStartTime: undefined
+      bufferingStartTime: undefined,
+      lastProcessedToolCallId: "",
+      identicalUpdateCount: 0
     };
     this.stateUpdateCounter = 0;
     this.lastStateUpdateTime = 0;
@@ -197,6 +223,8 @@ export class StreamingProcessor {
     this.hasThinkingStarted = false; // 思考開始フラグをリセット
     this.lastThinkingText = ''; // 最後の思考テキストをリセット
     this.jsonRepairAttempts = 0; // JSON修復試行回数をリセット
+    this.lastToolCallData = ''; // 最後のツールコールデータをリセット
+    this.toolCallUpdateCount = 0; // ツールコール更新カウントをリセット
     console.log("永続的ストリーム状態をリセットしました");
   }
 
@@ -514,6 +542,22 @@ export class StreamingProcessor {
     // ツールコールの処理
     if (chunk.choices?.[0]?.delta?.tool_calls && chunk.choices[0].delta.tool_calls.length > 0) {
       try {
+        // 無限ループ検出: 同じツールコールデータが繰り返されていないかチェック
+        const toolCallDataStr = safeStringify(chunk.choices[0].delta.tool_calls, "{}");
+        if (toolCallDataStr === this.lastToolCallData) {
+          this.toolCallUpdateCount++;
+          
+          // 同じデータが一定回数以上繰り返される場合は、ループとみなして処理をスキップ
+          if (this.toolCallUpdateCount > MAX_IDENTICAL_UPDATES) {
+            console.warn(`警告: 同じツールコールデータが${MAX_IDENTICAL_UPDATES}回以上繰り返されました。ループを回避するため処理をスキップします。`);
+            return result;
+          }
+        } else {
+          // 新しいデータの場合はカウンターをリセットして保存
+          this.lastToolCallData = toolCallDataStr;
+          this.toolCallUpdateCount = 0;
+        }
+        
         const processResult = this.processToolCallDelta(
           chunk.choices[0].delta,
           toolCalls,
@@ -546,13 +590,27 @@ export class StreamingProcessor {
           );
         }
         
-        // 永続的な状態を更新
-        this.updatePersistentState({
-          jsonBuffer: processResult.updatedJsonBuffer,
-          isBufferingJson: processResult.updatedIsBufferingJson,
-          toolCallsInProgress: processResult.updatedToolCalls,
-          currentToolCallIndex: processResult.updatedCurrentToolCallIndex
-        });
+        // 現在のツールコールIDを記録して無限ループを検出
+        if (result.updatedCurrentToolCall && result.updatedCurrentToolCall.id) {
+          const lastProcessedToolCallId = result.updatedCurrentToolCall.id;
+          
+          // 永続的な状態を更新
+          this.updatePersistentState({
+            jsonBuffer: processResult.updatedJsonBuffer,
+            isBufferingJson: processResult.updatedIsBufferingJson,
+            toolCallsInProgress: processResult.updatedToolCalls,
+            currentToolCallIndex: processResult.updatedCurrentToolCallIndex,
+            lastProcessedToolCallId: lastProcessedToolCallId
+          });
+        } else {
+          // ツールコールIDがない場合は通常の状態更新
+          this.updatePersistentState({
+            jsonBuffer: processResult.updatedJsonBuffer,
+            isBufferingJson: processResult.updatedIsBufferingJson,
+            toolCallsInProgress: processResult.updatedToolCalls,
+            currentToolCallIndex: processResult.updatedCurrentToolCallIndex
+          });
+        }
       } catch (error) {
         console.error(`ツール呼び出し処理中にエラーが発生しました: ${getErrorMessage(error)}`);
         // エラーが発生しても処理を継続（結果はそのまま返す）
@@ -565,6 +623,14 @@ export class StreamingProcessor {
     if (chunk.choices?.[0]?.finish_reason === "tool_calls" || chunk.choices?.[0]?.finish_reason === "stop") {
       // ツール呼び出しか通常の終了が検出された場合、状態検証と必要に応じて修復を行う
       this.validateAndRepairState(result, messages);
+      
+      // 終了理由が検出されたら状態カウンターをリセットして無限ループを防止
+      this.stateUpdateCounter = 0;
+      this.toolCallUpdateCount = 0;
+      this.lastToolCallData = '';
+      
+      // 明示的な終了理由があればメッセージを即時通知
+      result.shouldYieldMessage = true;
     }
 
     return result;
@@ -626,6 +692,36 @@ export class StreamingProcessor {
         // バッファリング状態をリセット
         result.updatedIsBufferingJson = false;
         result.updatedJsonBuffer = "";
+      }
+    }
+    
+    // ツール呼び出しの検証 - 無効なツール呼び出しを削除
+    result.updatedToolCalls = result.updatedToolCalls.filter(call => {
+      // 最低限必要な情報を持っているか確認
+      const isValid = call && 
+                    call.id && 
+                    call.function && 
+                    typeof call.function.name === 'string' &&
+                    call.function.name.trim() !== '';
+      
+      if (!isValid) {
+        console.warn("無効なツール呼び出しを検出し、削除しました");
+      }
+      
+      return isValid;
+    });
+    
+    // ツール呼び出し情報の整合性チェック
+    if (result.updatedCurrentToolCallIndex !== null) {
+      // 現在のインデックスがツール呼び出し配列の範囲外の場合リセット
+      if (result.updatedCurrentToolCallIndex >= result.updatedToolCalls.length || 
+          result.updatedCurrentToolCallIndex < 0) {
+        console.warn(`無効なツール呼び出しインデックス (${result.updatedCurrentToolCallIndex}) を検出しました。リセットします。`);
+        result.updatedCurrentToolCallIndex = null;
+        result.updatedCurrentToolCall = null;
+      } else {
+        // 現在のツール呼び出しとインデックスの整合性チェック
+        result.updatedCurrentToolCall = result.updatedToolCalls[result.updatedCurrentToolCallIndex];
       }
     }
   }
@@ -1022,6 +1118,18 @@ export class StreamingProcessor {
       this.persistentState.bufferingStartTime = undefined;
     }
     
+    // 現在のツール呼び出しのインデックスが同じなら再処理を避ける（無限ループ防止）
+    if (newResult.updatedCurrentToolCallIndex === newIndex) {
+      // 現在のツール呼び出しが存在し、完全に初期化されているか確認
+      if (newResult.updatedCurrentToolCall && 
+          newResult.updatedCurrentToolCall.function && 
+          typeof newResult.updatedCurrentToolCall.function.name === 'string' &&
+          newResult.updatedCurrentToolCall.function.name.trim() !== '') {
+        console.log(`同じインデックス (${newIndex}) のツール呼び出しが再度処理されました。スキップします。`);
+        return newResult;
+      }
+    }
+    
     // インデックスを更新
     newResult.updatedCurrentToolCallIndex = newIndex;
     
@@ -1080,6 +1188,11 @@ export class StreamingProcessor {
       return newResult;
     }
     
+    // 関数名が既に設定されていて同じなら重複処理を避ける（無限ループ防止）
+    if (newResult.updatedCurrentToolCall.function.name === functionName) {
+      return newResult;
+    }
+    
     newResult.updatedCurrentToolCall.function.name = functionName;
     
     // 検索ツールの場合、デフォルトの引数を事前設定
@@ -1122,6 +1235,11 @@ export class StreamingProcessor {
     
     if (!newArgs) {
       return newResult; // 空の引数は無視
+    }
+    
+    // 現在の引数と全く同じなら重複処理を避ける（無限ループ防止）
+    if (newResult.updatedCurrentToolCall.function.arguments === newArgs) {
+      return newResult;
     }
     
     // 検索ツールの場合の特別処理
@@ -1302,6 +1420,8 @@ export class StreamingProcessor {
       }
     }
     
+    // 更新をすぐに反映
+    newResult.shouldYieldMessage = true;
     return newResult;
   }
 
@@ -1391,6 +1511,8 @@ export class StreamingProcessor {
             updatedJsonResult.updatedIsBufferingJson = false;
             this.persistentState.bufferingStartTime = undefined;
             
+            // 更新をすぐに反映
+            updatedJsonResult.shouldYieldMessage = true;
             return updatedJsonResult;
           }
         } catch (e) {
@@ -1414,6 +1536,9 @@ export class StreamingProcessor {
           newResult.updatedIsBufferingJson = false;
           this.persistentState.bufferingStartTime = undefined;
           console.log(`タイムアウトによるJSON修復: ${repairedJson}`);
+          
+          // 更新をすぐに反映
+          newResult.shouldYieldMessage = true;
         } catch (e) {
           console.warn(`JSON修復エラー: ${getErrorMessage(e)}`);
           // 修復に失敗した場合も状態をリセット
@@ -1440,6 +1565,9 @@ export class StreamingProcessor {
           newResult.updatedCurrentToolCall.function.arguments = newArgs;
         }
       }
+      
+      // 更新をすぐに反映
+      newResult.shouldYieldMessage = true;
     }
     
     return newResult;
@@ -1638,6 +1766,12 @@ export class StreamingProcessor {
     let isBufferingJson = false;
     let isReconnect = retryCount > 0;
     
+    // 処理開始時にカウンターと状態をリセット
+    this.stateUpdateCounter = 0;
+    this.toolCallUpdateCount = 0;
+    this.lastToolCallData = '';
+    this.persistentState.identicalUpdateCount = 0;
+    
     // 再接続時の状態復元
     if (isReconnect) {
       console.log(`再接続を検出: リトライカウント = ${retryCount}`);
@@ -1659,9 +1793,6 @@ export class StreamingProcessor {
     let chunkCount = 0;
     
     try {
-      // ストリーム処理開始時に状態カウンターをリセット
-      this.stateUpdateCounter = 0;
-      
       // SSEストリームを処理
       // 共通ユーティリティのstreamSseを使用してクロスプラットフォーム互換性を確保
       for await (const data of streamSse(response)) {

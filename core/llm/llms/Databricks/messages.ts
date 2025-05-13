@@ -597,8 +597,11 @@ export class MessageProcessor {
     // ツール呼び出しとツール結果の対応関係を強制する
     const validatedMessages = this.validateToolCallsAndResults(validMessages);
     
+    // ツール呼び出しシーケンスの検証
+    const sequenceValidatedMessages = this.validateToolCallSequence(validatedMessages);
+    
     // 標準化されたメッセージ形式に変換
-    return validatedMessages.map(message => {
+    return sequenceValidatedMessages.map(message => {
       const content = extractContentAsString(message.content);
       
       // 基本メッセージ構造
@@ -662,5 +665,209 @@ export class MessageProcessor {
     });
     
     return filteredMessages;
+  }
+
+  /**
+   * メッセージシーケンスの検証
+   * tool_resultブロックが対応するtool_useブロックの直後にあることを確認
+   * @param messages 検証対象のメッセージ配列
+   * @returns 修正されたメッセージ配列
+   */
+  static validateToolCallSequence(messages: ChatMessage[]): ChatMessage[] {
+    const result: ChatMessage[] = [];
+    let previousHadToolUse = false;
+    let toolUseIds: string[] = [];
+    
+    for (let i = 0; i < messages.length; i++) {
+      const message = messages[i];
+      
+      // tool_result（"tool"ロール）メッセージの場合
+      if (message.role === "tool") {
+        // 前のメッセージがtool_use（toolCallsを持つ"assistant"）でない場合
+        if (!previousHadToolUse) {
+          console.warn("Message sequence violation: tool_result without preceding tool_use");
+          // このツール結果メッセージをスキップ
+          continue;
+        }
+        
+        // ツール呼び出しIDがツールリストに含まれているかチェック
+        const toolCallId = (message as any).toolCallId;
+        if (!toolCallId || !toolUseIds.includes(toolCallId)) {
+          console.warn(`Unknown tool_call_id: ${toolCallId}. Skipping this tool result message.`);
+          continue;
+        }
+      }
+      
+      // tool_use（toolCallsを持つ"assistant"）メッセージをチェック
+      const hasToolUse = message.role === "assistant" && 
+        typeof (message as any).toolCalls !== "undefined" && 
+        Array.isArray((message as any).toolCalls) && 
+        (message as any).toolCalls.length > 0;
+      
+      if (hasToolUse) {
+        // ツール呼び出しIDを記録
+        toolUseIds = ((message as any).toolCalls || []).map((tc: any) => tc.id || "");
+        previousHadToolUse = true;
+      } else if (message.role === "user") {
+        // ユーザーメッセージが来たら、前のツール呼び出し状態をリセット
+        previousHadToolUse = false;
+        toolUseIds = [];
+      }
+      
+      // メッセージを結果に追加
+      result.push(message);
+    }
+    
+    return result;
+  }
+}
+
+/**
+ * Databricks Claude用のメッセージアダプター
+ * Databricksエンドポイントの特性に合わせてメッセージを変換する
+ */
+export class DatabricksMessageAdapter {
+  /**
+   * メッセージをDatabricks Claude形式に変換
+   * @param messages 変換するメッセージ配列
+   * @returns Databricks Claude形式に変換されたメッセージ配列
+   */
+  static formatMessages(messages: ChatMessage[]): any[] {
+    // まずメッセージシーケンスを検証して修正
+    const validatedMessages = this.validateMessageSequence(messages);
+    
+    // 各メッセージをDatabricks形式に変換
+    return validatedMessages.map(message => this.formatSingleMessage(message));
+  }
+  
+  /**
+   * メッセージシーケンスの検証
+   * tool_useとtool_resultの連鎖が正しいかチェックして修正
+   * @param messages 検証対象のメッセージ配列
+   * @returns 修正されたメッセージ配列
+   */
+  private static validateMessageSequence(messages: ChatMessage[]): ChatMessage[] {
+    const result: ChatMessage[] = [];
+    let toolUseMessage: ChatMessage | null = null;
+    let pendingToolIds: string[] = [];
+    
+    for (const message of messages) {
+      // ツール呼び出しメッセージをチェック
+      if (message.role === "assistant" && 
+          typeof (message as any).toolCalls !== "undefined" && 
+          Array.isArray((message as any).toolCalls) && 
+          (message as any).toolCalls.length > 0) {
+        
+        toolUseMessage = message;
+        pendingToolIds = ((message as any).toolCalls || []).map((tc: any) => tc.id || "");
+        result.push(message);
+        continue;
+      }
+      
+      // ツール結果メッセージをチェック
+      if (message.role === "tool") {
+        if (toolUseMessage === null) {
+          console.warn("ツール結果メッセージがありますが、先行するツール呼び出しメッセージがありません。スキップします。");
+          continue;
+        }
+        
+        // ツール呼び出しIDの確認
+        const toolCallId = (message as any).toolCallId;
+        if (!toolCallId || !pendingToolIds.includes(toolCallId)) {
+          console.warn(`対応するツール呼び出しID ${toolCallId} が見つかりません。スキップします。`);
+          continue;
+        }
+        
+        // 有効なツール結果メッセージを追加
+        result.push(message);
+        
+        // 対応済みのツールIDをリストから削除
+        pendingToolIds = pendingToolIds.filter(id => id !== toolCallId);
+        continue;
+      }
+      
+      // ユーザーメッセージの場合、ツール状態をリセット
+      if (message.role === "user") {
+        toolUseMessage = null;
+        pendingToolIds = [];
+      }
+      
+      // その他のメッセージをそのまま追加
+      result.push(message);
+    }
+    
+    return result;
+  }
+  
+  /**
+   * 単一メッセージをDatabricks形式に変換
+   * @param message 変換するメッセージ
+   * @returns Databricks形式に変換されたメッセージ
+   */
+  private static formatSingleMessage(message: ChatMessage): any {
+    // コンテンツを文字列として取得
+    const content = typeof message.content === "string" 
+      ? message.content 
+      : extractContentAsString(message.content);
+    
+    // 基本的なメッセージ構造
+    const formattedMessage: any = {
+      role: this.mapRole(message.role),
+      content: content
+    };
+    
+    // ツール結果メッセージの場合
+    if (message.role === "tool" && (message as any).toolCallId) {
+      formattedMessage.tool_call_id = (message as any).toolCallId;
+    }
+    
+    // ツール呼び出しを持つアシスタントメッセージの場合
+    if (message.role === "assistant" && (message as any).toolCalls) {
+      formattedMessage.tool_calls = ((message as any).toolCalls || []).map((tc: any) => ({
+        id: tc.id || `call_${Date.now()}`,
+        type: "function",
+        function: {
+          name: tc.function?.name || "",
+          arguments: tc.function?.arguments || "{}"
+        }
+      }));
+    }
+    
+    // 名前フィールドがある場合は追加
+    if ((message as any).name) {
+      formattedMessage.name = (message as any).name;
+    }
+    
+    return formattedMessage;
+  }
+  
+  /**
+   * ロールマッピング - 無効なロールを有効なものに変換
+   * @param role 元のロール
+   * @returns Databricksが受け付けるロール
+   */
+  private static mapRole(role: string): string {
+    // 有効なロールのリスト
+    const validRoles = ["system", "user", "assistant", "tool", "function"];
+    
+    // ロールが有効なら、そのまま返す
+    if (validRoles.includes(role)) {
+      return role;
+    }
+    
+    // 特殊なケース
+    if (role === "thinking") {
+      // thinkingは常にassistantに変換（必要に応じてsystemに変換する実装も可能）
+      return "assistant";
+    }
+    
+    // functionロールはtoolに変換
+    if (role === "function") {
+      return "tool";
+    }
+    
+    // デフォルトではassistantに変換
+    console.warn(`不明なロール「${role}」をassistantに変換します`);
+    return "assistant";
   }
 }

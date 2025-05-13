@@ -246,6 +246,9 @@ export interface PersistentStreamState {
   currentToolCallIndex: number | null;
   contentBuffer: string;
   lastReconnectTimestamp: number;
+  bufferingStartTime?: number; // バッファリング開始時間を追跡
+  lastProcessedToolCallId?: string; // 最後に処理したツールコールID
+  identicalUpdateCount?: number; // 同一更新の回数カウンター
 }
 
 /**
@@ -283,6 +286,15 @@ export interface StreamingResult {
  */
 export interface ToolCallProcessorInterface {
   preprocessToolCallsAndResults(messages: ChatMessage[]): ChatMessage[];
+  processToolArguments(args: string, toolName: string, messages: ChatMessage[]): string;
+  processToolCall(
+    toolCall: ToolCall | null,
+    currentToolCallIndex: number | null,
+    jsonBuffer: string,
+    isBufferingJson: boolean,
+    toolCallDelta: any,
+    toolCalls: ToolCall[]
+  ): ToolCallResult;
 }
 
 /**

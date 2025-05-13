@@ -60,7 +60,6 @@ export class ToolCallProcessor implements ToolCallProcessorInterface {
     );
   }
 
-  // 静的メソッドはそのまま残す - 共通の実装として使用
   /**
    * ツール呼び出しがあるメッセージの後に、対応するツール結果を含むメッセージが
    * 必ず存在するようにする前処理を行う
@@ -68,150 +67,246 @@ export class ToolCallProcessor implements ToolCallProcessorInterface {
    * @returns 前処理済みのメッセージ配列
    */
   static preprocessToolCallsAndResults(messages: ChatMessage[]): ChatMessage[] {
-    const processedMessages: ChatMessage[] = [];
-    let previousHadToolCalls = false;
-    let previousToolCalls: any[] = [];
+    if (!messages || messages.length === 0) {
+      return [];
+    }
 
+    const processedMessages: ChatMessage[] = [];
+    
+    // 直前のメッセージ内のツール呼び出しとその対応状況を追跡
+    const toolCallHistory: Map<string, boolean> = new Map();
+    
     for (let i = 0; i < messages.length; i++) {
       const currentMessage = messages[i];
       
-      // 前のメッセージがツール呼び出しを含み、現在のメッセージがアシスタントからのものである場合
-      if (previousHadToolCalls && currentMessage.role === 'assistant') {
-        // 現在のメッセージがツール結果から始まっているか確認
-        const hasToolResultsAtBeginning = hasToolResultBlocksAtBeginning(currentMessage);
-        
-        if (!hasToolResultsAtBeginning) {
-          // ツール結果を探す
-          const toolResults = this.findToolResultsForCalls(previousToolCalls, messages.slice(i));
-          
-          if (toolResults.length > 0) {
-            // ツール結果をメッセージの先頭に挿入（共通ユーティリティを使用）
-            const toolResultsContent = formatToolResultsContent(toolResults);
-            
-            // 結果を含む新しいメッセージを作成
-            const newMessage = {
-              ...currentMessage,
-              content: toolResultsContent + (currentMessage.content || '')
-            };
-            
-            processedMessages.push(newMessage);
-            previousHadToolCalls = false;
-            previousToolCalls = [];
-            continue;
-          }
-          
-          // ツール結果が見つからない場合、ダミーのツール結果を作成
-          const dummyToolResults = this.createDummyToolResults(previousToolCalls);
-          const toolResultsContent = formatToolResultsContent(dummyToolResults);
-          
-          // 結果を含む新しいメッセージを作成
-          const newMessage = {
-            ...currentMessage,
-            content: toolResultsContent + (currentMessage.content || '')
-          };
-          
-          processedMessages.push(newMessage);
-          previousHadToolCalls = false;
-          previousToolCalls = [];
-          continue;
-        }
+      // Nullチェック
+      if (!currentMessage) {
+        continue;
       }
       
-      // ユーザーメッセージの後に空のツール結果配列を追加（必要に応じて）
-      // これによりツールの呼び出し後の応答でエラーが発生するのを防ぐ
-      if (currentMessage.role === 'user' && i > 0 && messages[i-1].role === 'assistant') {
-        const prevMessage = messages[i-1] as any;
-        if (prevMessage.toolCalls && prevMessage.toolCalls.length > 0) {
-          // 現在のメッセージコンテンツにツール結果ブロックがあるか確認
-          const content = typeof currentMessage.content === 'string' ? currentMessage.content : '';
-          if (!content.trim().startsWith('<tool_result') && !content.trim().startsWith('{"role":"tool"')) {
-            // ツール呼び出しに対応するツール結果を追加
-            const dummyResults = this.createDummyToolResults(prevMessage.toolCalls);
-            const toolResultsContent = formatToolResultsContent(dummyResults);
+      // ツール結果メッセージの処理
+      if (currentMessage.role === 'tool') {
+        // ツール結果メッセージがあれば、対応するツール呼び出しを処理済みとしてマーク
+        if (currentMessage.toolCallId) {
+          toolCallHistory.set(currentMessage.toolCallId, true);
+        }
+        processedMessages.push(currentMessage);
+        continue;
+      }
+      
+      // ユーザーメッセージの処理
+      if (currentMessage.role === 'user') {
+        // 前のメッセージがアシスタント（ツール呼び出しがある可能性）で、現在のメッセージにツール結果がない場合
+        if (i > 0 && 
+            messages[i-1].role === 'assistant' && 
+            this.hasUnresolvedToolCalls(messages[i-1], toolCallHistory) && 
+            !hasToolResultBlocksAtBeginning(currentMessage)) {
+          
+          // 未解決のツール呼び出しがある場合は、それに対するツール結果を追加
+          const unresolvedToolCalls = this.getUnresolvedToolCalls(messages[i-1], toolCallHistory);
+          
+          if (unresolvedToolCalls.length > 0) {
+            // ツール結果を作成
+            const toolResults = this.createToolResults(unresolvedToolCalls);
             
-            // 結果を含む新しいメッセージを作成
+            // ツール結果を含む新しいメッセージを作成
             const newMessage = {
               ...currentMessage,
-              content: toolResultsContent + content
+              content: this.prepareToolResultContent(toolResults) + extractContentAsString(currentMessage.content)
             };
             
             // 処理済みメッセージに追加
             processedMessages.push(newMessage);
+            
+            // ツール呼び出しを処理済みとしてマーク
+            unresolvedToolCalls.forEach(toolCall => {
+              if (toolCall.id) {
+                toolCallHistory.set(toolCall.id, true);
+              }
+            });
+            
             continue;
           }
         }
+        
+        processedMessages.push(currentMessage);
+        continue;
       }
       
-      // 現在のメッセージがツール呼び出しを含むか確認
-      // any型を使用してTypeScriptの型チェックをバイパス
-      const msgAny = currentMessage as any;
-      previousHadToolCalls = !!(currentMessage.role === 'assistant' && 
-                            msgAny.toolCalls && 
-                            msgAny.toolCalls.length > 0);
-      
-      // ツール呼び出しがある場合は保存
-      if (previousHadToolCalls && msgAny.toolCalls) {
-        previousToolCalls = [...msgAny.toolCalls];
-      } else {
-        previousToolCalls = [];
+      // アシスタントメッセージの処理
+      if (currentMessage.role === 'assistant') {
+        // ツール呼び出しがあるか確認
+        const hasToolCalls = this.hasToolCalls(currentMessage);
+        
+        if (hasToolCalls) {
+          // ツール呼び出しを抽出して履歴に追加
+          const toolCalls = this.extractToolCalls(currentMessage);
+          toolCalls.forEach(toolCall => {
+            if (toolCall.id) {
+              toolCallHistory.set(toolCall.id, false); // 未解決としてマーク
+            }
+          });
+        }
+        
+        // 前のメッセージがアシスタントで、そのメッセージに未解決のツール呼び出しがある場合
+        if (i > 0 && 
+            messages[i-1].role === 'assistant' && 
+            this.hasUnresolvedToolCalls(messages[i-1], toolCallHistory) && 
+            !hasToolResultBlocksAtBeginning(currentMessage)) {
+          
+          // 未解決のツール呼び出しがある場合は、それに対するツール結果を追加
+          const unresolvedToolCalls = this.getUnresolvedToolCalls(messages[i-1], toolCallHistory);
+          
+          if (unresolvedToolCalls.length > 0) {
+            // ツール結果を作成
+            const toolResults = this.createToolResults(unresolvedToolCalls);
+            
+            // 先にダミーのユーザーメッセージを挿入してツール結果を含める
+            const dummyUserMessage: ChatMessage = {
+              role: 'user',
+              content: this.prepareToolResultContent(toolResults)
+            };
+            
+            processedMessages.push(dummyUserMessage);
+            
+            // 元のアシスタントメッセージも追加
+            processedMessages.push(currentMessage);
+            
+            // ツール呼び出しを処理済みとしてマーク
+            unresolvedToolCalls.forEach(toolCall => {
+              if (toolCall.id) {
+                toolCallHistory.set(toolCall.id, true);
+              }
+            });
+            
+            continue;
+          }
+        }
+        
+        processedMessages.push(currentMessage);
+        continue;
       }
       
-      // 通常のメッセージ処理
+      // その他のメッセージタイプはそのまま追加
       processedMessages.push(currentMessage);
+    }
+    
+    // 最後のメッセージがアシスタントで、ツール呼び出しがある場合の処理
+    const lastIndex = processedMessages.length - 1;
+    if (lastIndex >= 0 && 
+        processedMessages[lastIndex].role === 'assistant' && 
+        this.hasUnresolvedToolCalls(processedMessages[lastIndex], toolCallHistory)) {
+      
+      // 未解決のツール呼び出しがある場合は、それに対するツール結果を追加するダミーユーザーメッセージを追加
+      const unresolvedToolCalls = this.getUnresolvedToolCalls(processedMessages[lastIndex], toolCallHistory);
+      
+      if (unresolvedToolCalls.length > 0) {
+        // ツール結果を作成
+        const toolResults = this.createToolResults(unresolvedToolCalls);
+        
+        // ダミーのユーザーメッセージを追加
+        const dummyUserMessage: ChatMessage = {
+          role: 'user',
+          content: this.prepareToolResultContent(toolResults)
+        };
+        
+        processedMessages.push(dummyUserMessage);
+        
+        // ツール呼び出しを処理済みとしてマーク
+        unresolvedToolCalls.forEach(toolCall => {
+          if (toolCall.id) {
+            toolCallHistory.set(toolCall.id, true);
+          }
+        });
+      }
     }
     
     return processedMessages;
   }
 
   /**
-   * ツール呼び出しに対応するツール結果をメッセージ群から探す
-   * @param toolCalls ツール呼び出し配列
-   * @param messages 検索対象のメッセージ配列
-   * @returns 見つかったツール結果の配列
+   * ツール結果コンテンツを準備する
+   * @param toolResults ツール結果配列
+   * @returns フォーマット済みのツール結果コンテンツ
    */
-  static findToolResultsForCalls(toolCalls: any[], messages: ChatMessage[]): ToolResultMessage[] {
-    const results: ToolResultMessage[] = [];
-    
-    // 各ツール呼び出しに対して
-    for (const toolCall of toolCalls) {
-      let found = false;
-      
-      // メッセージを検索してツール結果を見つける
-      for (const message of messages) {
-        if (message.role === 'tool' && message.toolCallId === toolCall.id) {
-          results.push({
-            role: 'tool',
-            tool_call_id: toolCall.id,
-            content: typeof message.content === 'string' ? message.content : extractContentAsString(message.content)
-          });
-          found = true;
-          break;
-        }
-      }
-      
-      // 結果が見つからなかった場合はダミーの結果を作成
-      if (!found) {
-        results.push({
-          role: 'tool',
-          tool_call_id: toolCall.id,
-          content: `Tool execution pending...`
-        });
-      }
-    }
-    
-    return results;
+  private static prepareToolResultContent(toolResults: ToolResultMessage[]): string {
+    // 共通ユーティリティを使用
+    return formatToolResultsContent(toolResults);
   }
 
   /**
-   * ダミーのツール結果を作成
-   * @param toolCalls ツール呼び出し配列
-   * @returns ダミーのツール結果配列
+   * メッセージにツール呼び出しがあるかどうかを確認
+   * @param message 確認するメッセージ
+   * @returns ツール呼び出しがある場合はtrue
    */
-  static createDummyToolResults(toolCalls: any[]): ToolResultMessage[] {
+  private static hasToolCalls(message: ChatMessage): boolean {
+    // any型を使用してTypeScriptの型チェックをバイパス
+    return !!(message && message.role === 'assistant' && 
+              (message as any).toolCalls && 
+              Array.isArray((message as any).toolCalls) && 
+              (message as any).toolCalls.length > 0);
+  }
+
+  /**
+   * メッセージからツール呼び出しを抽出
+   * @param message ツール呼び出しを含むメッセージ
+   * @returns 抽出されたツール呼び出し配列
+   */
+  private static extractToolCalls(message: ChatMessage): ToolCall[] {
+    if (!message || message.role !== 'assistant') {
+      return [];
+    }
+    
+    // any型を使用してTypeScriptの型チェックをバイパス
+    const msgAny = message as any;
+    
+    if (!msgAny.toolCalls || !Array.isArray(msgAny.toolCalls) || msgAny.toolCalls.length === 0) {
+      return [];
+    }
+    
+    return [...msgAny.toolCalls];
+  }
+
+  /**
+   * メッセージに未解決のツール呼び出しがあるかどうかを確認
+   * @param message 確認するメッセージ
+   * @param toolCallHistory ツール呼び出し履歴
+   * @returns 未解決のツール呼び出しがある場合はtrue
+   */
+  private static hasUnresolvedToolCalls(message: ChatMessage, toolCallHistory: Map<string, boolean>): boolean {
+    const toolCalls = this.extractToolCalls(message);
+    
+    return toolCalls.some(toolCall => {
+      // IDが存在し、履歴にこのIDが未解決として存在する場合
+      return toolCall.id && (!toolCallHistory.has(toolCall.id) || toolCallHistory.get(toolCall.id) === false);
+    });
+  }
+
+  /**
+   * メッセージから未解決のツール呼び出しを取得
+   * @param message 確認するメッセージ
+   * @param toolCallHistory ツール呼び出し履歴
+   * @returns 未解決のツール呼び出し配列
+   */
+  private static getUnresolvedToolCalls(message: ChatMessage, toolCallHistory: Map<string, boolean>): ToolCall[] {
+    const toolCalls = this.extractToolCalls(message);
+    
+    return toolCalls.filter(toolCall => {
+      // IDが存在し、履歴にこのIDが未解決として存在する場合
+      return toolCall.id && (!toolCallHistory.has(toolCall.id) || toolCallHistory.get(toolCall.id) === false);
+    });
+  }
+
+  /**
+   * ツール呼び出しに対するツール結果を作成
+   * @param toolCalls ツール呼び出し配列
+   * @returns ツール結果の配列
+   */
+  private static createToolResults(toolCalls: ToolCall[]): ToolResultMessage[] {
     return toolCalls.map(toolCall => ({
       role: 'tool',
       tool_call_id: toolCall.id,
-      content: `Tool execution pending...`
+      content: `Tool execution result for ${toolCall.function.name || 'unknown tool'}`
     }));
   }
 

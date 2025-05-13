@@ -46,6 +46,13 @@ class Databricks extends BaseLLM {
     },
     capabilities: {
       tools: true
+    },
+    // ツール呼び出し用の設定オプションを追加
+    toolOptions: {
+      disableStreamingForToolCalls: false, // ツール呼び出し時にストリーミングを無効化するオプション
+      validateToolSequence: true,         // ツール呼び出しシーケンスの検証を有効化
+      resetStateBetweenTurns: true,       // ターン間で状態をリセット
+      maxToolsPerTurn: 5                  // 1ターンあたりの最大ツール数
     }
     // DatabricksエンドポイントがOpenAIと互換性があるが、
     // parallel_tool_callsパラメータはDatabricksエンドポイントでサポートされていないため、
@@ -98,6 +105,53 @@ class Databricks extends BaseLLM {
   }
 
   /**
+   * メッセージシーケンスを検証し、tool_resultブロックが常に対応するtool_useブロックの
+   * 後に来るようにする
+   * @param messages 検証するメッセージ配列
+   * @returns 検証済みのメッセージ配列
+   */
+  private validateToolCallSequence(messages: ChatMessage[]): ChatMessage[] {
+    // 検証済みメッセージ配列を作成
+    const validatedMessages: ChatMessage[] = [];
+    
+    // 前回のメッセージがtool_useを含んでいたか追跡
+    let previousHadToolUse = false;
+    let toolUseIds: string[] = [];
+    
+    for (const message of messages) {
+      // 現在のメッセージがtool_resultを含むか確認
+      const hasToolResult = message.role === "tool" || 
+        (typeof message.content === "string" && 
+         message.content.includes("tool_call_id"));
+      
+      // tool_resultメッセージがあるが前のメッセージにtool_useがない場合
+      if (hasToolResult && !previousHadToolUse) {
+        console.warn("Message sequence violation: tool_result without preceding tool_use");
+        // このツール結果メッセージをスキップする
+        continue;
+      }
+      
+      // 現在のメッセージがtool_useを含むか確認
+      const hasToolUse = message.role === "assistant" && 
+        typeof message.toolCalls !== "undefined" && 
+        message.toolCalls.length > 0;
+      
+      // ツールIDを追跡（後の検証用）
+      if (hasToolUse && message.toolCalls) {
+        toolUseIds = message.toolCalls.map(tc => tc.id);
+      }
+      
+      // 検証済みメッセージに追加
+      validatedMessages.push(message);
+      
+      // 次のイテレーション用に状態を更新
+      previousHadToolUse = hasToolUse;
+    }
+    
+    return validatedMessages;
+  }
+
+  /**
    * ストリーミング用の補完メソッド
    * BaseLLMのインターフェースに準拠
    */
@@ -129,6 +183,28 @@ class Databricks extends BaseLLM {
     
     // 次にツール呼び出しの前処理
     processedMessages = ToolCallProcessor.preprocessToolCallsAndResults(processedMessages);
+    
+    // メッセージシーケンスの検証を実行
+    processedMessages = this.validateToolCallSequence(processedMessages);
+
+    // ツール呼び出しがある場合にストリーミングを無効化するか判断
+    const hasToolsInRequest = options.tools && options.tools.length > 0;
+    const toolOptions = this.options.toolOptions || {};
+    
+    // ツール呼び出し時にストリーミングを無効化する設定がある場合
+    if (hasToolsInRequest && toolOptions.disableStreamingForToolCalls) {
+      console.log("ツール呼び出しがあるためストリーミングを無効化し、通常のチャット完了を使用します");
+      
+      // ストリーミングの代わりに通常のチャット完了を使用
+      try {
+        const response = await this.chatCompletion(processedMessages, signal, options);
+        yield response;
+        return;
+      } catch (error) {
+        console.error("ツール呼び出し中にエラーが発生しました:", getErrorMessage(error));
+        throw error;
+      }
+    }
     
     let retryCount = 0;
     const MAX_RETRIES = 3;
@@ -174,6 +250,71 @@ class Databricks extends BaseLLM {
         }
       }
     }
+  }
+
+  /**
+   * 通常のチャット完了メソッド
+   * ストリーミングではなく一度にレスポンスを取得する
+   * @param messages メッセージ配列
+   * @param signal AbortSignal
+   * @param options 補完オプション
+   * @returns アシスタントメッセージ
+   */
+  private async chatCompletion(
+    messages: ChatMessage[],
+    signal: AbortSignal,
+    options: CompletionOptions
+  ): Promise<ChatMessage> {
+    const args = DatabricksHelpers.convertArgs(messages, options);
+    const endpoint = this.getApiEndpoint();
+    
+    const response = await this.fetch(endpoint, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "Authorization": `Bearer ${this.apiKey}`,
+      },
+      body: JSON.stringify(args),
+      signal
+    });
+    
+    if (!response.ok) {
+      const errorText = await response.text();
+      throw new Error(`Databricks API error: ${response.status} ${errorText}`);
+    }
+    
+    const responseData = await response.json();
+    
+    // レスポンスからアシスタントメッセージを抽出
+    let assistantMessage: ChatMessage = { role: "assistant", content: "" };
+    
+    if (responseData.choices && responseData.choices.length > 0) {
+      const choice = responseData.choices[0];
+      
+      if (choice.message) {
+        // コンテンツの抽出
+        const content = choice.message.content;
+        
+        // ツール呼び出しの抽出
+        const toolCalls = choice.message.tool_calls || [];
+        
+        // アシスタントメッセージの作成
+        assistantMessage = {
+          role: "assistant",
+          content: content,
+          toolCalls: toolCalls.map((tc: any) => ({
+            id: tc.id,
+            type: tc.type,
+            function: {
+              name: tc.function.name,
+              arguments: tc.function.arguments
+            }
+          }))
+        };
+      }
+    }
+    
+    return assistantMessage;
   }
 
   /**
