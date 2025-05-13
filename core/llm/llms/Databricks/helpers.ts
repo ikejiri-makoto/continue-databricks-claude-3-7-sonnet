@@ -523,7 +523,7 @@ export class DatabricksHelpers {
     }
     
     // ストリーミングチャンクの構造をログ出力（デバッグ用）
-    console.log(`思考データ抽出: チャンク構造: ${safeStringify(chunk, "{}")}`);
+    // console.log(`思考データ抽出: チャンク構造: ${safeStringify(chunk, "{}")}`);
     
     try {
       // choices[0].delta.content[0].summary[0].text 形式 (Databricksの配列ベース形式)

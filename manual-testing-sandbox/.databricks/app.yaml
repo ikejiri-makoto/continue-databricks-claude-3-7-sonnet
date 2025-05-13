@@ -1,0 +1,8 @@
+name: SimpleStreamlitApp
+title: Simple Streamlit App
+package:
+  include:
+    - streamlit_app.py
+    - requirements.txt
+runtime: python3.10
+entrypoint: streamlit run streamlit_app.py --server.port $DATABRICKS_APP_PORT
