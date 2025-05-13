@@ -25,8 +25,6 @@ import { extractContentAsString, extractQueryContext } from "../../utils/message
 import { JsonBufferHelpers } from "../../utils/streamProcessing.js";
 import { isSearchTool, processSearchToolArguments, repairToolArguments } from "../../utils/toolUtils.js";
 
-// 独自モジュールをインポート
-
 // 定数
 const MAX_STATE_AGE_MS = 5 * 60 * 1000; // 5分
 const THINKING_LOG_INTERVAL = 10; // 10チャンクごとにログ出力
@@ -35,6 +33,7 @@ const MAX_JSON_BUFFER_SIZE = 10000; // 最大JSONバッファサイズ
 const MAX_LOOP_DETECTION_COUNT = 10; // 無限ループ検出のためのカウンター閾値
 const MIN_UPDATE_INTERVAL_MS = 100; // 最小更新間隔（ミリ秒）
 const JSON_RECOVERY_ATTEMPTS = 3; // JSONフラグメント修復の試行回数
+const MAX_BUFFER_TIME_MS = 30000; // 最大バッファリング時間（30秒）
 
 // 検索ツール引数の型定義
 interface QueryArgs {
@@ -54,7 +53,8 @@ export class StreamingProcessor {
     toolCallsInProgress: [],
     currentToolCallIndex: null,
     contentBuffer: "",
-    lastReconnectTimestamp: 0
+    lastReconnectTimestamp: 0,
+    bufferingStartTime: undefined // 追加: バッファリング開始時間を追跡
   };
   
   // 状態更新のループ検出用カウンター
@@ -154,6 +154,15 @@ export class StreamingProcessor {
         newState.jsonBuffer = newState.jsonBuffer.substring(0, MAX_JSON_BUFFER_SIZE);
       }
       
+      // バッファリング開始時間を管理
+      if (newState.isBufferingJson === true && this.persistentState.isBufferingJson === false) {
+        // バッファリングが開始される場合、時刻を記録
+        newState.bufferingStartTime = now;
+      } else if (newState.isBufferingJson === false && this.persistentState.isBufferingJson === true) {
+        // バッファリングが終了する場合、時刻をリセット
+        newState.bufferingStartTime = undefined;
+      }
+      
       // 状態を更新
       this.persistentState = {
         ...this.persistentState,
@@ -179,7 +188,8 @@ export class StreamingProcessor {
       toolCallsInProgress: [],
       currentToolCallIndex: null,
       contentBuffer: "",
-      lastReconnectTimestamp: 0
+      lastReconnectTimestamp: 0,
+      bufferingStartTime: undefined
     };
     this.stateUpdateCounter = 0;
     this.lastStateUpdateTime = 0;
@@ -551,7 +561,98 @@ export class StreamingProcessor {
       return result;
     }
 
+    // 終了理由チェック - ツール呼び出しまたは完了のマーカーを探す
+    if (chunk.choices?.[0]?.finish_reason === "tool_calls" || chunk.choices?.[0]?.finish_reason === "stop") {
+      // ツール呼び出しか通常の終了が検出された場合、状態検証と必要に応じて修復を行う
+      this.validateAndRepairState(result, messages);
+    }
+
     return result;
+  }
+
+  /**
+   * 状態を検証し必要に応じて修復する
+   * チャンク処理の最後やストリーム終了時に呼び出される
+   * 
+   * @param result 現在の処理結果
+   * @param messages メッセージ配列
+   */
+  private static validateAndRepairState(
+    result: {
+      updatedJsonBuffer: string,
+      updatedIsBufferingJson: boolean,
+      updatedCurrentToolCall: ToolCall | null,
+      updatedCurrentToolCallIndex: number | null,
+      updatedToolCalls: ToolCall[]
+    }, 
+    messages: ChatMessage[]
+  ): void {
+    // バッファリング中だがツール呼び出しがない場合
+    if (result.updatedIsBufferingJson && !result.updatedCurrentToolCall) {
+      console.warn("無効な状態: バッファリング中ですがツール呼び出しがありません。バッファをリセットします。");
+      result.updatedIsBufferingJson = false;
+      result.updatedJsonBuffer = "";
+      return;
+    }
+    
+    // まだバッファリング中の場合、完了したと見なすかどうかをチェック
+    if (result.updatedIsBufferingJson && result.updatedJsonBuffer) {
+      // バッファリングタイムアウトをチェック
+      const bufferingStartTime = this.persistentState.bufferingStartTime || Date.now() - MAX_BUFFER_TIME_MS - 1;
+      const bufferingTime = Date.now() - bufferingStartTime;
+      
+      if (bufferingTime > MAX_BUFFER_TIME_MS || result.updatedJsonBuffer.length > MAX_JSON_BUFFER_SIZE) {
+        console.warn(`バッファリングタイムアウト (${Math.round(bufferingTime / 1000)}秒) または大きすぎるバッファ (${result.updatedJsonBuffer.length}バイト)。修復処理を行います。`);
+        
+        if (result.updatedCurrentToolCall) {
+          try {
+            // 修復を試みる
+            const repairedJson = repairToolArguments(result.updatedJsonBuffer);
+            
+            // 修復されたJSONを設定
+            result.updatedCurrentToolCall.function.arguments = repairedJson;
+            
+            if (result.updatedCurrentToolCallIndex !== null && 
+                result.updatedCurrentToolCallIndex < result.updatedToolCalls.length) {
+              result.updatedToolCalls[result.updatedCurrentToolCallIndex] = result.updatedCurrentToolCall;
+            }
+            
+            console.log(`タイムアウトによる修復成功: ${repairedJson}`);
+          } catch (e) {
+            console.warn(`修復に失敗しました: ${getErrorMessage(e)}`);
+          }
+        }
+        
+        // バッファリング状態をリセット
+        result.updatedIsBufferingJson = false;
+        result.updatedJsonBuffer = "";
+      }
+    }
+  }
+
+  /**
+   * バッファリングタイムアウトが期限切れかどうかをチェック
+   * @param isBufferingJson 現在バッファリング中かどうか
+   * @param bufferingStartTime バッファリング開始時間
+   * @param jsonBuffer 現在のJSONバッファ
+   * @returns タイムアウトしている場合はtrue
+   */
+  private static hasBufferingTimeoutExpired(
+    isBufferingJson: boolean,
+    bufferingStartTime: number | undefined,
+    jsonBuffer: string
+  ): boolean {
+    // バッファリングしていない場合はタイムアウトしていない
+    if (!isBufferingJson) return false;
+    
+    // バッファリング開始時間が設定されていない場合はタイムアウトしていない
+    if (!bufferingStartTime) return false;
+    
+    // バッファリング時間を計算
+    const bufferingTime = Date.now() - bufferingStartTime;
+    
+    // 時間またはサイズによるタイムアウト条件をチェック
+    return bufferingTime > MAX_BUFFER_TIME_MS || jsonBuffer.length > MAX_JSON_BUFFER_SIZE;
   }
 
   /**
@@ -598,6 +699,29 @@ export class StreamingProcessor {
     
     // 現在のインデックスを更新
     const index = toolCallDelta.index;
+    
+    // バッファリングタイムアウトのチェック
+    // 新しいプロパティbufferingStartTimeを使用
+    const bufferingStartTime = isBufferingJson ? 
+      (this.persistentState.bufferingStartTime || Date.now()) : undefined;
+    
+    if (this.hasBufferingTimeoutExpired(isBufferingJson, bufferingStartTime, jsonBuffer)) {
+      console.warn("バッファリングタイムアウトが期限切れ。バッファ状態をリセットします。");
+      result.updatedJsonBuffer = "";
+      result.updatedIsBufferingJson = false;
+      
+      // もし現在のツールコールが存在していれば、不完全なJSONを保存
+      if (result.updatedCurrentToolCall && jsonBuffer.length > 0) {
+        try {
+          // 最後のJSON修復を試みる
+          const repairedJson = repairToolArguments(jsonBuffer);
+          result.updatedCurrentToolCall.function.arguments = repairedJson;
+          console.log(`タイムアウトによるJSON修復: ${repairedJson}`);
+        } catch (e) {
+          console.warn(`JSON修復エラー: ${getErrorMessage(e)}`);
+        }
+      }
+    }
     
     // 新しいツール呼び出しの開始または別のインデックスへの切り替え
     if (result.updatedCurrentToolCallIndex !== index) {
@@ -667,7 +791,7 @@ export class StreamingProcessor {
     }
     
     // 関数引数の更新
-    if (toolCallDelta.function?.arguments && result.updatedCurrentToolCall) {
+    if (toolCallDelta.function?.arguments !== undefined && result.updatedCurrentToolCall) {
       try {
         // 引数が文字列であることを確認
         if (typeof toolCallDelta.function.arguments === 'string') {
@@ -708,12 +832,19 @@ export class StreamingProcessor {
                 result.updatedIsBufferingJson = false;
                 this.jsonRepairAttempts = 0; // 成功したらカウンターをリセット
                 
+                // バッファリング開始時間をリセット
+                this.persistentState.bufferingStartTime = undefined;
+                
                 // ツール呼び出しを持つメッセージをyield
                 result.shouldYieldMessage = true;
                 return result;
               }
               
               // まだJSONが完成していない場合はバッファリングを継続
+              if (!result.updatedIsBufferingJson) {
+                // バッファリングを開始する場合、開始時間を記録
+                this.persistentState.bufferingStartTime = Date.now();
+              }
               result.updatedIsBufferingJson = true;
               return result;
             } catch (jsonError) {
@@ -753,6 +884,9 @@ export class StreamingProcessor {
                       result.updatedIsBufferingJson = false;
                       this.jsonRepairAttempts = 0; // 成功したらカウンターをリセット
                       
+                      // バッファリング開始時間をリセット
+                      this.persistentState.bufferingStartTime = undefined;
+                      
                       // ツール呼び出しを持つメッセージをyield
                       result.shouldYieldMessage = true;
                       return result;
@@ -773,6 +907,10 @@ export class StreamingProcessor {
                 result.updatedJsonBuffer += toolCallDelta.function.arguments;
               }
               
+              // まだバッファリング中でない場合は開始時間を記録
+              if (!result.updatedIsBufferingJson) {
+                this.persistentState.bufferingStartTime = Date.now();
+              }
               result.updatedIsBufferingJson = true;
               
               // バッファサイズをチェック - 過大なバッファを防止
@@ -879,6 +1017,9 @@ export class StreamingProcessor {
       // バッファをリセット
       newResult.updatedJsonBuffer = "";
       newResult.updatedIsBufferingJson = false;
+      
+      // バッファリング開始時間をリセット
+      this.persistentState.bufferingStartTime = undefined;
     }
     
     // インデックスを更新
@@ -1093,6 +1234,7 @@ export class StreamingProcessor {
             // バッファリング中だった場合はリセット
             newResult.updatedJsonBuffer = "";
             newResult.updatedIsBufferingJson = false;
+            this.persistentState.bufferingStartTime = undefined;
             if (process.env.NODE_ENV === 'development') {
               console.log(`JSONバッファをリセット: 完全なJSONを受信`);
             }
@@ -1190,6 +1332,10 @@ export class StreamingProcessor {
     // JSONバッファリングの処理
     if (newArgs.trim().startsWith('{') || newResult.updatedIsBufferingJson) {
       // JSONバッファリングが進行中またはJSON開始文字を検出
+      if (!newResult.updatedIsBufferingJson) {
+        // バッファリングを開始する場合、開始時間を記録
+        this.persistentState.bufferingStartTime = Date.now();
+      }
       newResult.updatedIsBufferingJson = true;
       
       // 既存のバッファが有効なJSONを含むか確認
@@ -1243,12 +1389,37 @@ export class StreamingProcessor {
             // バッファをリセット
             updatedJsonResult.updatedJsonBuffer = "";
             updatedJsonResult.updatedIsBufferingJson = false;
+            this.persistentState.bufferingStartTime = undefined;
             
             return updatedJsonResult;
           }
         } catch (e) {
           // まだ不完全なJSONなのでバッファリングを続ける
           console.warn(`JSON解析エラー（バッファリング継続）: ${getErrorMessage(e)}`);
+        }
+      }
+      
+      // バッファリングタイムアウトのチェック
+      if (this.hasBufferingTimeoutExpired(newResult.updatedIsBufferingJson, 
+                                         this.persistentState.bufferingStartTime, 
+                                         newResult.updatedJsonBuffer)) {
+        console.warn("バッファリングタイムアウトが期限切れ。バッファを修復して適用します。");
+        try {
+          // バッファを修復して適用
+          const repairedJson = repairToolArguments(newResult.updatedJsonBuffer);
+          newResult.updatedCurrentToolCall.function.arguments = repairedJson;
+          
+          // バッファをリセット
+          newResult.updatedJsonBuffer = "";
+          newResult.updatedIsBufferingJson = false;
+          this.persistentState.bufferingStartTime = undefined;
+          console.log(`タイムアウトによるJSON修復: ${repairedJson}`);
+        } catch (e) {
+          console.warn(`JSON修復エラー: ${getErrorMessage(e)}`);
+          // 修復に失敗した場合も状態をリセット
+          newResult.updatedJsonBuffer = "";
+          newResult.updatedIsBufferingJson = false;
+          this.persistentState.bufferingStartTime = undefined;
         }
       }
     } else {
@@ -1343,6 +1514,9 @@ export class StreamingProcessor {
       }
     }
 
+    // バッファリング開始時間をリセット
+    this.persistentState.bufferingStartTime = undefined;
+    
     // 永続的な状態をリセット
     this.resetPersistentState();
 
@@ -1535,7 +1709,7 @@ export class StreamingProcessor {
                   // もし配列形式でなければ、思考モード対応の構造に変換
                   currentMessage = this.createThinkingModeAssistantMessage(
                     currentContentAsString,
-                    this.lastThinkingText || "思考プロセスを完了しました。",
+                    this.lastThinkingText || "思考処理を完了しました。",
                     undefined,
                     this.processToolCallsForOutput(toolCalls)
                   );
@@ -1605,7 +1779,7 @@ export class StreamingProcessor {
         if (this.hasThinkingStarted) {
           finalMessage = this.createThinkingModeAssistantMessage(
             finalMessageContent,
-            this.lastThinkingText || "思考プロセスを完了しました。",
+            this.lastThinkingText || "思考処理を完了しました。",
             undefined,
             this.processToolCallsForOutput(toolCalls)
           );

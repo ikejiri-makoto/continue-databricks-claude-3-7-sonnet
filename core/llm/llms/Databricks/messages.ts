@@ -594,8 +594,11 @@ export class MessageProcessor {
     // まずthinkingロールを持つメッセージを処理（変換または除外）し、その他の無効なロールを修正
     const validMessages = this.validateAndFixMessageRoles(messages, options);
     
+    // ツール呼び出しとツール結果の対応関係を強制する
+    const validatedMessages = this.validateToolCallsAndResults(validMessages);
+    
     // 標準化されたメッセージ形式に変換
-    return validMessages.map(message => {
+    return validatedMessages.map(message => {
       const content = extractContentAsString(message.content);
       
       // 基本メッセージ構造
@@ -611,5 +614,53 @@ export class MessageProcessor {
       
       return formattedMessage;
     });
+  }
+
+  /**
+   * メッセージ配列を検証し、ツール呼び出しメッセージの後に対応するツール結果メッセージが存在することを確認する
+   * 対応関係が不正な場合は、ツール結果メッセージをスキップする
+   * 
+   * @param messages 検証対象のメッセージ配列
+   * @returns 検証済みのメッセージ配列
+   */
+  static validateToolCallsAndResults(messages: ChatMessage[]): ChatMessage[] {
+    const result: ChatMessage[] = [];
+    let toolCallsById: Record<string, boolean> = {};
+    
+    // まず、すべてのツール呼び出しを収集
+    for (const message of messages) {
+      // ツール呼び出しを持つメッセージを処理
+      if (message.role === "assistant" && this.messageHasToolCalls(message)) {
+        const toolCalls = (message as any).toolCalls || [];
+        
+        // 各ツール呼び出しIDを登録
+        for (const toolCall of toolCalls) {
+          if (toolCall.id) {
+            toolCallsById[toolCall.id] = true;
+          }
+        }
+      }
+      
+      // メッセージを結果配列に追加
+      result.push(message);
+    }
+    
+    // 対応するツール呼び出しのないツール結果メッセージをフィルタリング
+    const filteredMessages = result.filter(message => {
+      // ツール結果メッセージの場合、対応するツール呼び出しが存在するか確認
+      if (message.role === "tool") {
+        const toolCallId = (message as any).toolCallId;
+        
+        // 対応するツール呼び出しがない場合はスキップ
+        if (!toolCallId || !toolCallsById[toolCallId]) {
+          console.warn(`対応するツール呼び出しが見つからないため、ツール結果メッセージをスキップします: ${toolCallId}`);
+          return false;
+        }
+      }
+      
+      return true;
+    });
+    
+    return filteredMessages;
   }
 }
