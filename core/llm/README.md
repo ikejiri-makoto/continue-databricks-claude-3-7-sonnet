@@ -104,7 +104,6 @@ Comprehensive error handling system:
 - State preservation during retries for streaming operations
 - Connection error recovery with session resumption
 - Type-safe error handling with dedicated interfaces
-- Transient error detection and automatic recovery
 - Generic retry mechanisms with customizable strategies
 
 ### Claude 3.7 Sonnet Thinking Mode Support
@@ -210,12 +209,26 @@ Agent mode allows LLMs to use tools to accomplish tasks. To enable Agent support
    static defaultOptions: Partial<LLMOptions> = {
      // ...
      capabilities: {
-       tool_use: true
+       tools: true // The valid property for tools support
      }
    };
    ```
 
 The framework automatically detects and enables Agent functionality for supported models like Claude 3.5/3.7, GPT-4, and others through the auto-detection system.
+
+### ModelCapability Interface
+
+When implementing LLM providers, ensure you only use valid properties of the ModelCapability interface:
+
+```typescript
+// Valid properties for ModelCapability
+capabilities: {
+  tools: boolean,        // Whether the model supports tool functions
+  uploadImage: boolean   // Whether the model supports image uploads
+}
+```
+
+Note that properties like `chat` or `thinking` are NOT part of the ModelCapability interface and will cause build errors if used.
 
 ### Enhanced Agent Capabilities
 
@@ -378,7 +391,7 @@ async function withRetry<T>(
     } catch (error: unknown) {
       retryCount++;
       
-      if (retryCount > maxRetries || !isTransientError(error)) {
+      if (retryCount > maxRetries || !isConnectionError(error)) {
         throw error;
       }
       
@@ -390,6 +403,8 @@ async function withRetry<T>(
   }
 }
 ```
+
+Note: The above example has been updated to use the `isConnectionError` function which exists in the utils/errors.js module, rather than the non-existent `isTransientError` function.
 
 ### Type Safety
 

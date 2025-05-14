@@ -11,27 +11,91 @@ https://adb-xxxxxxxxxxxxxxxxx.x.azuredatabricks.net/chat/completions
 
 This directory contains the implementation for connecting Continue VS Code extension to Databricks LLM services, particularly Claude 3.7 Sonnet. It enables access to Databricks-hosted models for code completion, explanation, refactoring, and other features within the Continue extension.
 
-## 注意: TS2307: Cannot find module '../../config.js' エラーについて
+## 設定の適切な実装方法
 
-**エラー解決方法**:
-Anthropic.tsでのビルドエラー `Cannot find module '../../config.js'` が発生した場合は、以下の対応が必要です:
+### TS2307: Cannot find module '../../config.js' エラーの解決
 
-1. **config.js のインポート削除**:
+**主な問題**: Anthropic.tsでのビルドエラー `Cannot find module '../../config.js'` が発生した場合、設定の読み込み方法に問題があります。
+
+**正しい実装方法**: config.yamlからapiBaseとapiKeyを適切に取得するには、以下の方法を使用してください：
+
+1. **js-yamlのインポート追加**:
    ```typescript
-   // このインポート文を削除する
-   import { config } from "../../config.js";
+   import * as yaml from 'js-yaml';
    ```
 
-2. **apiBase の直接設定**:
+2. **constructor内での設定読み込み**:
+   ```typescript
+   constructor(options: LLMOptions) {
+     super(options);
+     
+     // config.yamlからapiBaseとapiKeyを読み込む
+     try {
+       // config.yamlへのパスを設定
+       const configPath = path.resolve(process.cwd(), 'config.yaml');
+       
+       if (fs.existsSync(configPath)) {
+         const configContent = fs.readFileSync(configPath, 'utf8');
+         const config = yaml.load(configContent) as Record<string, any>;
+         
+         // Anthropic設定を取得
+         const anthropicConfig = config?.llms?.anthropic || {};
+         
+         // apiBaseの設定
+         if (anthropicConfig.apiBase) {
+           this.apiBase = anthropicConfig.apiBase;
+           console.log("Loaded apiBase from config.yaml:", this.apiBase);
+         }
+         
+         // apiKeyの設定
+         if (anthropicConfig.apiKey) {
+           this.apiKey = anthropicConfig.apiKey;
+           console.log("Loaded apiKey from config.yaml");
+         }
+       }
+     } catch (error) {
+       console.error('Error loading config.yaml:', error);
+     }
+     
+     // config.yamlに設定がない場合は環境変数を使用
+     if (!this.apiBase || this.apiBase === "") {
+       this.apiBase = process.env.ANTHROPIC_API_BASE || "https://api.anthropic.com/v1/messages";
+     }
+     
+     if (!this.apiKey || this.apiKey === "") {
+       this.apiKey = process.env.ANTHROPIC_API_KEY || "";
+     }
+   }
+   ```
+
+3. **config.js依存の削除**:
+   - 間違った方法（削除すべき）:
+     ```typescript
+     // このインポート文を削除する
+     import { config } from "../../config.js";
+     ```
+
+4. **fallback用デフォルト値の設定**:
    ```typescript
    static defaultOptions: Partial<LLMOptions> = {
-     // ...
-     // 以下のように直接URLを指定する
-     apiBase: "https://adb-1981899174914086.6.azuredatabricks.net/serving-endpoints/databricks-claude-3-7-sonnet/invocations",
+     model: "claude-3-7-sonnet-20250219",
+     contextLength: 200_000,
+     completionOptions: {
+       model: "claude-3-7-sonnet-20250219",
+       maxTokens: 64000,         // 固定値: 64000
+       temperature: 1,           // 固定値: 1 (思考モード有効時は必須)
+       reasoning: true           // 思考モードを有効化
+     },
+     apiBase: "", // constructorで適切に設定されるためここでは空文字列を指定
    };
    ```
 
-これにより、不要なconfig依存を削除し、エンドポイントを直接指定することができます。
+このアプローチの利点:
+- config.yamlから直接設定を読み込める
+- 環境変数をフォールバックとして使用
+- js-yamlライブラリを使って適切にYAMLをパース
+- 適切なエラーハンドリングと安全なフォールバック
+- apiBaseとapiKeyの両方を統一的に管理
 
 Toolを使う場合のdatabricks-claude-3-7-sonnetへのリクエストとレスポンス形式は以下の階層になります。
 === REQUEST ===
@@ -588,17 +652,18 @@ For streaming responses in thinking mode, the implementation uses a specialized 
  * @returns Extracted thinking text and signature, or null
  */
 private static extractThinkingData(chunk: StreamingChunk): { text: string; signature?: string } | null {
-  if (!chunk?.choices?.[0]?.delta?.content) {
+  // If no chunk or no choices, return null
+  if (!chunk?.choices?.[0]?.delta) {
     return null;
   }
   
-  // Process content as array
-  const content = chunk.choices[0].delta.content;
+  // Get delta content
+  const delta = chunk.choices[0].delta;
   
-  if (Array.isArray(content) && content.length > 0) {
-    const firstContent = content[0];
+  // Check for the array-based content structure - primary path for Databricks endpoints
+  if (delta.content && Array.isArray(delta.content) && delta.content.length > 0) {
+    const firstContent = delta.content[0];
     
-    // Check for "reasoning" type with summary array
     if (typeof firstContent === 'object' && 
         firstContent !== null && 
         firstContent.type === "reasoning" && 
@@ -607,7 +672,6 @@ private static extractThinkingData(chunk: StreamingChunk): { text: string; signa
       
       const summaryItem = firstContent.summary[0];
       
-      // Check for "summary_text" type with text
       if (typeof summaryItem === 'object' && 
           summaryItem !== null && 
           summaryItem.type === "summary_text" && 
@@ -621,7 +685,41 @@ private static extractThinkingData(chunk: StreamingChunk): { text: string; signa
     }
   }
   
-  // Additional fallback processing...
+  // Check for alternative paths using object-based content with summary property
+  if (delta.content && typeof delta.content === 'object' && !Array.isArray(delta.content)) {
+    // Try content.summary.text path
+    if (delta.content.summary?.text) {
+      return {
+        text: delta.content.summary.text,
+        signature: delta.signature || undefined
+      };
+    }
+  }
+  
+  // Check for reasoning property (Databricks endpoint specific)
+  if (delta.reasoning) {
+    if (typeof delta.reasoning === 'string') {
+      return { text: delta.reasoning };
+    } else if (typeof delta.reasoning === 'object' && delta.reasoning !== null) {
+      // Try reasoning.summary.text
+      if (delta.reasoning.summary?.text) {
+        return {
+          text: delta.reasoning.summary.text,
+          signature: delta.reasoning.signature || undefined
+        };
+      }
+      // Try reasoning.text
+      if (delta.reasoning.text) {
+        return {
+          text: delta.reasoning.text,
+          signature: delta.reasoning.signature || undefined
+        };
+      }
+    }
+  }
+  
+  // If no thinking data found, return null
+  return null;
 }
 ```
 

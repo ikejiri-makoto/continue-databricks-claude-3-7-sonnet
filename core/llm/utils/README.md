@@ -22,14 +22,13 @@ Error handling utilities that:
 - Define custom error types for LLM-related operations
 - Provide standardized error handling patterns
 - Help classify and respond to various error conditions from LLM providers
-- Support transient error detection for intelligent retry decisions
 
 **Key functions:**
 - `getErrorMessage(error: unknown): string` - Safely extracts error messages from various error types
 - `isConnectionError(error: unknown): boolean` - Identifies network-related errors for retry decisions
-- `isTransientError(error: unknown): boolean` - Identifies temporary errors that are suitable for retry attempts
 - `BaseStreamingError` - Interface for common error structure
-- `LLMError` - Base class for all LLM-specific errors
+
+**Important Note**: While the codebase might reference an `isTransientError()` function in some examples, this function is not currently implemented in errors.ts. Until it's implemented, use other error handling approaches for transient errors.
 
 ### `json.ts`
 JSON processing utilities that:
@@ -294,10 +293,10 @@ function handleContentUpdate(
 }
 ```
 
-### Robust Error Handling with Retry Logic
+### Robust Error Handling
 
 ```typescript
-import { getErrorMessage, isConnectionError, isTransientError } from "./errors";
+import { getErrorMessage, isConnectionError } from "./errors";
 import { safeJsonParse } from "./json";
 
 async function callApiWithRetry<T>(
@@ -324,8 +323,8 @@ async function callApiWithRetry<T>(
       retryCount++;
       const errorMessage = getErrorMessage(error);
       
-      // Only retry if it's a transient error and we haven't exceeded max retries
-      if (retryCount <= maxRetries && isTransientError(error)) {
+      // Only retry if it's a connection error and we haven't exceeded max retries
+      if (retryCount <= maxRetries && isConnectionError(error)) {
         // Exponential backoff
         const backoffTime = Math.min(1000 * Math.pow(2, retryCount - 1), 30000);
         console.log(`Retry ${retryCount}/${maxRetries} after ${backoffTime}ms: ${errorMessage}`);
@@ -353,7 +352,7 @@ async function withRetry<T>(
     } catch (error: unknown) {
       retryCount++;
       
-      if (retryCount > maxRetries || !isTransientError(error)) {
+      if (retryCount > maxRetries || !isConnectionError(error)) {
         throw error;
       }
       
@@ -421,6 +420,22 @@ function createToolResults(toolCalls: ToolCall[]): string {
   return formatToolResultsContent(toolResults);
 }
 ```
+
+## ModelCapability Interface and Valid Properties
+
+When using the ModelCapability interface in LLM provider implementations, make sure to only use the valid properties:
+
+```typescript
+// Valid properties of ModelCapability
+capabilities: {
+  tools: boolean,       // Whether the model supports tools/functions
+  uploadImage: boolean  // Whether the model supports image uploads
+}
+```
+
+The `ModelCapability` interface does NOT include:
+- ❌ `chat`: This is not a valid property and will cause build errors
+- ❌ `thinking`: While some models support thinking mode, this is not a valid property in the interface
 
 ## Utilizing Modular Design in Streaming Processors
 
@@ -676,29 +691,6 @@ function tryFixBrokenBooleanJson(text: string): string {
 
 This function is particularly useful for fixing JSON errors in streaming contexts where boolean values may be truncated.
 
-### String Literal Escaping Fix (May 2025)
-
-A major issue related to string literal escaping in JSON handling functions has been resolved. The problem occurred due to improperly escaped double quotes (`\"`) in TypeScript files, which caused compilation errors. The fix:
-
-- Replaced improper `\"` escapes with proper unescaped quotes in single quote literals
-- Used a consistent string delimiter approach (single quotes for strings containing double quotes)
-- Fixed backslash escaping in regular expressions
-- Improved handling of JSON strings containing special characters
-
-This fix ensures that the utilities work correctly across different build environments and prevents TypeScript compilation errors. This is particularly important for the `json.ts` utility file, which is used across all LLM integrations.
-
-```typescript
-// BEFORE: Problematic escaped quotes (causes TypeScript errors)
-if (!text || typeof text !== 'string' || text.trim() === \"\") {
-  return null;
-}
-
-// AFTER: Proper string literal syntax
-if (!text || typeof text !== 'string' || text.trim() === "") {
-  return null;
-}
-```
-
 ### Type-Safe Error Handling for Unknown Types (May 2025)
 
 Improved the error handling pattern to ensure type safety when dealing with unknown error types:
@@ -788,7 +780,7 @@ if (maybeIndex !== null) {
 Consistent error handling across the codebase:
 
 ```typescript
-import { getErrorMessage, isConnectionError, isTransientError } from "./errors";
+import { getErrorMessage, isConnectionError } from "./errors";
 
 try {
   // API call or other operation
@@ -797,60 +789,10 @@ try {
   const errorMessage = getErrorMessage(error);
   
   // Decide if retry is appropriate
-  if (isTransientError(error)) {
-    // Handle transient error - perhaps retry
+  if (isConnectionError(error)) {
+    // Handle connection error - perhaps retry
   } else {
-    // Handle permanent errors
-  }
-}
-```
-
-#### State-Aware Error Handling
-
-When working with streaming or stateful operations, include state information in error results:
-
-```typescript
-import { getErrorMessage, isConnectionError } from "./errors";
-
-interface ErrorResult<T> {
-  success: boolean;
-  error: Error;
-  state: T;  // Always include state property for all error patterns
-}
-
-function handleProcessingError<T>(error: unknown, currentState: T): ErrorResult<T> {
-  const errorMessage = getErrorMessage(error);
-  
-  if (isTransientError(error)) {
-    // For transient errors, preserve current state
-    return {
-      success: false,
-      error: error instanceof Error ? error : new Error(errorMessage),
-      state: { ...currentState }  // Copy current state
-    };
-  } else {
-    // For permanent errors, also include state property but use initial values
-    return {
-      success: false,
-      error: error instanceof Error ? error : new Error(errorMessage),
-      state: createInitialState<T>()  // Function to create initial state
-    };
-  }
-}
-
-// Usage example
-try {
-  // Processing operation
-} catch (error: unknown) {
-  const result = handleProcessingError(error, currentState);
-  
-  if (result.success === false) {
-    // Display error message
-    console.error(`Error occurred: ${result.error.message}`);
-    
-    // Use error state for recovery
-    const recoveryState = result.state;
-    // Recovery process...
+    // Handle other types of errors
   }
 }
 ```
@@ -962,20 +904,14 @@ To maximize code reuse and maintain clear responsibility boundaries:
     - `extractContentAsString` for handling message content properly
     - `streamSse` for streaming response handling
 
-12. **String Literal Best Practices**:
-    - Use single quotes for strings containing double quotes and vice versa
-    - Only escape quotes when they would otherwise terminate the string
-    - Use template literals for complex strings with interpolation
-    - Be careful with backslashes in string literals - double them in regular expressions
-
-13. **Type-Safe Error Handling**:
+12. **Type-Safe Error Handling**:
     - Add explicit `unknown` type annotations in catch blocks
     - Use `getErrorMessage` to safely extract error information
     - Never directly access properties on unknown error types
     - Use type guards to narrow error types when needed
-    - Leverage `isConnectionError` and similar utilities for error classification
+    - Leverage `isConnectionError` for error classification
 
-14. **Type Guard Functions for Safe Property Access**:
+13. **Type Guard Functions for Safe Property Access**:
     - Use type guard functions to safely check object properties and narrow types
     - Create specialized type guards for different data structures
     - Use TypeScript's "is" type predicate for effective type narrowing
